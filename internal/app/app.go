@@ -425,6 +425,28 @@ func (a *App) StartServer() error {
 	return a.serveLocked(a.cfg.Listen.Addr())
 }
 
+// newHTTPServer 构造主 HTTP 服务（抽出成纯函数，便于单测直接断言超时配置）。
+//
+// IdleTimeout 必须**显式**设置（R47）：Go 的 http.Server 在 IdleTimeout == 0 时会
+// 回退到 ReadTimeout，而本服务也没设 ReadTimeout ⇒ keep-alive 连接永不超时，
+// 何时关闭完全由客户端决定，半死连接会长期留在两端连接池里被反复取用。
+//
+// 2026-10-21 生产现象：DSH 经本网关的请求「发出去了但网关零日志」，客户端无限等待，
+// 重启网关即恢复；同一时刻换官方模型正常（走另一套 host/连接池）⇒ 指向客户端
+// 复用到了一条对端已关闭 / half-open 的 keep-alive 连接。
+// 证据：窗口期 17:38:41–17:52:08 共 13 分 27 秒，网关只有 /api/state 轮询、无任何业务请求，
+// 而同进程的 /api/state 一直 200（说明 listener 健康，不是进程假死）。
+//
+// 取值 60s：远大于单次请求耗时（实测正常 2–9s；流式长回答每次写都会续命，不受影响），
+// 同时给网关一个主动回收上界，让半死连接按时退场。
+func newHTTPServer(h http.Handler) *http.Server {
+	return &http.Server{
+		Handler:           h,
+		ReadHeaderTimeout: 30 * time.Second,
+		IdleTimeout:       60 * time.Second,
+	}
+}
+
 // serveLocked 在 newAddr 上启动新服务并切换；调用方需持有 a.mu。
 func (a *App) serveLocked(addr string) error {
 	// 地址未变时直接复用现有 listener：否则「先 Listen 再 Shutdown 旧」在同端口上
@@ -443,10 +465,7 @@ func (a *App) serveLocked(addr string) error {
 	if err != nil {
 		return err
 	}
-	srv := &http.Server{
-		Handler:           a.serveHandler(),
-		ReadHeaderTimeout: 30 * time.Second,
-	}
+	srv := newHTTPServer(a.serveHandler())
 	a.httpSrv = srv
 	a.listenAddr = addr
 	go func() {
