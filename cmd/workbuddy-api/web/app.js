@@ -2339,8 +2339,9 @@ function renderStats(s) {
   handleToasts(s.toasts || []);
 }
 
-// 平台表（今日情况主视图）：列 = #/平台/账号/当前积分/今日收入/今日消耗(净值)/今日Token/
-// 今日到期/明日到期/7日内到期，末行合计。「今日消耗」= 差值花费 − 积分包到期作废（净值才是真消耗）。
+// 平台表（今日情况主视图）：列 = #/平台/账号/当前积分/今日收入/今日消耗(净值)/今日作废/
+// 今日Token/今日到期/明日到期/7日内到期，末行合计。
+// 「今日消耗」= 差值花费 − 积分包到期作废（净值才是真消耗），「今日作废」即被扣掉的那部分。
 // 合计行取全池口径，与顶部汇总横条严格同源（合计 == 横条可互相印证）。
 function renderPlatformTable(s) {
   const rows = s.platforms || [];
@@ -2352,6 +2353,7 @@ function renderPlatformTable(s) {
     `<span class="st-plat-credits">当前积分</span>` +
     `<span class="st-plat-in">今日收入</span>` +
     `<span class="st-plat-out" title="花费差值扣除积分包到期作废后的净消耗">今日消耗</span>` +
+    `<span class="st-plat-expd" title="今日因积分包到期/回收而作废的额度（已从今日消耗中扣除）">今日作废</span>` +
     `<span class="st-plat-tokens">今日消耗Token</span>` +
     `<span class="st-plat-exp">今日到期</span>` +
     `<span class="st-plat-exp">明日到期</span>` +
@@ -2365,6 +2367,7 @@ function renderPlatformTable(s) {
       stPlatNum("st-plat-credits", r.credits, "分") +
       stPlatNum("st-plat-in", r.credit_in) +
       stPlatNum("st-plat-out", r.credit_used) +
+      stPlatNum("st-plat-expd", r.credit_expired, "分") +
       stPlatTok(r.tokens) +
       stPlatNum("st-plat-exp", r.expire_today, "分") +
       stPlatNum("st-plat-exp", r.expire_tomorrow, "分") +
@@ -2379,6 +2382,7 @@ function renderPlatformTable(s) {
     stPlatNum("st-plat-credits", s.total_credits, "分") +
     stPlatNum("st-plat-in", s.credit_in) +
     stPlatNum("st-plat-out", s.credit_used) +
+    stPlatNum("st-plat-expd", s.credit_expired, "分") +
     stPlatTok(s.tokens) +
     stPlatNum("st-plat-exp", s.expire_today, "分") +
     stPlatNum("st-plat-exp", s.expire_tomorrow, "分") +

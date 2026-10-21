@@ -48,6 +48,10 @@ func New() *Client {
 // NewWithTimeout 指定上游 HTTP 超时；配置连接池。
 func NewWithTimeout(timeout time.Duration) *Client {
 	tr := &http.Transport{
+		// 自动读取环境变量中的代理配置（HTTP_PROXY / HTTPS_PROXY / NO_PROXY）。
+		// 不设时 Go 默认行为就是 ProxyFromEnvironment，但显式 Transport 会覆盖默认值，
+		// 故必须在这里补上——否则自建 Transport 的渠道永远不走代理。
+		Proxy:               http.ProxyFromEnvironment,
 		MaxIdleConns:        100,
 		MaxIdleConnsPerHost: 20,
 		IdleConnTimeout:     90 * time.Second,
@@ -56,7 +60,7 @@ func NewWithTimeout(timeout time.Duration) *Client {
 	return &Client{
 		HTTP:        &http.Client{Timeout: timeout, Transport: tr},
 		StreamHTTP:  &http.Client{Transport: tr}, // 共用 Transport，不设 Timeout
-		IdleTimeout: idle.DefaultTimeout,          // 流中空闲监控兜底（见 internal/idle）
+		IdleTimeout: idle.DefaultTimeout,         // 流中空闲监控兜底（见 internal/idle）
 		Base:        OpenAPIBase,
 		Gateway:     GatewayBase,
 	}

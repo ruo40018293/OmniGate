@@ -230,7 +230,7 @@ func convertResponsesItems(items []any) ([]any, error) {
 			}
 			out = append(out, map[string]any{
 				"role": "tool", "tool_call_id": callID,
-				"content": stringifyOutput(item["output"]),
+				"content": toolContentValue(item["output"]),
 			})
 			continue
 		}
@@ -259,7 +259,7 @@ func convertResponsesItems(items []any) ([]any, error) {
 			}
 		case "tool":
 			callID := firstNonEmpty(asString(item["tool_call_id"]), asString(item["call_id"]))
-			out = append(out, map[string]any{"role": "tool", "tool_call_id": callID, "content": flattenText(item["content"])})
+			out = append(out, map[string]any{"role": "tool", "tool_call_id": callID, "content": toolContentValue(item["content"])})
 		default: // user 及其他未知角色一律按 user 处理
 			if content := convertResponsesContent(item["content"]); content != nil {
 				out = append(out, map[string]any{"role": "user", "content": content})
@@ -311,18 +311,10 @@ func convertResponsesContent(content any) any {
 					blocks = append(blocks, map[string]any{"type": "text", "text": t})
 				}
 			case "input_image", "image_url", "image":
-				url := asString(part["image_url"])
-				if url == "" { // 部分客户端用嵌套对象
-					if m, ok := part["image_url"].(map[string]any); ok {
-						url = asString(m["url"])
-					}
-				}
-				if url == "" {
-					url = asString(part["url"])
-				}
+				url, detail := imagePartURL(part)
 				if url != "" {
 					hasImg = true
-					blocks = append(blocks, map[string]any{"type": "image_url", "image_url": map[string]any{"url": url}})
+					blocks = append(blocks, imageURLBlock(url, detail))
 				}
 			}
 		}

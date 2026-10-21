@@ -538,8 +538,10 @@ func main() {
 		ErrThreshold:      cfg.Cooldown.ErrThresh,
 		ErrCooldown:       cfg.ErrCooldownDur,
 		MaxRotate:         cfg.MaxRotate,
-		WebUI:             sub,
-		AttachAPI:         appInst.HandleAPI,
+		// 入站请求体上限（0 = 默认 128MiB，见 server.DefaultMaxRequestBody）。
+		MaxRequestBody: int64(cfg.Server.MaxRequestBodyMB) << 20,
+		WebUI:          sub,
+		AttachAPI:      appInst.HandleAPI,
 	})
 
 	// 两层结构：外层兼容层只接管三个新端点，其余（含 /v1/chat/completions、Web UI、

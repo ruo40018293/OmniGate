@@ -197,6 +197,15 @@ type Config struct {
 		TimeoutSeconds int `json:"timeout_seconds"` // 默认 120
 	} `json:"upstream"`
 
+	// Server 入站 HTTP 服务参数。
+	Server struct {
+		// MaxRequestBodyMB 入站请求体上限（MiB）。0 = 默认 128。
+		// 为什么要给到这么高：无状态客户端（Codex）每轮把整段历史原样重放，
+		// 多张截图的 base64 会线性累积；gateway 转发前会把图缩到 1568px/JPEG，
+		// 所以这个上限只需容纳**客户端原始体**，不代表上游会收到这么大的包。
+		MaxRequestBodyMB int `json:"max_request_body_mb,omitempty"`
+	} `json:"server"`
+
 	// Compat 三接口兼容层（OpenAI Responses / Anthropic Messages）配置。
 	// 零值即关闭模型名映射，仅接受 "channel/model" 形式。
 	Compat struct {
@@ -477,6 +486,17 @@ func (c *Config) normalize() error {
 	}
 	if c.Upstream.TimeoutSeconds <= 0 {
 		c.Upstream.TimeoutSeconds = 120
+	}
+	// 入站请求体上限：0 = 默认；负数归零，过小/过大一律钳到合理区间
+	//（下限 8MiB 沿用历史最低值，上限 1024MiB 防手滑写成天文数字把内存撑爆）。
+	if c.Server.MaxRequestBodyMB < 0 {
+		c.Server.MaxRequestBodyMB = 0
+	}
+	if c.Server.MaxRequestBodyMB > 0 && c.Server.MaxRequestBodyMB < 8 {
+		c.Server.MaxRequestBodyMB = 8
+	}
+	if c.Server.MaxRequestBodyMB > 1024 {
+		c.Server.MaxRequestBodyMB = 1024
 	}
 	// 临期阈值：默认 24h，下限 24h（日期粒度的到期判定低于一天没有意义）。
 	if c.Schedule.ExpiringThresholdHours <= 0 {

@@ -656,6 +656,7 @@ code.about-repo:active { transform: translateY(1px); }
 #mtabStats .st-plat-out,
 #mtabStats .st-plat-tokens,
 #mtabStats .st-plat-exp,
+#mtabStats .st-plat-expd,
 #mtabStats .st-plat-no,
 #mtabStats .st-sum-val,
 #mtabStats .st-token .st-tk-val,
@@ -721,7 +722,8 @@ code.about-repo:active { transform: translateY(1px); }
 #mtabStats .st-plat-row.st-plat-head .st-plat-in,
 #mtabStats .st-plat-row.st-plat-head .st-plat-out,
 #mtabStats .st-plat-row.st-plat-head .st-plat-tokens,
-#mtabStats .st-plat-row.st-plat-head .st-plat-exp {
+#mtabStats .st-plat-row.st-plat-head .st-plat-exp,
+#mtabStats .st-plat-row.st-plat-head .st-plat-expd {
   color: #a1a1aa;
   font-size: 11.5px;
   font-weight: 500;
@@ -735,12 +737,14 @@ code.about-repo:active { transform: translateY(1px); }
 #mtabStats .st-plat-in,
 #mtabStats .st-plat-out,
 #mtabStats .st-plat-tokens,
-#mtabStats .st-plat-exp { font-size: 11.5px; }
+#mtabStats .st-plat-exp,
+#mtabStats .st-plat-expd { font-size: 11.5px; }
 #mtabStats .st-plat-credits { color: var(--text); font-size: 12px; font-weight: 600; }
 #mtabStats .st-plat-in { color: var(--ok); }
 #mtabStats .st-plat-out { color: var(--warn); }
 #mtabStats .st-plat-tokens { color: #52525b; }
 #mtabStats .st-plat-exp { color: #52525b; }
+#mtabStats .st-plat-expd { color: #52525b; }
 #mtabStats .st-plat-exp.st-risk { color: var(--danger); font-weight: 600; }
 /* 零值置灰（放各列配色之后，靠后覆盖） */
 #mtabStats .st-plat-zero { color: #c8ccd4; font-weight: 400; }

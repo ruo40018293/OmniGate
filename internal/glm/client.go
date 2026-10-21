@@ -68,6 +68,10 @@ type cachedToken struct {
 func New() *Client {
 	dialer := &net.Dialer{Timeout: 10 * time.Second, KeepAlive: 15 * time.Second}
 	tr := &http.Transport{
+		// 自动读取环境变量中的代理配置（HTTP_PROXY / HTTPS_PROXY / NO_PROXY）。
+		// 不设时 Go 默认行为就是 ProxyFromEnvironment，但显式 Transport 会覆盖默认值，
+		// 故必须在这里补上——否则自建 Transport 的渠道永远不走代理。
+		Proxy:                 http.ProxyFromEnvironment,
 		DialContext:           dialer.DialContext,
 		TLSNextProto:          make(map[string]func(string, *tls.Conn) http.RoundTripper),
 		TLSHandshakeTimeout:   10 * time.Second,
@@ -568,10 +572,10 @@ func (c *Client) FetchMemberInfo(a *auth.Auth) (MemberInfo, error) {
 		return MemberInfo{}, err
 	}
 	var m struct {
-		LeftScore    int64  `json:"left_score"`
-		LeftToken    int64  `json:"left_token"`
-		ScoreRule    string `json:"score_rule"`
-		IsMember     bool   `json:"is_member"`
+		LeftScore int64  `json:"left_score"`
+		LeftToken int64  `json:"left_token"`
+		ScoreRule string `json:"score_rule"`
+		IsMember  bool   `json:"is_member"`
 	}
 	if err := json.Unmarshal(raw, &m); err != nil {
 		return MemberInfo{}, fmt.Errorf("glm: 解析 member_info 失败: %w", err)

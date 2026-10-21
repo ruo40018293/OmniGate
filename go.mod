@@ -7,4 +7,7 @@ require (
 	golang.org/x/sys v0.47.0
 )
 
-require github.com/godbus/dbus/v5 v5.1.0 // indirect
+require (
+	github.com/godbus/dbus/v5 v5.1.0 // indirect
+	golang.org/x/image v0.24.0 // indirect
+)
