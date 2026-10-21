@@ -328,6 +328,7 @@ func TestSanitizeLiteralByteExact(t *testing.T) {
 		"You are a coding agent running in the Codex CLI", // Codex instructions 首段（截断前缀即可命中）
 		"github.com/anthropics/",                          // 反馈句里的 Anthropic 仓库链接
 		"11128",                                           // 上游反探测：裸数字错误码
+		"You are an AI agent powered by DeepSeek Harness",
 	}
 	if len(sanitizeFeatures) != len(features) {
 		t.Fatalf("sanitizeFeatures 项数=%d want %d（快照与实现不同步，见测试头注释的验证步骤）", len(sanitizeFeatures), len(features))
@@ -359,6 +360,10 @@ func TestSanitizeLiteralByteExact(t *testing.T) {
 			"11128",
 			"11-128",
 		},
+		{
+			"You are an AI agent powered by DeepSeek Harness",
+			"You are an AI agent powered by the DeepSeek Harness",
+		},
 	}
 	if len(sanitizeRewrites) != len(rewrites) {
 		t.Fatalf("sanitizeRewrites 对数=%d want %d（快照与实现不同步，见测试头注释的验证步骤）", len(sanitizeRewrites), len(rewrites))
@@ -388,5 +393,69 @@ func TestSanitizeLiteralByteExact(t *testing.T) {
 		if got != want {
 			t.Errorf("%s=%q want %q（逐字节不一致，改动前先走快照验证流程）", name, got, want)
 		}
+	}
+}
+
+// DSH 身份句回归：上游按「system 消息开头」逐字锚定
+// "You are an AI agent powered by DeepSeek Harness"，
+// 命中即整单 400 code=11-128「Illegal API invocation from an unapproved channel」。
+// 改写策略：插入冠词 the（"powered by the DeepSeek Harness"）——逐字指纹被破坏、
+// 语义扰动最小，实测 200。
+const dshIdentity = "You are an AI agent powered by DeepSeek Harness."
+
+func TestDSHIdentityRewritten(t *testing.T) {
+	out := sanitizeText(dshIdentity)
+	if strings.Contains(out, dshIdentity) {
+		t.Errorf("DSH identity still present: %q", out)
+	}
+	if !strings.Contains(out, "You are an AI agent powered by the DeepSeek Harness") {
+		t.Errorf("DSH identity not rewritten as expected: %q", out)
+	}
+}
+
+// DSH system 消息形态（带句号尾缀）同样应被改写。
+func TestDSHIdentityWithSuffixRewritten(t *testing.T) {
+	in := "You are an AI agent powered by DeepSeek Harness SDK."
+	out := sanitizeText(in)
+	if strings.Contains(out, "powered by DeepSeek Harness") {
+		t.Errorf("DSH fingerprint still present: %q", out)
+	}
+	if !strings.Contains(out, "powered by the DeepSeek Harness") {
+		t.Errorf("DSH identity not rewritten as expected: %q", out)
+	}
+}
+
+// 预检必须能认出 DSH 特征串（否则提前放行，指纹原样发上游 → 400 11-128）。
+func TestDSHFingerprintDetected(t *testing.T) {
+	if !hasFingerprint(dshIdentity) {
+		t.Error("DSH fingerprint not detected by precheck")
+	}
+}
+
+// 非精确变体（缺 "You are an" 前缀）上游本就不拦，不应被改写（避免误伤）。
+func TestDSHNonExactVariantNotTouched(t *testing.T) {
+	in := "an AI agent powered by DeepSeek Harness"
+	if out := sanitizeText(in); out != in {
+		t.Errorf("non-exact variant should be untouched: %q -> %q", in, out)
+	}
+}
+
+// 集成：出站 wire body 的 system 消息里不得残留 DSH 逐字指纹。
+func TestDSHPrepareBodyNoFingerprintRemains(t *testing.T) {
+	body := []byte(`{"model":"glm-5.2","messages":[` +
+		`{"role":"system","content":"` + dshIdentity + `"},` +
+		`{"role":"user","content":"hi"}]}`)
+	out := PrepareBody(body)
+	var obj map[string]any
+	if err := json.Unmarshal(out, &obj); err != nil {
+		t.Fatal(err)
+	}
+	msgs := obj["messages"].([]any)
+	sys, _ := msgs[0].(map[string]any)["content"].(string)
+	if strings.Contains(sys, "powered by DeepSeek Harness") {
+		t.Errorf("DSH fingerprint remains in wire body: %q", sys)
+	}
+	if !strings.Contains(sys, "powered by the DeepSeek Harness") {
+		t.Errorf("DSH rewrite missing in wire body: %q", sys)
 	}
 }

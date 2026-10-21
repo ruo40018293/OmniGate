@@ -51,6 +51,9 @@ docs/*
 # 临时文件
 temp/
 
+# WorkBuddy 本地工作记忆（AI 助手的项目工作日志，属本地开发态，不应进公开仓库）
+.workbuddy/
+
 # IDE
 .idea/
 .vscode/

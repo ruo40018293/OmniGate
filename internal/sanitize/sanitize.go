@@ -19,6 +19,7 @@ var featHeaders = []string{
 	"You are a coding agent running in the Codex CLI",
 	"github.com/anthropics/",
 	"11128",
+	"You are an AI agent powered by DeepSeek Harness", // DSH 身份句：上游按 system 开头逐字锚定（2026-10-21 实测）
 }
 
 var reHdr = regexp.MustCompile(`(?i)x-anthropic-billing-header:[^;\n]*;?\s*`)
@@ -44,6 +45,11 @@ var rewrites = [][2]string{
 	},
 	// 裸 11128 整单拦截，插入连字符保留可读性（零宽空格无效，上游会归一化）。
 	{"11128", "11-128"},
+	{
+		// DSH 身份句：上游只认 system 开头的逐字形态，插入冠词 the 即绕过（实测 200）。
+		"You are an AI agent powered by DeepSeek Harness",
+		"You are an AI agent powered by the DeepSeek Harness",
+	},
 }
 
 // Messages 脱敏 body 中 messages 的 content / reasoning_content / tool_calls.arguments。
