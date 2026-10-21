@@ -8,6 +8,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"workbuddy-api/internal/provider"
 )
 
 // TestRetryableStatus 仅 5xx 可重试；4xx 一律不重试（风控/余额/参数语义）。
@@ -157,5 +159,85 @@ func TestChatStreamGivesUpAfterMax(t *testing.T) {
 	}
 	if calls != retryMaxAttempts {
 		t.Fatalf("want %d attempts, got %d", retryMaxAttempts, calls)
+	}
+}
+
+// TestModelBusyDetect 「模型繁忙」（429 + 14003）识别：只看 429，且要命中标记。
+func TestModelBusyDetect(t *testing.T) {
+	cases := []struct {
+		status int
+		body   string
+		want   bool
+	}{
+		{429, `{"code":14003,"msg":"too many requests"}`, true},
+		{429, `{"code":14003,"msg":"Model busy. Please switch models or retry later"}`, true},
+		{429, `{"code":14003,"displayMsg":{"zh":"模型繁忙，请换模型或稍后重试"}}`, true},
+		{429, `{"code":14103,"msg":"too many requests"}`, false}, // 其它限流码不在此列
+		{400, `{"code":14003}`, false},                           // 非 429 不归此类
+		{200, `{"code":14003}`, false},
+	}
+	for _, c := range cases {
+		if got := modelBusy(c.status, []byte(c.body)); got != c.want {
+			t.Errorf("modelBusy(%d,%q) = %v, want %v", c.status, c.body, got, c.want)
+		}
+	}
+}
+
+// TestChatStreamRetriesModelBusy 「模型繁忙」应自动重试并在上游恢复后成功：
+// 官方 Electron 客户端遇到 14003 就是立刻重试，网关不能一次 429 就把模型冻住。
+func TestChatStreamRetriesModelBusy(t *testing.T) {
+	var calls int
+	srv := testServer(func(w http.ResponseWriter, r *http.Request, n int) {
+		calls = n
+		if n < 3 {
+			w.WriteHeader(http.StatusTooManyRequests)
+			_, _ = w.Write([]byte(`{"code":14003,"msg":"too many requests","displayMsg":{"zh":"模型繁忙，请稍后重试"}}`))
+			return
+		}
+		w.Header().Set("Content-Type", "text/event-stream")
+		_, _ = w.Write([]byte("data: {\"id\":\"x\",\"choices\":[]}\n\ndata: [DONE]\n\n"))
+	})
+	defer srv.Close()
+	c := NewWithBase(srv.URL)
+	rc, status, _, err := c.ChatStream(testAuth(), []byte(`{"model":"deepseek-v4.1-flash","messages":[]}`))
+	if err != nil {
+		t.Fatalf("err = %v", err)
+	}
+	if status != 200 || rc == nil {
+		t.Fatalf("want 200 after retry, got status=%d rc=%v calls=%d", status, rc, calls)
+	}
+	rc.Close()
+	if calls != 3 {
+		t.Fatalf("expect 3 attempts (2 x 14003 + 1 ok), got %d", calls)
+	}
+}
+
+// TestChatStreamModelBusyExhaustedPassthrough 重试耗尽后仍是 14003：
+// 原文透传（Classify=passthrough），不升级为账号/模型级惩罚。
+func TestChatStreamModelBusyExhaustedPassthrough(t *testing.T) {
+	var calls int
+	body := `{"code":14003,"msg":"too many requests"}`
+	srv := testServer(func(w http.ResponseWriter, r *http.Request, n int) {
+		calls = n
+		w.WriteHeader(http.StatusTooManyRequests)
+		_, _ = w.Write([]byte(body))
+	})
+	defer srv.Close()
+	c := NewWithBase(srv.URL)
+	_, status, gotBody, err := c.ChatStream(testAuth(), []byte(`{"model":"deepseek-v4.1-flash","messages":[]}`))
+	if err != nil {
+		t.Fatalf("err = %v", err)
+	}
+	if status != 429 {
+		t.Fatalf("want 429, got %d", status)
+	}
+	if string(gotBody) != body {
+		t.Fatalf("body = %s", gotBody)
+	}
+	if calls != retryMaxAttempts {
+		t.Fatalf("want %d attempts, got %d", retryMaxAttempts, calls)
+	}
+	if kind := Classify(status, string(gotBody)); kind != provider.ErrPassthrough {
+		t.Fatalf("Classify = %s, want passthrough", kind)
 	}
 }

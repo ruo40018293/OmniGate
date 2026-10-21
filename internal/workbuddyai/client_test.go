@@ -170,6 +170,9 @@ func TestClassify(t *testing.T) {
 		// issue #53：按**模型**限流（6004 / "switch to the other models"）→ 请求级透传，
 		// 不按账号级冷却（否则该账号其它可用模型一起被拖下水）。
 		{429, "usage exceeds frequency limit ... switch to the other models to continue", "passthrough"},
+		// 「模型繁忙」（429 + code=14003）：共享免费池瞬时饱和 → 请求级透传，
+		// 不得按模型冷却（否则一次 429 冻住整分钟，官方客户端同一时刻却可用）。
+		{429, `{"code":14003,"msg":"too many requests","displayMsg":{"zh":"模型繁忙，请换模型或稍后重试"}}`, "passthrough"},
 		{429, "our gateway is closed currently", "soft_rate"},
 		{404, "", "not_found"},
 		{500, "", "server"},

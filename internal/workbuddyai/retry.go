@@ -15,6 +15,7 @@ import (
 	"errors"
 	"math/rand"
 	"net"
+	"net/http"
 	"strings"
 	"time"
 )
@@ -23,7 +24,37 @@ import (
 const (
 	retryMaxAttempts = 3
 	retryBaseDelay   = 400 * time.Millisecond
+	// busyBaseDelay 「模型繁忙」的重试基准：比 5xx 网关抖动略长，
+	// 因为上游是按共享免费池容量放行，间隔太密只是再撞一次。
+	busyBaseDelay = 500 * time.Millisecond
 )
+
+// modelBusyMarkers 共享免费池饱和的响应标记（HTTP 429 + code=14003 / "Model busy"）。
+var modelBusyMarkers = []string{`"code":14003`, "model busy", "模型繁忙"}
+
+// modelBusy 判断响应是否为「模型繁忙」型限流。
+//
+// 实测（2026-10-20 15:00–15:02，账号 e0f0b910 + deepseek-v4.1-flash）：
+//   - 同一请求分别用官方 5.8.4 全套头与网关修复后的头，两者都既可能 200 也可能 429；
+//   - 固定 8 秒间隔连发 5 次，结果为 429/200/429/200/200。
+//
+// 即 14003 与「请求头是否像官方客户端」无关，是免费模型池的瞬时容量波动。
+// 官方 Electron 客户端遇到它同样是立刻重试，故本层也重试；但**不得**据此冷却
+// 模型 60s——否则上游的瞬时抖动会被放大成整分钟的 no_healthy_account
+// （2026-10-20 14:50–15:00 实测：14:50/14:52/14:58 各一次 429 把 deepseek-v4.1-flash
+// 连续冻住，而同一时刻官方客户端可用）。
+func modelBusy(status int, body []byte) bool {
+	if status != http.StatusTooManyRequests {
+		return false
+	}
+	s := strings.ToLower(string(body))
+	for _, m := range modelBusyMarkers {
+		if strings.Contains(s, m) {
+			return true
+		}
+	}
+	return false
+}
 
 // retryableStatus 判断 HTTP 状态码是否值得重试。
 // 仅 5xx 网关/服务端错误可重试；4xx 明确不重试。
@@ -63,6 +94,14 @@ func retryableErr(err error) bool {
 // backoff 第 attempt 次重试前的等待时长（指数退避 + 抖动，避免请求对齐）。
 func backoff(attempt int) time.Duration {
 	d := retryBaseDelay << (attempt - 1)
+	// 抖动 ±40%
+	jitter := time.Duration(rand.Int63n(int64(d/2+1))) - d/4
+	return d + jitter
+}
+
+// busyBackoff 「模型繁忙」第 attempt 次重试前的等待时长（指数退避 + 抖动）。
+func busyBackoff(attempt int) time.Duration {
+	d := busyBaseDelay << (attempt - 1)
 	// 抖动 ±40%
 	jitter := time.Duration(rand.Int63n(int64(d/2+1))) - d/4
 	return d + jitter

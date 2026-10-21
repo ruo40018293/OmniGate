@@ -73,8 +73,8 @@ type catalogCache struct {
 	colors  map[string]string
 	fetched time.Time
 
-	v3      []catalogModel // /v3/config 全量模型面（不过滤）
-	v3OK    bool           // v3 探测是否成功过（失败不写缓存，避免负缓存住坏结果）
+	v3        []catalogModel // /v3/config 全量模型面（不过滤）
+	v3OK      bool           // v3 探测是否成功过（失败不写缓存，避免负缓存住坏结果）
 	v3Fetched time.Time
 }
 
@@ -447,6 +447,13 @@ func Classify(status int, body string) provider.ErrKind {
 	}
 	// 429 优先于 hardRule：限流 body 高频带 "quota exceeded"。
 	if status == http.StatusTooManyRequests {
+		// 「模型繁忙」（429 + code=14003 / "Model busy"）：共享免费池瞬时饱和，
+		// 与请求头、账号健康都无关（实测见 retry.go:modelBusy）。
+		// 归为请求级透传：客户端拿到 429 自行退避即可，**不得**冷却模型 60s——
+		// 那会把瞬时抖动放大成整分钟的 no_healthy_account（issue #53 同款坑）。
+		if modelBusy(status, []byte(body)) {
+			return provider.ErrPassthrough
+		}
 		// 上游按**模型**限流（6004 / "switch to the other models"）：属请求级拒绝，
 		// **不得**按账号级冷却——否则该账号上其它还能用的模型一起被拖下水
 		// （issue #53：A 的 deepseek-v4.1-flash 撞每日上限后，A 的 gpt-5.6-luna 也不能用）。

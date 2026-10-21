@@ -30,7 +30,7 @@ type Client struct {
 	// IdleTimeout 聊天 SSE 流中空闲超时（StreamHTTP 无总时长上限，靠本字段兜底
 	// 「上游中途卡死」）。<=0 表示禁用（测试用）。
 	IdleTimeout time.Duration
-	Base       string // 默认 https://www.workbuddy.ai
+	Base        string // 默认 https://www.workbuddy.ai
 }
 
 // New 生产默认。配置连接池减少 TLS 握手。
@@ -51,7 +51,7 @@ func NewWithTimeout(timeout time.Duration) *Client {
 	return &Client{
 		HTTP:        &http.Client{Timeout: timeout, Transport: tr},
 		StreamHTTP:  &http.Client{Transport: tr}, // 共用 Transport（连接池复用），不设 Timeout
-		IdleTimeout: idle.DefaultTimeout,          // 流中空闲监控兜底（见 internal/idle）
+		IdleTimeout: idle.DefaultTimeout,         // 流中空闲监控兜底（见 internal/idle）
 		Base:        WBAIHost,
 	}
 }
@@ -101,8 +101,12 @@ func chatHeaders(req *http.Request, a *auth.Auth) {
 	}
 	req.Header.Set("X-Domain", wbaiDomain)
 	injectAttributionWBAI(req)
-	// 会话头族
+	// 会话头族。X-Conversation-ID 是上游「渠道校验」的必填项（R44）：
+	// 缺它一律 400 code=11-128「request illegal / 不是官方客户端发出」，
+	// 与其值格式无关（UUID 与 36/32 位 hex 均通过，与另两个会话头同值也通过）。
+	// 官方客户端见 app.asar 的 applyGatewayHeaders：三头齐全。
 	mid := newMessageIDWBAI()
+	req.Header.Set("X-Conversation-ID", mid)
 	req.Header.Set("X-Conversation-Request-ID", mid)
 	req.Header.Set("X-Conversation-Message-ID", mid)
 	req.Header.Set("X-Request-ID", mid)
@@ -247,13 +251,18 @@ func (c *Client) RefreshToken(a *auth.Auth) error {
 // 仅传输层失败才返回 err。
 //
 // 对网关类 5xx（502/503/504）与瞬态传输错误做有限重试（见 retry.go）；
-// 4xx 不重试（风控/余额/参数语义，重试无益）。
+// 对「模型繁忙」（429 + code=14003）额外重试两次（官方客户端同款行为）；
+// 其余 4xx 不重试（风控/余额/参数语义，重试无益）。
 func (c *Client) ChatStream(a *auth.Auth, body []byte) (rc io.ReadCloser, status int, respBody []byte, err error) {
 	prepared := PrepareBody(body)
 	for attempt := 1; attempt <= retryMaxAttempts; attempt++ {
 		rc, status, respBody, err = c.chatStreamOnce(a, prepared)
-		// 成功或 4xx：直接返回，不重试
-		if err == nil && !retryableStatus(status) {
+		// 「模型繁忙」（429 + 14003）是共享免费池的瞬时容量波动：官方客户端同样
+		// 立即重试，因此本层也重试；重试耗尽后由 Classify 判为 passthrough 原文回客户端，
+		// **不**进入模型级冷却（详见 retry.go:modelBusy 的实测记录）。
+		busy := err == nil && modelBusy(status, respBody)
+		// 成功，或不可重试的 4xx：直接返回
+		if err == nil && !retryableStatus(status) && !busy {
 			return rc, status, respBody, nil
 		}
 		// 传输层错误：仅在可重试时继续
@@ -264,10 +273,14 @@ func (c *Client) ChatStream(a *auth.Auth, body []byte) (rc io.ReadCloser, status
 			break
 		}
 		why := fmt.Sprintf("http %d", status)
+		wait := backoff(attempt)
+		if busy {
+			why = "upstream 模型繁忙(14003)"
+			wait = busyBackoff(attempt)
+		}
 		if err != nil {
 			why = err.Error()
 		}
-		wait := backoff(attempt)
 		log.Printf("workbuddyai chat_stream uid=%s: %s，%v 后重试 (%d/%d)",
 			a.UID, truncate(why, 80), wait.Round(time.Millisecond), attempt, retryMaxAttempts)
 		time.Sleep(wait)
