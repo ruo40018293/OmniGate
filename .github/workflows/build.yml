@@ -149,12 +149,17 @@ jobs:
       # 因此这里不需要改 release 逻辑，dmg 会自动进入 release 资产。
       # 版本号来自 internal/app/app.go 的 Version 常量，workflow 里拿不到，故用通配符；
       # 带 goarch 限定，确保只匹配本矩阵项自己那个架构的 dmg。
+      #
+      # ⚠️ 通配前缀必须与 build/macos/build-app.sh 的 APP_NAME 一致（当前 WorkBuddyAPI）。
+      # 曾写成 `WildWork-*`（项目改名前的旧名），导致匹配不到任何文件、
+      # upload-artifact 因 if-no-files-found: error 而失败 → macOS job 挂 →
+      # release job 被 needs 跳过 → tag 推了却没有任何 release（v0.1.1/v0.1.2 均踩过）。
       - name: Upload macOS .dmg
         if: matrix.pack_app
         uses: actions/upload-artifact@v4
         with:
           name: ${{ matrix.name }}-dmg
-          path: dist/WildWork-*-${{ matrix.goarch }}.dmg
+          path: dist/WorkBuddyAPI-*-${{ matrix.goarch }}.dmg
           if-no-files-found: error
 
   release:
