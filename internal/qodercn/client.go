@@ -7,10 +7,12 @@
 package qodercn
 
 import (
+	"bufio"
 	"bytes"
 	"crypto/tls"
 	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log"
@@ -35,6 +37,11 @@ type Client struct {
 	// IdleTimeout 聊天 SSE 流中空闲超时（StreamHTTP 无总时长上限，靠本字段兜底
 	// 「上游中途卡死」）。<=0 表示禁用（测试用）。
 	IdleTimeout time.Duration
+	// FirstByteTimeout 首帧看门狗：响应头已到但 body 迟迟不给数据的判定阈值。
+	// 上游排队时把 body 挂住（实测 180s 才吐 10605 排队帧），官方客户端此时显示
+	// 「排队中/预计等待 N 秒」；网关不能陪等，超阈值即按排队处理并熔断该模型。
+	// <=0 表示禁用（测试用）。见 queue.go 与 AGENTS.md R46。
+	FirstByteTimeout time.Duration
 
 	// modelMap 客户端名（display_name 规范化）→ 上游 model key；
 	// cache 为最近一次成功拉取的完整模型表（无静态兜底，仅此缓存）。
@@ -45,7 +52,20 @@ type Client struct {
 	// utMu 保护 uid→userType 实测缓存（登录后/首次请求时填充）。
 	utMu      sync.RWMutex
 	userTypes map[string]string
+
+	// queueMu 保护「排队熔断」窗口：观察到上游 10605 排队后，在该模型上短时快速失败，
+	// 避免每个请求都陪上游挂 180 秒（详见 queue.go 与 AGENTS.md R46）。
+	queueMu    sync.Mutex
+	queueUntil map[string]time.Time
+	queueInfo  map[string]*QueueError
 }
+
+// defaultFirstByteTimeout 首帧看门狗默认阈值。
+//
+// 取值依据（2026-10-21 实测）：本渠道正常请求 firstTokenDuration≈338ms，
+// 而排队时上游把 body 挂住整整 180 秒才吐 10605。30 秒既远大于正常首帧
+// （含长思考模型的首帧），又能在排队时把「等 180 秒」压到「等 30 秒后 429」。
+const defaultFirstByteTimeout = 30 * time.Second
 
 // New 生产默认。Qoder gateway 对 HTTP/2 不友好（stream INTERNAL_ERROR），强制 HTTP/1.1。
 func New() *Client {
@@ -65,13 +85,14 @@ func NewWithTimeout(timeout time.Duration) *Client {
 		TLSNextProto:        map[string]func(string, *tls.Conn) http.RoundTripper{}, // 强制 HTTP/1.1
 	}
 	return &Client{
-		HTTP:        &http.Client{Timeout: timeout, Transport: tr},
-		StreamHTTP:  &http.Client{Transport: tr}, // 共用 Transport，不设 Timeout
-		IdleTimeout: idle.DefaultTimeout,         // 流中空闲监控兜底（见 internal/idle）
-		Base:        OpenAPIBase,
-		Gateway:     GatewayBase,
-		modelMap:    map[string]string{},
-		userTypes:   map[string]string{},
+		HTTP:             &http.Client{Timeout: timeout, Transport: tr},
+		StreamHTTP:       &http.Client{Transport: tr}, // 共用 Transport，不设 Timeout
+		IdleTimeout:      idle.DefaultTimeout,         // 流中空闲监控兜底（见 internal/idle）
+		FirstByteTimeout: defaultFirstByteTimeout,     // 首帧看门狗（排队识别，R46）
+		Base:             OpenAPIBase,
+		Gateway:          GatewayBase,
+		modelMap:         map[string]string{},
+		userTypes:        map[string]string{},
 	}
 }
 
@@ -302,6 +323,15 @@ func (c *Client) ChatStream(a *auth.Auth, body []byte) (rc io.ReadCloser, status
 		modelKey = clientName
 	}
 
+	// 排队熔断命中：直接快速失败，不陪上游挂 180 秒。
+	// retry_after 给「剩余秒数」而非固定值，客户端退避才准。
+	if q, remain := c.queueBlocked(clientName); q != nil {
+		retryAfter := int(remain.Seconds() + 0.5)
+		log.Printf("qodercn chat_stream uid=%s model=%s: 排队熔断中，快速返回 429（%s，剩余 %ds）",
+			a.UID, clientName, q.Error(), retryAfter)
+		return nil, http.StatusTooManyRequests, queuedBody(clientName, q, retryAfter), nil
+	}
+
 	// 思考开关：reasoning_effort 或 thinking:{type:"enabled"} → 启用推理
 	enableReasoning := false
 	if reqOpenAI.ReasoningEffort != "" {
@@ -345,11 +375,58 @@ func (c *Client) ChatStream(a *auth.Auth, body []byte) (rc io.ReadCloser, status
 		resp.Body.Close()
 		log.Printf("qodercn chat_stream uid=%s model=%s: upstream %d body=%s",
 			a.UID, modelKey, resp.StatusCode, truncate(string(raw), 200))
+		// HTTP 级排队快速拒绝（R46 第三路径）：同样写熔断窗口，后续重试毫秒级失败。
+		if q := parseQueueBody(raw); q != nil {
+			c.rememberQueue(clientName, q)
+		}
 		return nil, resp.StatusCode, raw, nil
 	}
+	// 首帧看门狗（R46）：上游排队时响应头立刻返回、body 挂住（实测 180s 后才吐
+	// 10605 排队帧），官方客户端此时显示「排队中·预计等待 N 秒」。网关不能陪等——
+	// 在首个字节到达前设阈值，超时即按排队快速失败并短时熔断该模型。
+	// 注意只在「首字节之前」计时：首帧到达后面交 idle.Monitor 管空闲（R35/#42）。
+	br := bufio.NewReaderSize(resp.Body, 64*1024)
+	if c.FirstByteTimeout > 0 {
+		peeked := make(chan error, 1)
+		go func() {
+			_, perr := br.Peek(1) // 阻塞到有任何字节或错误
+			peeked <- perr
+		}()
+		timer := time.NewTimer(c.FirstByteTimeout)
+		defer timer.Stop()
+		select {
+		case perr := <-peeked:
+			if perr != nil {
+				cancel()
+				resp.Body.Close()
+				log.Printf("qodercn chat_stream uid=%s model=%s: 上游无首帧即结束: %v", a.UID, modelKey, perr)
+				return nil, http.StatusBadGateway, []byte(`{"error":{"message":"upstream closed before first frame","type":"upstream_error","code":"upstream_empty"}}`), nil
+			}
+		case <-timer.C:
+			cancel()
+			resp.Body.Close()
+			q := &QueueError{ModelKey: modelKey, Hang: true}
+			c.rememberQueueFor(clientName, q, queueHangWindow)
+			retryAfter := int(queueHangWindow.Seconds())
+			log.Printf("qodercn chat_stream uid=%s model=%s: 首帧看门狗超时 %v，按排队处理并熔断 %v",
+				a.UID, clientName, c.FirstByteTimeout, queueHangWindow)
+			return nil, http.StatusTooManyRequests, queuedBody(clientName, q, retryAfter), nil
+		}
+	}
 	// 成功分支：cancel 所有权交给 idle.Monitor（其 Close 会 cancel；静默超时也会 cancel）。
-	return idle.Monitor(resp.Body, c.IdleTimeout, cancel), resp.StatusCode, nil, nil
+	// 用 br 包一层，保证已被 Peek 进缓冲的首帧不会丢。
+	return idle.Monitor(&bufferedBody{Reader: br, body: resp.Body}, c.IdleTimeout, cancel), resp.StatusCode, nil, nil
 }
+
+// bufferedBody 把 bufio.Reader（含预读缓冲）与底层 body 合成一个 ReadCloser，
+// Close 只关底层一次。
+type bufferedBody struct {
+	Reader *bufio.Reader
+	body   io.ReadCloser
+}
+
+func (b *bufferedBody) Read(p []byte) (int, error) { return b.Reader.Read(p) }
+func (b *bufferedBody) Close() error               { return b.body.Close() }
 
 // modelEntry 按 key 找缓存中的模型条目（构造 model_config 全字段用）；找不到返回 nil（auto 兜底）。
 func (c *Client) modelEntry(key string) *ModelEntry {
@@ -454,7 +531,13 @@ func (c *Client) Classify(status int, body string) provider.ErrKind { return Cla
 // Stream 实现 provider.Upstream（嵌套 SSE → 标准 OpenAI SSE 透传）。
 // model 为客户端请求的模型名，直接注入每个 chunk（上游恒为 "auto"）。
 func (c *Client) Stream(w http.ResponseWriter, r io.Reader, model string) (map[string]any, error) {
-	return StreamCapture(w, r, model, nil)
+	usage, err := StreamCapture(w, r, model, nil)
+	// 流内观察到排队：记下熔断窗口，后续请求快速失败（客户端可立即换模型）。
+	var q *QueueError
+	if errors.As(err, &q) {
+		c.rememberQueue(model, q)
+	}
+	return usage, err
 }
 
 // Aggregate 实现 provider.Upstream（嵌套 SSE 聚合）。
@@ -485,6 +568,12 @@ func Classify(status int, body string) provider.ErrKind {
 	}
 	if status == http.StatusUnauthorized {
 		return provider.ErrSessionDead
+	}
+	// 排队（10605 / isQueued）：模型侧容量问题，请求级透传，不得冷却账号。
+	// 必须排在通用 429 分支**之前**（否则会被归为 soft_rate → 账号冷却）。
+	if strings.Contains(lower, "model_queued") || strings.Contains(lower, "isqueued") ||
+		strings.Contains(body, "10605") {
+		return provider.ErrPassthrough
 	}
 	// 429 优先于 hardRule：限流 body 高频带 "quota exceeded"。
 	if status == http.StatusTooManyRequests {

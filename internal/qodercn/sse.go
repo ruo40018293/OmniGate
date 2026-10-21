@@ -14,6 +14,24 @@ import (
 	"time"
 )
 
+// looksLikeErrorFrame 判断扁平帧是否是需要处理的业务错误帧（R46）。
+//
+// 为什么需要它：正常 chunk 一定带 choices/delta，排队/限流的错误帧则是
+// {code, message} 形态（10405/10605/11101…）。只放行后者，避免把
+// {"headers":...} 之类噪声当 chunk 透传给客户端。
+func looksLikeErrorFrame(m map[string]any) bool {
+	if m == nil {
+		return false
+	}
+	if _, ok := m["choices"]; ok {
+		return false // 正常 chunk，交给嵌套路径（扁平形态上游不会这么发）
+	}
+	if v, ok := m["code"]; ok && v != nil && fmt.Sprint(v) != "" && fmt.Sprint(v) != "0" && fmt.Sprint(v) != "200" {
+		return true
+	}
+	return m["message"] != nil && m["error"] == nil
+}
+
 // parseNestedSSE 逐行解析嵌套 SSE，每个有效 chunk 调 onChunk。
 //   - body == "[DONE]" → 正常结束
 //   - "event:finish" 行 → 忽略
@@ -55,6 +73,18 @@ func parseNestedSSE(r io.Reader, onChunk func(map[string]any) error, truncated *
 				innerOK = json.Unmarshal([]byte(env.Body), &chunk) == nil
 				if innerOK {
 					if err := onChunk(chunk); err != nil {
+						return err
+					}
+				}
+			} else if outerOK {
+				// 扁平帧兜底（R46）：没有 body 信封、整帧就是业务报文。
+				// 排队/限流等错误帧在部分上游版本里以这种形态出现，若在此处丢弃，
+				// 客户端既看不到 error 也会被补 [DONE] 伪装成正常收尾。
+				// 只把「像业务错误」的扁平帧交给 onChunk，避免把无关字段当 chunk 透传。
+				var flat map[string]any
+				if json.Unmarshal([]byte(payload), &flat) == nil && looksLikeErrorFrame(flat) {
+					innerOK = true
+					if err := onChunk(flat); err != nil {
 						return err
 					}
 				}
@@ -234,6 +264,21 @@ func streamAsOpenAI(w io.Writer, r io.Reader, model string, flush func()) (map[s
 	var usage map[string]any
 	truncated := false
 	err := parseNestedSSE(r, func(chunk map[string]any) error {
+		// 上游排队帧（10605 / isQueued）：**不得**当普通 chunk 透传——
+		// 客户端既解析不出 choices（继续干等），也拿不到 error（无法重试）。
+		// 改为发一帧 OpenAI 规范 error（带队列信息）并中止流，上层据此熔断。
+		if q := parseQueueFrame(chunk); q != nil {
+			payload, _ := json.Marshal(map[string]any{"error": map[string]any{
+				"message": q.Error(), "type": "upstream_queued", "code": "model_queued",
+			}})
+			if _, werr := fmt.Fprintf(w, "data: %s\n\n", payload); werr != nil {
+				return werr
+			}
+			if flush != nil {
+				flush()
+			}
+			return q
+		}
 		// usage 捕获：末帧覆盖前面（OpenAI 语义末帧才是全量），并照常透传
 		if u, ok := chunk["usage"].(map[string]any); ok && len(u) > 0 {
 			usage = u
