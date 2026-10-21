@@ -18,9 +18,9 @@ import (
 	"strings"
 	"time"
 
-	"workbuddy-api/internal/workbuddyai"
+	"omnigate/internal/workbuddyai"
 
-	"workbuddy-api/internal/auth"
+	"omnigate/internal/auth"
 )
 
 // ErrPending 登录尚未完成（浏览器还没登录完）。

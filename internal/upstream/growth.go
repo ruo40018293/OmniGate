@@ -31,7 +31,7 @@ import (
 	"net/url"
 	"strings"
 
-	"workbuddy-api/internal/auth"
+	"omnigate/internal/auth"
 )
 
 // growth 域路径（实测口径）。

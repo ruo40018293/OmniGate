@@ -57,7 +57,7 @@ func TestProtocolHijackRestoreRoundTrip(t *testing.T) {
 	const clientExe = `C:\Program Files\raccoon-ai\商汤小浣熊.exe`
 	seedOfficialLike(t, keyPath, clientExe)
 
-	const ourExe = `D:\tools\workbuddy-api.exe`
+	const ourExe = `D:\tools\omnigate.exe`
 	b, err := captureBackup(keyPath, ourExe)
 	if err != nil {
 		t.Fatalf("captureBackup: %v", err)
@@ -109,7 +109,7 @@ func TestProtocolHijackRestoreRoundTrip(t *testing.T) {
 func TestProtocolRestoreWhenKeyAbsent(t *testing.T) {
 	keyPath := testKeyPath(t)
 	cleanupKey(t, keyPath)
-	const ourExe = `D:\tools\workbuddy-api.exe`
+	const ourExe = `D:\tools\omnigate.exe`
 
 	b, err := captureBackup(keyPath, ourExe)
 	if err != nil {
@@ -138,7 +138,7 @@ func TestProtocolRestoreWhenKeyAbsent(t *testing.T) {
 // TestShouldRestore 覆盖「是否该按备份回写」的判定：
 // 只有当前命令仍指向我们时才恢复，被官方客户端重写后必须放手。
 func TestShouldRestore(t *testing.T) {
-	const ourExe = `D:\tools\workbuddy-api.exe`
+	const ourExe = `D:\tools\omnigate.exe`
 	cases := []struct {
 		name    string
 		current string
@@ -161,8 +161,8 @@ func TestShouldRestore(t *testing.T) {
 
 // TestCommandFor 校验注入命令行的形状：路径带空格时必须加引号、%1 必须保留。
 func TestCommandFor(t *testing.T) {
-	got := commandFor(`D:\a b\workbuddy-api.exe`)
-	want := `"D:\a b\workbuddy-api.exe" ` + CallbackFlag + ` "%1"`
+	got := commandFor(`D:\a b\omnigate.exe`)
+	want := `"D:\a b\omnigate.exe" ` + CallbackFlag + ` "%1"`
 	if got != want {
 		t.Fatalf("commandFor 期望 %q 实际 %q", want, got)
 	}

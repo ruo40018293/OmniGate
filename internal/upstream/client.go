@@ -14,9 +14,9 @@ import (
 	"strings"
 	"time"
 
-	"workbuddy-api/internal/auth"
-	"workbuddy-api/internal/idle"
-	"workbuddy-api/internal/provider"
+	"omnigate/internal/auth"
+	"omnigate/internal/idle"
+	"omnigate/internal/provider"
 )
 
 // ErrKind 错误分类，pool 据此决定冷却时长。

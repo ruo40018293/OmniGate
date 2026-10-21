@@ -13,7 +13,7 @@
 //
 // ## 用法
 //
-//   先启动 workbuddy-api，再：
+//   先启动 omnigate，再：
 //   NODE_PATH=<node_modules 路径> PANEL_URL=http://127.0.0.1:7863/ \
 //     node tools/csp_smoke.js
 //

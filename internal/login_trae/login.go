@@ -18,8 +18,8 @@ import (
 	"strings"
 	"time"
 
-	"workbuddy-api/internal/auth"
-	"workbuddy-api/internal/traework"
+	"omnigate/internal/auth"
+	"omnigate/internal/traework"
 )
 
 var ErrPending = errors.New("login pending")

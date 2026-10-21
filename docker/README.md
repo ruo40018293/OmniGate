@@ -1,6 +1,6 @@
 # Docker 部署
 
-把 workbuddy-api 跑在容器里（飞牛 NAS / 任意 Linux）。**容器内以无头模式运行**（`--no-tray`），
+把 omnigate 跑在容器里（飞牛 NAS / 任意 Linux）。**容器内以无头模式运行**（`--no-tray`），
 管理与账号登录全部通过 Web 面板完成，不需要容器里的 CLI 助手。
 
 ---
@@ -23,7 +23,7 @@
 
 ### 路径 A · 离线镜像（推荐，无需网络与构建）
 
-1. 把 `workbuddy-api-v<版本>-linux-amd64.tar` 与 `load-image.sh` 传到 NAS 同一目录
+1. 把 `omnigate-v<版本>-linux-amd64.tar` 与 `load-image.sh` 传到 NAS 同一目录
 2. 在该目录执行一次：`sh load-image.sh`
 3. 用 `fnos-compose.yml` 建容器（改掉里面 3 处 ★必改）
 
@@ -31,7 +31,7 @@
 
 ### 路径 B · NAS 现场构建
 
-1. 开发机执行 `sh docker/build-binary.sh` 交叉编译出 `docker/workbuddy-api`
+1. 开发机执行 `sh docker/build-binary.sh` 交叉编译出 `docker/omnigate`
 2. 把整个 `docker/` 目录传到 NAS
 3. 在 NAS 上 `sh build-on-nas.sh` → `docker build` 出镜像
 
@@ -132,7 +132,7 @@ Windows 上生成的 `auths/*.json` 里，token 是 **DPAPI 密文**（`dpapi:` 
 ## 六、验证
 
 ```sh
-docker logs -f workbuddy-api                    # 看 entrypoint 打印的生效配置
+docker logs -f omnigate                    # 看 entrypoint 打印的生效配置
 curl http://127.0.0.1:7863/healthz              # 应为 ok
 curl -H "Authorization: Bearer $API_KEY" http://127.0.0.1:7863/v1/models
 ```

@@ -3,7 +3,7 @@
 // protocol_windows.go 协议回调接管的注册表实现（Windows）。
 //
 // 做法：登录期间把 HKCU\Software\Classes\office-raccoon 的 shell\open\command
-// 临时改成 workbuddy-api 自身，从而在网页授权完成后收到 office-raccoon://auth/callback?code=…
+// 临时改成 omnigate 自身，从而在网页授权完成后收到 office-raccoon://auth/callback?code=…
 // 深链（Windows 会以 `"<exe>" --raccoon-callback "office-raccoon://…"` 唤起本进程）；
 // 拿到授权码后立刻把注册表恢复原状。
 //
@@ -62,7 +62,7 @@ type protocolBackup struct {
 	CreatedAt int64    `json:"createdAt"`
 }
 
-// HijackProtocol 备份并把协议注册表指向本工具。exePath 为 workbuddy-api 自身可执行文件路径。
+// HijackProtocol 备份并把协议注册表指向本工具。exePath 为 omnigate 自身可执行文件路径。
 func HijackProtocol(exePath, backupFP string) error {
 	exePath = strings.TrimSpace(exePath)
 	if exePath == "" {
@@ -306,7 +306,7 @@ func writeValue(k registry.Key, v regValue) error {
 	}
 }
 
-// applyHijack 把协议命令改成指向 workbuddy-api。
+// applyHijack 把协议命令改成指向 omnigate。
 func applyHijack(keyPath, exePath string) error {
 	root, _, err := registry.CreateKey(registry.CURRENT_USER, keyPath, registry.ALL_ACCESS)
 	if err != nil {

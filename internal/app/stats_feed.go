@@ -18,8 +18,8 @@ import (
 	"path/filepath"
 	"time"
 
-	"workbuddy-api/internal/provider"
-	statsEngine "workbuddy-api/internal/stats"
+	"omnigate/internal/provider"
+	statsEngine "omnigate/internal/stats"
 )
 
 // StatsFeedInterval 喂入周期：进程内直调成本极低，30s 与前端轮询节奏对齐

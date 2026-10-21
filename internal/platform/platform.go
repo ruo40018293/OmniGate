@@ -5,5 +5,5 @@
 //   - platform_darwin.go   （GOOS=darwin）
 //   - platform_other.go    （其余平台，简化实现）
 //
-// 上层（internal/app、cmd/workbuddy-api）只依赖本包导出的函数，不接触任何平台代码。
+// 上层（internal/app、cmd/omnigate）只依赖本包导出的函数，不接触任何平台代码。
 package platform

@@ -9,7 +9,7 @@ import (
 	"sync/atomic"
 	"testing"
 
-	"workbuddy-api/internal/auth"
+	"omnigate/internal/auth"
 )
 
 // TestFunctionForModelBuiltInFallback 内置兜底：目录尚未拉取时，已知 solo_agent

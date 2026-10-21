@@ -1,4 +1,4 @@
-// workbuddy-api 管理面板前端（原生 JS，无构建步骤，直接 fetch 管理 API）
+// omnigate 管理面板前端（原生 JS，无构建步骤，直接 fetch 管理 API）
 "use strict";
 
 const $ = (id) => document.getElementById(id);
@@ -1308,7 +1308,7 @@ function promptLogin(channel) {
   // 纯导入型渠道：文案与动作都不同（读本机客户端凭据，而不是打开浏览器登录）。
   if (isImportLocal(channel)) {
     $("lcTitle").textContent = "导入 " + name + " 账号";
-    $("lcMsg").textContent = `将读取本机已登录的${name}客户端凭据并保存到 workbuddy-api（不会修改客户端本身）。`
+    $("lcMsg").textContent = `将读取本机已登录的${name}客户端凭据并保存到 omnigate（不会修改客户端本身）。`
       + `若提示未找到凭据，请先打开并登录${name}客户端后重试。${NO_CHECKIN_LOGIN_HINT[channel] || ""}`;
     $("btnLoginConfirm").textContent = "导入";
     $("loginConfirmOverlay").classList.remove("hidden");
@@ -1405,7 +1405,7 @@ function stopLoginPoll() {
 }
 
 // ---------- 智谱清言登录（自动捕获 Cookie，手工粘贴为兜底） ----------
-// 自动路径：workbuddy-api 拉起独立 profile 的浏览器 → 用户正常登录 → CDP 捕获 Cookie。
+// 自动路径：omnigate 拉起独立 profile 的浏览器 → 用户正常登录 → CDP 捕获 Cookie。
 // 独立 profile 天然隔离，多账号逐个添加互不干扰（无需手动开无痕）。
 let glmPoll = null;
 
@@ -1860,7 +1860,7 @@ function closeAbout() { $("aboutOverlay").classList.add("hidden"); }
 // 为什么不做成 <a href>：面板常跑在局域网地址上，点链接会让浏览器新开
 // GitHub —— 在不少内网/离线环境里这一步就是卡住，用户拿不到地址。
 // 给出可一键复制的纯文本更实用，也与项目其它「点一下就复制」的交互一致。
-const REPO_URL = "https://github.com/sddvcm/workbuddy-api";
+const REPO_URL = "https://github.com/ruo40018293/OmniGate";
 function initAboutRepo() {
   const el = $("aboutRepo");
   if (!el) return;

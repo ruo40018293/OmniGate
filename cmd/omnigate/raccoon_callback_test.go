@@ -5,17 +5,17 @@ import (
 	"strings"
 	"testing"
 
-	"workbuddy-api/internal/raccoon"
+	"omnigate/internal/raccoon"
 )
 
 // 本测试锁定一个**真实 bug**（2026-10-05 用户报告）：
 //
 //	小浣熊走「浏览器授权登录」时，`internal/raccoon/protocol*.go` 定义了
 //	`CallbackFlag = "--raccoon-callback"`（登录期间写入注册表命令行），
-//	`raccoon.SaveCallback` 也实现好了 —— 但 **cmd/workbuddy-api/main.go 从未解析这个 flag**。
+//	`raccoon.SaveCallback` 也实现好了 —— 但 **cmd/omnigate/main.go 从未解析这个 flag**。
 //
 // 后果（不报错、不崩溃，但功能完全不可用）：
-//  1. 用户在网页点授权 → Windows 按注册表命令行拉起 `workbuddy-api.exe --raccoon-callback <深链>`
+//  1. 用户在网页点授权 → Windows 按注册表命令行拉起 `omnigate.exe --raccoon-callback <深链>`
 //  2. 该进程**不知道**自己是回调子进程，于是又启动了一整份 daemon
 //     —— 端口被已有实例占用（日志 `listen … bind: Only one usage…`），
 //     而且它的启动自愈看到「残留的协议改写」→ 立刻 `RestoreProtocol` + `ClearCallback`

@@ -7,7 +7,7 @@ import (
 	"testing"
 	"time"
 
-	"workbuddy-api/internal/provider"
+	"omnigate/internal/provider"
 )
 
 // TestDiffCreditsEarningsAndSpend 差分记账：发放→入项、消耗→spend、消失→过期。

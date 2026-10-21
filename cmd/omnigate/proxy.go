@@ -12,7 +12,7 @@ import (
 	"strings"
 	"time"
 
-	"workbuddy-api/internal/config"
+	"omnigate/internal/config"
 )
 
 // proxyFor 返回渠道 kind 对应的代理 URL（未配置返回 nil = 直连）。

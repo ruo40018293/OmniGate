@@ -1,5 +1,5 @@
 #!/bin/sh
-# workbuddy-api 容器入口（无头模式）。
+# omnigate 容器入口（无头模式）。
 #
 # 职责：
 #   1. 由 WILDWORK_* 环境变量在容器内生成 config.json
@@ -116,4 +116,4 @@ if [ -n "$GROWTH_REDEEM$GROWTH_TRAVEL" ] && { is_true "$GROWTH_REDEEM" || is_tru
     echo "[entrypoint]     这些动作会**真实改变账号状态**（消耗抽奖次数不可撤销），请确认已知悉。"
 fi
 
-exec /app/workbuddy-api --no-tray
+exec /app/omnigate --no-tray

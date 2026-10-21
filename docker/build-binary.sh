@@ -4,7 +4,7 @@
 # 用法（本脚本位于 docker/，会自动定位项目根目录）：
 #     sh docker/build-binary.sh
 #
-# 产出：docker/workbuddy-api   —— linux/amd64 静态二进制（CGO_ENABLED=0）
+# 产出：docker/omnigate   —— linux/amd64 静态二进制（CGO_ENABLED=0）
 #
 # 为什么在开发机编译：NAS/弱网环境里 go build 会卡在拉取依赖（GOPROXY 超时），
 # 而交叉编译产物是纯静态的，丢进 alpine 即可直接跑，容器内零编译、零拉取。
@@ -12,7 +12,7 @@ set -e
 
 cd "$(dirname "$0")/.."
 ROOT="$(pwd)"
-OUT="$ROOT/docker/workbuddy-api"
+OUT="$ROOT/docker/omnigate"
 
 echo "==> 项目根目录：$ROOT"
 echo "==> 交叉编译 linux/amd64 ..."
@@ -20,7 +20,7 @@ echo "==> 交叉编译 linux/amd64 ..."
 # -trimpath：去掉编译机上的绝对路径，避免把本机目录结构带进产物。
 # -s -w    ：去掉符号表与调试信息（容器内无需调试），体积约减 25%。
 GOOS=linux GOARCH=amd64 CGO_ENABLED=0 \
-    go build -trimpath -ldflags "-s -w" -o "$OUT" ./cmd/workbuddy-api
+    go build -trimpath -ldflags "-s -w" -o "$OUT" ./cmd/omnigate
 
 echo "==> 完成：$OUT"
 ls -la "$OUT"

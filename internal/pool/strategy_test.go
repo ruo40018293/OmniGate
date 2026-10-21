@@ -14,7 +14,7 @@ import (
 	"testing"
 	"time"
 
-	"workbuddy-api/internal/auth"
+	"omnigate/internal/auth"
 )
 
 // mkPool 造一个含指定账号的池（uid → credits/expiring）。

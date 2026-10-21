@@ -12,7 +12,7 @@ import (
 	"testing"
 	"time"
 
-	"workbuddy-api/internal/auth"
+	"omnigate/internal/auth"
 )
 
 // TestManualCaptureQueueFrame 手工探针（默认跳过）：把上游原始 SSE 落到
@@ -24,7 +24,7 @@ func TestManualCaptureQueueFrame(t *testing.T) {
 	}
 	dir := os.Getenv("WILDWORK_HOME")
 	if dir == "" {
-		dir = `E:\陈焕生\workbuddy-api`
+		dir = `E:\陈焕生\omnigate`
 	}
 	auths, err := auth.LoadQoderCNDir(filepath.Join(dir, "auths"))
 	if err != nil || len(auths) == 0 {
@@ -42,7 +42,7 @@ func TestManualCaptureQueueFrame(t *testing.T) {
 		t.Fatalf("no stream: status=%d body=%s", status, string(respBody))
 	}
 	defer resp.Close()
-	out, _ := os.Create(`D:\Code\workbuddy-api\data-qodercn-capture.txt`)
+	out, _ := os.Create(`D:\Code\omnigate\data-qodercn-capture.txt`)
 	defer out.Close()
 	start := time.Now()
 	br := bufio.NewReaderSize(resp, 256*1024)

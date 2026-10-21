@@ -1,7 +1,7 @@
 # Windows 图标与 exe 资源
 
-`dist/workbuddy-api.exe` 带图标和版本信息（资源管理器属性里能看到产品名）。
-这些资源来自 `cmd/workbuddy-api/rsrc_windows_amd64.syso`，由本目录两个脚本从
+`dist/omnigate.exe` 带图标和版本信息（资源管理器属性里能看到产品名）。
+这些资源来自 `cmd/omnigate/rsrc_windows_amd64.syso`，由本目录两个脚本从
 `windows/icon.ico` 生成。
 
 ## 用法
@@ -11,19 +11,19 @@
 python build/make_icon.py          # → build/windows/icon.ico + icon_preview.png
 
 # 2. 生成 exe 资源
-python build/make_syso.py          # → cmd/workbuddy-api/rsrc_windows_amd64.syso
+python build/make_syso.py          # → cmd/omnigate/rsrc_windows_amd64.syso
 
 # 3. 构建 + 校验（校验不过就别发布）
 bash scripts/build_release.sh          # 发布用构建（含 -trimpath -s -w + 产物自检）
-python build/check_res.py cmd/workbuddy-api/rsrc_windows_amd64.syso dist/workbuddy-api.exe
+python build/check_res.py cmd/omnigate/rsrc_windows_amd64.syso dist/omnigate.exe
 ```
 
 改了图标后还要同步托盘与弹层 logo：
 
 ```bash
 python build/make_icon.py          # 顺带刷新 build/logo64.png
-cp build/windows/icon.ico cmd/workbuddy-api/build/trayicon.ico
-cp build/logo64.png cmd/workbuddy-api/web/logo64.png
+cp build/windows/icon.ico cmd/omnigate/build/trayicon.ico
+cp build/logo64.png cmd/omnigate/web/logo64.png
 ```
 
 ## 为什么校验是必须的

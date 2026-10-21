@@ -10,7 +10,7 @@ import (
 	"net/http"
 	"sync"
 
-	"workbuddy-api/internal/server"
+	"omnigate/internal/server"
 )
 
 // pipeRW 是一个把响应体写入 io.Pipe 的 ResponseWriter，供内层 handler 使用。
@@ -90,7 +90,7 @@ func (g *Gateway) call(parent context.Context, path string, body []byte, apiKey 
 	p := newPipeRW(pw)
 
 	// host 仅作为占位，内层 ServeMux 只按 URL.Path 匹配。
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, "http://workbuddy-api"+path, bytes.NewReader(body))
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, "http://omnigate"+path, bytes.NewReader(body))
 	if err != nil {
 		cancel()
 		_ = pw.Close()

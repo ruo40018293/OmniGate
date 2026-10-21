@@ -32,7 +32,7 @@ import (
 	"strings"
 	"time"
 
-	"workbuddy-api/internal/provider"
+	"omnigate/internal/provider"
 )
 
 // WorkBuddyModelEntry 与 WorkBuddy 自定义模型清单的单条结构严格对齐。

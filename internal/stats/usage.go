@@ -190,7 +190,7 @@ func (s *Stats) modelStatsLocked() []ModelStat {
 // 与「今日消耗」口径闭合。前端以 "≈" 前缀标注为估算值。
 //
 // TraeCode（`traecode/*`）与 TraeWork 共用同一批账号与积分池（一个 trPool 服务两个
-// 渠道，见 cmd/workbuddy-api 装配），其消耗同样落在这批账号的余额差值上，故**必须并入
+// 渠道，见 cmd/omnigate 装配），其消耗同样落在这批账号的余额差值上，故**必须并入
 // 同一分摊池**——只认 traework 会让 traecode 的消耗在模型表里凭空消失。
 //
 // 无消耗或无 token（无从定权重）时保持原值，避免除零与伪造 0。

@@ -27,7 +27,7 @@ import (
 	"net/http"
 	"strings"
 
-	"workbuddy-api/internal/auth"
+	"omnigate/internal/auth"
 )
 
 // maxLotteryDrawPerRun 单次编排最多抽奖次数。

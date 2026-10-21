@@ -11,10 +11,10 @@ import (
 	"testing"
 	"time"
 
-	"workbuddy-api/internal/auth"
-	"workbuddy-api/internal/pool"
-	"workbuddy-api/internal/provider"
-	"workbuddy-api/internal/upstream"
+	"omnigate/internal/auth"
+	"omnigate/internal/pool"
+	"omnigate/internal/provider"
+	"omnigate/internal/upstream"
 )
 
 func TestNextFire(t *testing.T) {

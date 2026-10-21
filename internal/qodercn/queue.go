@@ -22,7 +22,7 @@ import (
 	"strings"
 	"time"
 
-	"workbuddy-api/internal/provider"
+	"omnigate/internal/provider"
 )
 
 // QueueError 上游排队错误。实现 provider.StreamErrorClassifier：

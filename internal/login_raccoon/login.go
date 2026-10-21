@@ -10,7 +10,7 @@
 //
 // 授权码只经这条深链回传（回调地址由服务端前端硬编码、全站 JS 无 redirect_uri），
 // 要拿到它就只能在第④步成为该协议的接收方。于是本包的做法是：
-// 登录期间把 office-raccoon 协议临时指向 workbuddy-api 自身来接住深链，兑换完成后立刻恢复注册表。
+// 登录期间把 office-raccoon 协议临时指向 omnigate 自身来接住深链，兑换完成后立刻恢复注册表。
 //
 // 与「从本机客户端导入」的关系：
 //   - 两者最终拿到的是**同一个账号**，但会话语义不同：浏览器授权登录新建独立会话（新 sid），
@@ -35,7 +35,7 @@ import (
 	"strings"
 	"time"
 
-	"workbuddy-api/internal/raccoon"
+	"omnigate/internal/raccoon"
 )
 
 // ErrPending 表示授权尚未完成（浏览器里还没走完）。

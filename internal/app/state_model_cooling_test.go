@@ -4,7 +4,7 @@ import (
 	"testing"
 	"time"
 
-	"workbuddy-api/internal/provider"
+	"omnigate/internal/provider"
 )
 
 // TestGetStateExposesModelCooling 验证 /api/state 的账号视图暴露模型级冷却：

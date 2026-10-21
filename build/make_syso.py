@@ -34,7 +34,7 @@ Windows Vista 起支持在资源条目里直接放 PNG 数据（不用手工构�
 ## 用法
 
     python build/make_syso.py
-    # 产出 cmd/workbuddy-api/rsrc_windows_amd64.syso
+    # 产出 cmd/omnigate/rsrc_windows_amd64.syso
 """
 
 from __future__ import annotations
@@ -47,7 +47,7 @@ import sys
 HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.dirname(HERE)
 ICO = os.path.join(HERE, "windows", "icon.ico")
-SYSO = os.path.join(ROOT, "cmd", "workbuddy-api", "rsrc_windows_amd64.syso")
+SYSO = os.path.join(ROOT, "cmd", "omnigate", "rsrc_windows_amd64.syso")
 
 IMAGE_RESOURCE_TYPE_ICON = 3
 IMAGE_RESOURCE_TYPE_GROUP_ICON = 14
@@ -55,7 +55,7 @@ IMAGE_RESOURCE_TYPE_VERSION = 16
 
 # RT_VERSION 里放一个最小 VS_VERSIONINFO，让资源管理器能显示版本号。
 # 不是必需，但没有它文件的「属性 - 详细信息」里产品名/版本会是空的。
-VERSION_STRING = "workbuddy-api"
+VERSION_STRING = "omnigate"
 
 
 # ── ICO 解析 ───────────────────────────────────────────────────────────
@@ -150,7 +150,7 @@ def build_vs_versioninfo(name, version):
                       0x00000000)             # dwFileDateLS
 
     children = b""
-    children += _version_block("FileDescription", "workbuddy-api 账号聚合服务")
+    children += _version_block("FileDescription", "omnigate 账号聚合服务")
     children += _version_block("ProductName", name)
     children += _version_block("CompanyName", "")
     children += _version_block("LegalCopyright", "")

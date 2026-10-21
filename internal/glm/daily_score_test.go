@@ -8,7 +8,7 @@ import (
 	"sync"
 	"testing"
 
-	"workbuddy-api/internal/auth"
+	"omnigate/internal/auth"
 )
 
 // 本文件锁定「每日登录积分领取」（`daily_login_score`）的行为。

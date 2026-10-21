@@ -17,9 +17,9 @@ import (
 	"testing"
 	"time"
 
-	"workbuddy-api/internal/auth"
-	"workbuddy-api/internal/pool"
-	"workbuddy-api/internal/provider"
+	"omnigate/internal/auth"
+	"omnigate/internal/pool"
+	"omnigate/internal/provider"
 )
 
 // retryUpstream 是一个不与真实网络打交道的假上游：签到恒成功、余额固定。

@@ -20,9 +20,9 @@ import (
 	"testing"
 	"time"
 
-	"workbuddy-api/internal/auth"
-	"workbuddy-api/internal/pool"
-	"workbuddy-api/internal/provider"
+	"omnigate/internal/auth"
+	"omnigate/internal/pool"
+	"omnigate/internal/provider"
 )
 
 // echoUpstream 假上游：ChatStream 返回固定 SSE；Stream/Aggregate 把入参 model 回填，

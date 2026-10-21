@@ -22,8 +22,8 @@ import (
 	"strings"
 	"time"
 
-	"workbuddy-api/internal/auth"
-	"workbuddy-api/internal/provider"
+	"omnigate/internal/auth"
+	"omnigate/internal/provider"
 )
 
 // CheckinInfo 签到状态。
@@ -265,7 +265,7 @@ func checkinMsg(info CheckinInfo, prefix string) string {
 
 // classifyCheckinErr 把签到错误映射成结构化结果（而不是裸 error）。
 // 之所以要分类：调度器需要区分「可重试」与「已完成」，
-// 裸 error 无法表达「无签到活动」这类可重试状态（workbuddy-api 不变量 23 的教训）。
+// 裸 error 无法表达「无签到活动」这类可重试状态（omnigate 不变量 23 的教训）。
 func classifyCheckinErr(err error) (provider.CheckinReport, error) {
 	var pe *provider.Error
 	if asProviderError(err, &pe) {

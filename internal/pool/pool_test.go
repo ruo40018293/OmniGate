@@ -6,7 +6,7 @@ import (
 	"testing"
 	"time"
 
-	"workbuddy-api/internal/auth"
+	"omnigate/internal/auth"
 )
 
 func TestPickHighestCredits(t *testing.T) {

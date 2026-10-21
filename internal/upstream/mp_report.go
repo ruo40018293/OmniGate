@@ -21,7 +21,7 @@ import (
 	"net/http"
 	"time"
 
-	"workbuddy-api/internal/auth"
+	"omnigate/internal/auth"
 )
 
 // schoolOpenDayActivityID 校园日 / 开学季活动 id（事件 activityId 字段值）。

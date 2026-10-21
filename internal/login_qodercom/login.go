@@ -20,7 +20,7 @@ import (
 	"strings"
 	"time"
 
-	"workbuddy-api/internal/auth"
+	"omnigate/internal/auth"
 )
 
 // 与 qoder2api 一致的常量（CN only）。

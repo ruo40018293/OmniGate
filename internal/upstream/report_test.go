@@ -14,7 +14,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"testing"
-	"workbuddy-api/internal/auth"
+	"omnigate/internal/auth"
 )
 
 // captureReport 起一个测试服务器，捕获 /v2/report 的请求体。

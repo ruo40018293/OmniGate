@@ -7,7 +7,7 @@ import (
 	"strings"
 	"testing"
 
-	"workbuddy-api/internal/provider"
+	"omnigate/internal/provider"
 )
 
 // 本文件锁定「流内业务错误不得伪装成正常收尾」这一行为（2026-10-02 修复）。

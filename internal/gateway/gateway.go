@@ -17,8 +17,8 @@ import (
 	"sync"
 	"time"
 
-	"workbuddy-api/internal/httpauth"
-	"workbuddy-api/internal/server"
+	"omnigate/internal/httpauth"
+	"omnigate/internal/server"
 )
 
 // Config 兼容层配置。

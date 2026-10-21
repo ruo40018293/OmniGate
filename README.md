@@ -1,4 +1,4 @@
-# workbuddy-api
+# OmniGate
 
 > 多渠道账号聚合工具 —— 把 12 个平台托管模型的多个账号聚合成**一个 OpenAI 兼容 API**，
 > 系统托盘常驻，浏览器管理，Windows / macOS / Linux 通吃。
@@ -16,7 +16,7 @@
 ```
 Claude Code / Codex / Cursor / 任意 OpenAI 兼容客户端
                     ↓  一个地址 + 一个 Key
-              workbuddy-api  ← 账号池 + 负载均衡 + 自动轮换
+              omnigate  ← 账号池 + 负载均衡 + 自动轮换
                     ↓
       WorkBuddy×N  TraeWork×N  Qoder×N  千问办公×N  GLM×N  …
 ```
@@ -145,8 +145,8 @@ Claude Code / Codex / Cursor / 任意 OpenAI 兼容客户端
 
 ### 3.1 Windows
 
-1. 从 [Releases](https://github.com/sddvcm/workbuddy-api/releases) 下载
-   `workbuddy-api-windows-amd64.exe`，放到**任意目录**（程序会自建数据目录）
+1. 从 [Releases](https://github.com/ruo40018293/OmniGate/releases) 下载
+   `omnigate-windows-amd64.exe`，放到**任意目录**（程序会自建数据目录）
 2. 双击启动。**首次启动会自动生成一个随机 API Key 并打印在日志里** ——
    记下来，或之后在面板里查看
 3. 托盘图标出现后，浏览器打开面板添加账号
@@ -154,7 +154,7 @@ Claude Code / Codex / Cursor / 任意 OpenAI 兼容客户端
 程序目录结构（首次启动后自建）：
 
 ```
-workbuddy-api.exe
+omnigate.exe
 config.json      # 配置（首次启动生成）
 auths/           # 各账号凭据（Windows 下 DPAPI 加密）
 data/            # 状态、流水、日志
@@ -249,7 +249,7 @@ Claude Code / Cursor 等支持自定义 OpenAI 端点的工具直接填即可；
 
 ## 六、项目整合来源
 
-workbuddy-api 整合了三个开源项目的能力。三者同源，都出自早期的
+omnigate 整合了三个开源项目的能力。三者同源，都出自早期的
 `xxx2api` 系列，但各自解决不同问题、互不包含：
 
 | 来源项目 | 定位 | 本项目从中整合的内容 |
@@ -264,7 +264,7 @@ workbuddy-api 整合了三个开源项目的能力。三者同源，都出自早
 |---|---|
 | workbuddy-wild | `internal/traework/client.go`（换号重试）、`internal/login_trae/device.go`（设备号读取）、`internal/pool/strategy.go`（挑号策略）、`internal/auth/secure_windows.go`（DPAPI）、`internal/platform/`（单实例锁） |
 | workbuddy2api-panel | `internal/upstream/growth.go`、`growth_tasks.go`、`desktop.go`、`mp_report.go`、`growth_auto.go`、`internal/scheduler/growth.go` |
-| wild-work | `internal/provider/`、`internal/gateway/`（三协议）、`internal/ledger/`、`internal/idle/`、`internal/sanitize/`、`internal/stats/`、`cmd/workbuddy-api/web/`（面板） |
+| wild-work | `internal/provider/`、`internal/gateway/`（三协议）、`internal/ledger/`、`internal/idle/`、`internal/sanitize/`、`internal/stats/`、`cmd/omnigate/web/`（面板） |
 
 **三者的边界很清楚**：workbuddy-wild 只有 2 个渠道、workbuddy2api-panel 只有
 WorkBuddy 单渠道、wild-work 没有成长任务体系 —— 任何一方都不具备本项目的

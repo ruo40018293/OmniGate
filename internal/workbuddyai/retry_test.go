@@ -9,7 +9,7 @@ import (
 	"testing"
 	"time"
 
-	"workbuddy-api/internal/provider"
+	"omnigate/internal/provider"
 )
 
 // TestRetryableStatus 仅 5xx 可重试；4xx 一律不重试（风控/余额/参数语义）。

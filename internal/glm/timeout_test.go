@@ -18,7 +18,7 @@ import (
 //	   流在**没有 finish 帧**的情况下结束 → 客户端看到"回答到一半停住"。
 //
 //	B) ChatStream 用 context.Background() 而非客户端 ctx ——
-//	   客户端断开时 workbuddy-api **不知道**，仍继续读上游、继续写，
+//	   客户端断开时 omnigate **不知道**，仍继续读上游、继续写，
 //	   表现为「无报错、无重连」的静默挂起。
 
 // TestClientTimeoutTruncatesLongStream 证明 (A)：Client.Timeout 会截断长流。

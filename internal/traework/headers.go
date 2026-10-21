@@ -3,7 +3,7 @@ package traework
 import (
 	"net/http"
 
-	"workbuddy-api/internal/auth"
+	"omnigate/internal/auth"
 )
 
 const clientUA = "Trae/" + IdeVersion

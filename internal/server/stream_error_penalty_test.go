@@ -10,10 +10,10 @@ import (
 	"testing"
 	"time"
 
-	"workbuddy-api/internal/auth"
-	"workbuddy-api/internal/pool"
-	"workbuddy-api/internal/provider"
-	"workbuddy-api/internal/traework"
+	"omnigate/internal/auth"
+	"omnigate/internal/pool"
+	"omnigate/internal/provider"
+	"omnigate/internal/traework"
 )
 
 // 本文件锁定「流内业务错误 → 冷却账号 → 下次请求换号」这一闭环（2026-10-02 修复）。

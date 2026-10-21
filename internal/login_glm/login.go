@@ -10,7 +10,7 @@
 //	③ 用户把值粘贴回面板，触发验证（调 user/refresh 换 access_token）
 //	④ 验证通过则落盘 auths/glm-<uid>.json
 //
-// 之所以不做内嵌浏览器自动抓取：workbuddy-api 的 R7 决议明确删除了 WebView2 依赖，
+// 之所以不做内嵌浏览器自动抓取：omnigate 的 R7 决议明确删除了 WebView2 依赖，
 // 为了一个渠道把它加回来是架构倒退，且 Windows 专属（macOS/Linux 要另写）。
 package loginglm
 
@@ -23,9 +23,9 @@ import (
 	"strings"
 	"time"
 
-	"workbuddy-api/internal/glm"
+	"omnigate/internal/glm"
 
-	"workbuddy-api/internal/auth"
+	"omnigate/internal/auth"
 )
 
 // LoginURL 用户需要在浏览器里打开的地址。

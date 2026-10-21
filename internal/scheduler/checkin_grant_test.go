@@ -8,10 +8,10 @@ package scheduler
 import (
 	"testing"
 
-	"workbuddy-api/internal/auth"
-	"workbuddy-api/internal/ledger"
-	"workbuddy-api/internal/pool"
-	"workbuddy-api/internal/provider"
+	"omnigate/internal/auth"
+	"omnigate/internal/ledger"
+	"omnigate/internal/pool"
+	"omnigate/internal/provider"
 )
 
 // granterUpstream 内嵌 Upstream，只实现 CheckinGranter（对齐 reporterUpstream 的嵌入模式）。

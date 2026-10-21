@@ -27,10 +27,10 @@ import (
 	"strings"
 	"time"
 
-	"workbuddy-api/internal/auth"
-	"workbuddy-api/internal/config"
-	"workbuddy-api/internal/provider"
-	"workbuddy-api/internal/upstream"
+	"omnigate/internal/auth"
+	"omnigate/internal/config"
+	"omnigate/internal/provider"
+	"omnigate/internal/upstream"
 )
 
 // growthTaskRunner 由支持成长任务的上游客户端实现（当前为 workbuddy 渠道）。

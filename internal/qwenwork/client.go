@@ -17,9 +17,9 @@ import (
 	"strings"
 	"time"
 
-	"workbuddy-api/internal/auth"
-	"workbuddy-api/internal/idle"
-	"workbuddy-api/internal/provider"
+	"omnigate/internal/auth"
+	"omnigate/internal/idle"
+	"omnigate/internal/provider"
 )
 
 // Client 千问办公上游 HTTP 客户端。
@@ -420,7 +420,7 @@ type chatMode struct {
 }
 
 // FetchModelPricing 费率：优先网页 /api/chat-modes（Bearer，price_factor），
-// 失败回退静态表。Rate 语义与 workbuddy-api 一致（相对倍率，pro=1.0 基准）。
+// 失败回退静态表。Rate 语义与 omnigate 一致（相对倍率，pro=1.0 基准）。
 func (c *Client) FetchModelPricing(a *auth.Auth) ([]provider.ModelPricing, error) {
 	url := c.web() + EpChatModes
 	data, err := c.doBearer(url, a)
@@ -508,7 +508,7 @@ func (c *Client) FetchNickname(a *auth.Auth) (string, error) {
 }
 
 // UserResource 查询账号当前可花费余额（所有钱包聚合，×100 取整为积分厘单位）。
-// 上游余额为小数（如 2094.8294），workbuddy-api 全链路按 int64 积分（厘=1/100）口径，
+// 上游余额为小数（如 2094.8294），omnigate 全链路按 int64 积分（厘=1/100）口径，
 // 故此处 ×100 取整（与面板显示位数一致：显示 2 位小数）。
 func (c *Client) UserResource(a *auth.Auth) (int64, error) {
 	remain, _, err := c.userResource(a)

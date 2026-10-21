@@ -8,7 +8,7 @@
 // 用法：node ui-static-check.mjs
 import { readFileSync } from "node:fs";
 
-const raw = readFileSync(new URL("../cmd/workbuddy-api/web/app.js", import.meta.url), "utf8");
+const raw = readFileSync(new URL("../cmd/omnigate/web/app.js", import.meta.url), "utf8");
 
 // 把 `let state = null;` 改成假数据，并暴露待测函数（app.js 是脚本，函数是顶层声明）。
 const FAKE_STATE = {
@@ -221,12 +221,12 @@ globalThis.__DedupT([{ id: "2026-10-06-m1", title: "里程碑", body: "100分" }
 check("里程碑 toast 同 id 去重（只写一次已读标记）", toastWrites === 1, `实际写入 ${toastWrites} 次`);
 
 // ---- 静态结构断言：index.html / style.css 的 stats 骨架 ----
-const html = readFileSync(new URL("../cmd/workbuddy-api/web/index.html", import.meta.url), "utf8");
+const html = readFileSync(new URL("../cmd/omnigate/web/index.html", import.meta.url), "utf8");
 check('第三个 tab 按钮存在（data-mtab="stats"）', /data-mtab="stats"/.test(html));
 check("#mtabStats body 存在且默认隐藏", /class="mtab-body hidden" id="mtabStats"/.test(html));
 check("运行统计区块骨架存在（stSum/stPlat/stApplog）", /id="stSum"/.test(html) && /id="stPlat"/.test(html) && /id="stApplog"/.test(html));
 check("更新角标存在（id=stUpdated，拉取失败可感知）", /id="stUpdated"/.test(html));
-const css = readFileSync(new URL("../cmd/workbuddy-api/web/style.css", import.meta.url), "utf8");
+const css = readFileSync(new URL("../cmd/omnigate/web/style.css", import.meta.url), "utf8");
 check("style.css 含运行统计样式段（#mtabStats .st-sum 等）", /#mtabStats \.st-sum/.test(css) && /#mtabStats \.st-plat-row/.test(css));
 check("更新角标失败警示样式存在（#stUpdated.st-stale）", /#stUpdated\.st-stale/.test(css));
 

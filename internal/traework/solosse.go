@@ -33,7 +33,7 @@ import (
 	"strings"
 	"time"
 
-	"workbuddy-api/internal/provider"
+	"omnigate/internal/provider"
 )
 
 // SOLOEvent 单条 SOLO SSE 事件（归一化）。

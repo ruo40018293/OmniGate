@@ -10,7 +10,7 @@ import (
 	"testing"
 	"time"
 
-	"workbuddy-api/internal/auth"
+	"omnigate/internal/auth"
 )
 
 func TestClassify(t *testing.T) {

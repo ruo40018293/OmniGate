@@ -9,7 +9,7 @@ import (
 	"sync/atomic"
 	"testing"
 
-	"workbuddy-api/internal/raccoon"
+	"omnigate/internal/raccoon"
 )
 
 // fakeJWT 造一个仅含 payload 的假 JWT（jwtExp 只解 payload，不验签）。

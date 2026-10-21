@@ -14,7 +14,7 @@ import (
 	"testing"
 	"time"
 
-	"workbuddy-api/internal/provider"
+	"omnigate/internal/provider"
 )
 
 // lastCreditEntry 读当月流水里最后一条（测试里少写几行）。

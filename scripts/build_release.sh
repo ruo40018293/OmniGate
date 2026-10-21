@@ -24,7 +24,7 @@
 #   bash scripts/build_release.sh darwin-arm64
 #
 # 环境要求：Go 在 PATH 中；build/windows/icon.ico 与
-# cmd/workbuddy-api/rsrc_windows_amd64.syso 已生成（见 build/ICON_README.md）。
+# cmd/omnigate/rsrc_windows_amd64.syso 已生成（见 build/ICON_README.md）。
 
 set -euo pipefail
 
@@ -42,7 +42,7 @@ case "$TARGET" in
   *) echo "未知目标: $TARGET" >&2; exit 2 ;;
 esac
 
-OUT="dist/workbuddy-api"
+OUT="dist/omnigate"
 case "$GOOS" in windows) OUT="${OUT}.exe" ;; esac
 
 # Windows GUI 子系统：-H windowsgui 让它不弹控制台窗口。
@@ -55,7 +55,7 @@ echo "  ldflags: $LDFLAGS  (含 -trimpath，剥除本机绝对路径)"
 
 mkdir -p dist
 GOOS="$GOOS" GOARCH="$GOARCH" CGO_ENABLED="$CGO_ENABLED" \
-  go build -trimpath -ldflags "$LDFLAGS" -o "$OUT" ./cmd/workbuddy-api
+  go build -trimpath -ldflags "$LDFLAGS" -o "$OUT" ./cmd/omnigate
 
 SIZE=$(wc -c < "$OUT")
 echo "完成: $OUT ($((SIZE / 1024 / 1024)) MB)"

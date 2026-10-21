@@ -9,9 +9,9 @@ import (
 	"sync"
 	"testing"
 
-	"workbuddy-api/internal/auth"
-	"workbuddy-api/internal/pool"
-	"workbuddy-api/internal/provider"
+	"omnigate/internal/auth"
+	"omnigate/internal/pool"
+	"omnigate/internal/provider"
 )
 
 // 本文件验证**多账号轮换**在真实 handler 路径上的行为。

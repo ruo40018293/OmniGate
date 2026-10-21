@@ -36,7 +36,7 @@ import (
 	"strings"
 	"time"
 
-	"workbuddy-api/internal/auth"
+	"omnigate/internal/auth"
 )
 
 // 节流。声明为包级 var 而非 const —— 测试需要把它压到毫秒级，
@@ -644,7 +644,7 @@ func (r *growthTaskRunner) runBuddyApp() (string, error) {
 
 // runAutomationCreate 定时任务创建事件（automation_1）。
 func (r *growthTaskRunner) runAutomationCreate() (string, error) {
-	if err := r.c.ReportDesktopEvent(r.a, DesktopAutomationCreateEvent("workbuddy-api 自动化")); err != nil {
+	if err := r.c.ReportDesktopEvent(r.a, DesktopAutomationCreateEvent("omnigate 自动化")); err != nil {
 		return "", err
 	}
 	return "已上报定时任务创建事件", nil
@@ -985,7 +985,7 @@ func (r *growthTaskRunner) runMPExpert() (string, error) {
 func (r *growthTaskRunner) runMPAutomation() (string, error) {
 	return r.runMPTaskWithFallback("Sequential_Tasks_4",
 		func() error {
-			return r.c.ReportDesktopEvent(r.a, DesktopAutomationCreateEvent("workbuddy-api 自动化"))
+			return r.c.ReportDesktopEvent(r.a, DesktopAutomationCreateEvent("omnigate 自动化"))
 		}, nil)
 }
 

@@ -18,7 +18,7 @@
 //
 // ## 用法
 //
-//   启动 workbuddy-api 后：
+//   启动 omnigate 后：
 //   NODE_PATH=<node_modules> PANEL_URL=http://127.0.0.1:7863/ \
 //     EXPECT_VERSION=0.1.2 node tools/version_smoke.js
 //

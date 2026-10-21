@@ -8,8 +8,8 @@ import (
 	"sync/atomic"
 	"testing"
 
-	"workbuddy-api/internal/auth"
-	"workbuddy-api/internal/provider"
+	"omnigate/internal/auth"
+	"omnigate/internal/provider"
 )
 
 func TestDailyCheckinClaimsWhenNotCheckedIn(t *testing.T) {

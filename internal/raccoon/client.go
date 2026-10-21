@@ -14,8 +14,8 @@ import (
 	"sync"
 	"time"
 
-	"workbuddy-api/internal/auth"
-	"workbuddy-api/internal/provider"
+	"omnigate/internal/auth"
+	"omnigate/internal/provider"
 )
 
 // Client 小浣熊（官方托管网关 xiaohuanxiong.com）上游客户端。

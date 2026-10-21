@@ -33,7 +33,7 @@ Codex 这类无状态客户端每轮重放整段历史，工具结果里的截�
 
 ## 升级方式
 
-1. 下载 `workbuddy-api-windows-amd64.exe`，覆盖旧版即可（配置与账本数据兼容，无需迁移）。
+1. 下载 `omnigate-windows-amd64.exe`，覆盖旧版即可（配置与账本数据兼容，无需迁移）。
 2. macOS 用户下载 `WorkBuddyAPI-0.1.4-<arch>.dmg`。
 3. Linux 用户下载对应架构的二进制。
 

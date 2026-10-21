@@ -20,7 +20,7 @@ import (
 	"net/http"
 	"os"
 
-	"workbuddy-api/internal/provider"
+	"omnigate/internal/provider"
 )
 
 // modelsJSONPreview 预览结果。

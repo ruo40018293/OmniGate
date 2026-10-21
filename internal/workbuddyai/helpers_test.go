@@ -5,7 +5,7 @@ import (
 	"net/http/httptest"
 	"sync/atomic"
 
-	"workbuddy-api/internal/auth"
+	"omnigate/internal/auth"
 )
 
 // testAuth 构造最小可用凭据（无需真实 token）。

@@ -18,7 +18,7 @@ import (
 	"testing"
 	"time"
 
-	"workbuddy-api/internal/cdp"
+	"omnigate/internal/cdp"
 )
 
 func TestLiveGuestTokenBehavior(t *testing.T) {

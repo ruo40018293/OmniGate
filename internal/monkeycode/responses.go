@@ -12,7 +12,7 @@
 // （只有 input[0] 的 role=system 条目参与签名校验）。
 //
 // 响应侧上游回的是 Responses 事件流（`response.output_text.delta` 等），
-// 同样要投影成 workbuddy-api 内部统一的 OpenAI Chat SSE。
+// 同样要投影成 omnigate 内部统一的 OpenAI Chat SSE。
 package monkeycode
 
 import (
@@ -675,7 +675,7 @@ func (s *responsesStreamReader) finish(reason string) []byte {
 	return append(out, []byte("data: [DONE]\n\n")...)
 }
 
-// errorFrame 透传上游错误（workbuddy-api 的 streamCore 会识别 error 帧）。
+// errorFrame 透传上游错误（omnigate 的 streamCore 会识别 error 帧）。
 func (s *responsesStreamReader) errorFrame(msg string) []byte {
 	frame := s.encode(map[string]any{"error": map[string]any{"message": msg, "type": "upstream_error"}})
 	if !s.done {

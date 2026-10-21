@@ -26,7 +26,7 @@ import (
 	"sync"
 	"time"
 
-	"workbuddy-api/internal/provider"
+	"omnigate/internal/provider"
 )
 
 // Version 引擎载荷语义版本（Snapshot.Version 透出，结构演进时 bump）。

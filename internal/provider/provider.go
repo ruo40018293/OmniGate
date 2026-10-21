@@ -8,7 +8,7 @@ import (
 	"net/http"
 	"time"
 
-	"workbuddy-api/internal/auth"
+	"omnigate/internal/auth"
 )
 
 // Kind 平台标识，同时也是模型名前缀。

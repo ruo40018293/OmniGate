@@ -2,7 +2,7 @@
 # 把 macOS 二进制打包成可双击的 WildWork.app，并生成 .dmg 安装包。
 #
 # 背景（数据目录如何解决）：
-#   cmd/workbuddy-api 启动时会 os.Chdir 到「可执行文件所在目录」，并把
+#   cmd/omnigate 启动时会 os.Chdir 到「可执行文件所在目录」，并把
 #   config.json / auths/ / data/ 都写在该目录（保证相对路径稳定）。
 #   .app 装进 /Applications 后包内容对普通用户只读，直接放二进制会写失败。
 #   解决办法在程序侧：main.go 的 workDir() 检测到自身位于
@@ -15,8 +15,8 @@
 #   没有图标（已实测复现，见下表）。所以这里必须直接把二进制放进 MacOS/。
 #
 # 用法：
-#   build/macos/build-app.sh                    # 自动找 dist/workbuddy-api-darwin-<arch>
-#   BIN=dist/workbuddy-api-darwin-arm64-2-2-1 build/macos/build-app.sh
+#   build/macos/build-app.sh                    # 自动找 dist/omnigate-darwin-<arch>
+#   BIN=dist/omnigate-darwin-arm64-2-2-1 build/macos/build-app.sh
 #   ARCH=amd64 build/macos/build-app.sh
 set -euo pipefail
 
@@ -33,13 +33,13 @@ mkdir -p dist
 # 定位二进制：优先 BIN 显式指定，其次规范名，最后带版本号的名字
 if [[ -n "${BIN:-}" && -f "$BIN" ]]; then
   SRC_BIN="$BIN"
-elif [[ -f "dist/workbuddy-api-darwin-$ARCH" ]]; then
-  SRC_BIN="dist/workbuddy-api-darwin-$ARCH"
-elif [[ -f "dist/workbuddy-api-darwin-$ARCH-$VERSION" ]]; then
-  SRC_BIN="dist/workbuddy-api-darwin-$ARCH-$VERSION"
+elif [[ -f "dist/omnigate-darwin-$ARCH" ]]; then
+  SRC_BIN="dist/omnigate-darwin-$ARCH"
+elif [[ -f "dist/omnigate-darwin-$ARCH-$VERSION" ]]; then
+  SRC_BIN="dist/omnigate-darwin-$ARCH-$VERSION"
 else
   echo "找不到 $ARCH 的二进制。请先构建：" >&2
-  echo "  GOOS=darwin GOARCH=$ARCH CGO_ENABLED=1 go build -trimpath -o dist/workbuddy-api-darwin-$ARCH ./cmd/workbuddy-api" >&2
+  echo "  GOOS=darwin GOARCH=$ARCH CGO_ENABLED=1 go build -trimpath -o dist/omnigate-darwin-$ARCH ./cmd/omnigate" >&2
   exit 1
 fi
 
@@ -103,7 +103,7 @@ PLIST
 # macOS 要求 .app 的 CFBundleExecutable 是真正的 Mach-O 主可执行文件；
 # 若用 bash 脚本再 exec 进真实二进制，AppKit 无法建立 NSStatusItem，
 # 表现为「守护进程正常运行、菜单栏却没有任何图标」（已实测复现）。
-# 数据目录改由程序自身处理：cmd/workbuddy-api 的 workDir() 在检测到
+# 数据目录改由程序自身处理：cmd/omnigate 的 workDir() 在检测到
 # 自身位于 .app/Contents/MacOS 内时，自动改用
 # ~/Library/Application Support/WildWork，因此 .app 可以整体只读。
 

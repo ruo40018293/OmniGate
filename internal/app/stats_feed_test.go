@@ -6,9 +6,9 @@ import (
 	"testing"
 	"time"
 
-	"workbuddy-api/internal/ledger"
-	"workbuddy-api/internal/provider"
-	statsEngine "workbuddy-api/internal/stats"
+	"omnigate/internal/ledger"
+	"omnigate/internal/provider"
+	statsEngine "omnigate/internal/stats"
 )
 
 // TestExpiryDayAmount 临期喂入口径：可用条目按日归组，取最早到期日 + 当日合计。

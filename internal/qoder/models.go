@@ -12,8 +12,8 @@ import (
 	"strings"
 	"time"
 
-	"workbuddy-api/internal/auth"
-	"workbuddy-api/internal/provider"
+	"omnigate/internal/auth"
+	"omnigate/internal/provider"
 )
 
 // DynamicModel 上游模型条目（chat/assistant/developer 场景同构）。

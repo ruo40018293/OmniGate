@@ -5,7 +5,7 @@
 //
 //	① 拉起一个**独立 profile** 的 Edge/Chrome（带 CDP 调试端口）
 //	② 浏览器打开 chatglm.cn，用户在真实浏览器里正常登录
-//	③ workbuddy-api 经 CDP 轮询 Cookie，一旦 chatglm_refresh_token 出现即捕获
+//	③ omnigate 经 CDP 轮询 Cookie，一旦 chatglm_refresh_token 出现即捕获
 //	④ 验证凭据有效 → 落盘 → 关闭浏览器、清理临时 profile
 //
 // 为什么用独立 profile 而不是用户日常 profile / InPrivate：
@@ -23,7 +23,7 @@ import (
 	"sync"
 	"time"
 
-	"workbuddy-api/internal/cdp"
+	"omnigate/internal/cdp"
 )
 
 // CookieName 清言凭据所在的 Cookie 名。

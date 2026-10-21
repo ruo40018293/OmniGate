@@ -12,7 +12,7 @@ import (
 	"strings"
 	"testing"
 
-	"workbuddy-api/internal/provider"
+	"omnigate/internal/provider"
 )
 
 // newTestLedger 建临时 Ledger（测试结束关闭句柄，避免 Windows 文件锁卡 TempDir 清理）。

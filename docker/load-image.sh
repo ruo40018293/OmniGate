@@ -1,6 +1,6 @@
 #!/bin/sh
 # ============================================================================
-# workbuddy-api 离线镜像一键导入（在飞牛 NAS 或任意装了 Docker 的 Linux 上执行）
+# omnigate 离线镜像一键导入（在飞牛 NAS 或任意装了 Docker 的 Linux 上执行）
 #
 # 用法：
 #   sh load-image.sh                       # 自动查找当前目录下的镜像 tar
@@ -22,14 +22,14 @@ SUMS="SHA256SUMS"
 
 # ---------- 0. 自动发现镜像文件 ----------
 if [ -z "$TAR" ]; then
-    for f in workbuddy-api-*-linux-amd64.tar workbuddy-api-*.tar; do
+    for f in omnigate-*-linux-amd64.tar omnigate-*.tar; do
         [ -f "$f" ] && TAR="$f" && break
     done
 fi
 
 if [ -z "$TAR" ] || [ ! -f "$TAR" ]; then
     echo "✗ 找不到镜像文件。"
-    echo "  请把 workbuddy-api-<版本>-linux-amd64.tar 放到当前目录，"
+    echo "  请把 omnigate-<版本>-linux-amd64.tar 放到当前目录，"
     echo "  或作为第一个参数指定路径：sh load-image.sh /path/to/xxx.tar"
     exit 1
 fi
@@ -62,19 +62,19 @@ docker load -i "$TAR"
 # ---------- 3. 结果 ----------
 echo ""
 echo "============================================================"
-docker images | grep -E "REPOSITORY|workbuddy-api" || true
+docker images | grep -E "REPOSITORY|omnigate" || true
 echo "============================================================"
 echo ""
 echo "✓ 导入完成。接下来："
 echo ""
 echo "  1) 准备数据目录（改成你自己的路径）："
-echo "       mkdir -p /vol1/appdata/workbuddy-api"
+echo "       mkdir -p /vol1/appdata/omnigate"
 echo ""
 echo "  2) 把 fnos-compose.yml 里标 ★必改 的三处改好，然后启动："
 echo "       docker compose -f fnos-compose.yml up -d"
 echo ""
 echo "  3) 看日志（确认 listen / auth_dir / 端口就绪）："
-echo "       docker logs -f workbuddy-api"
+echo "       docker logs -f omnigate"
 echo ""
 echo "  4) 打开管理面板添加账号（浏览器，不是容器内 CLI）："
 echo "       http://<NAS_IP>:7863/     ← 用 WILDWORK_ADMIN_PASSWORD 登录"

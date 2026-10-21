@@ -17,11 +17,11 @@ import (
 	"testing"
 	"time"
 
-	"workbuddy-api/internal/auth"
-	"workbuddy-api/internal/config"
-	"workbuddy-api/internal/pool"
-	"workbuddy-api/internal/provider"
-	"workbuddy-api/internal/upstream"
+	"omnigate/internal/auth"
+	"omnigate/internal/config"
+	"omnigate/internal/pool"
+	"omnigate/internal/provider"
+	"omnigate/internal/upstream"
 )
 
 // taskUpstream 桩：把 UserResourceDetail 接上（刷新余额需要），

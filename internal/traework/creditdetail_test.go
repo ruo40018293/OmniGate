@@ -5,8 +5,8 @@ import (
 	"net/http/httptest"
 	"testing"
 
-	"workbuddy-api/internal/auth"
-	"workbuddy-api/internal/provider"
+	"omnigate/internal/auth"
+	"omnigate/internal/provider"
 )
 
 // entUsageBody 构造一份 web_user_ent_usage 响应：

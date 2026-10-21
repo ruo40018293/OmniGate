@@ -10,7 +10,7 @@
 //
 // 本探针回答三件事：
 //
-//  1. **refresh 真实轮换的成功路径**（§9 第 7 项）：workbuddy-api 独占时调 /refresh，
+//  1. **refresh 真实轮换的成功路径**（§9 第 7 项）：omnigate 独占时调 /refresh，
 //     是否真的换发新 access_token + 新 refresh_token？新 access 能否立即用于推理？
 //  2. **轮换后旧 refresh_token 是否失效**（决定「单会话」的真实含义）：
 //     用轮换前的旧 token 再刷一次 —— 若成功则是「多会话共存」（新旧都有效）；
@@ -22,7 +22,7 @@
 //
 // 本文件带 `live` build tag，**默认不参与编译**，不改任何生产路径。
 //
-// ⚠️ 运行前必须确认：**没有正在运行的 workbuddy-api 实例使用同一个 auths 目录**。
+// ⚠️ 运行前必须确认：**没有正在运行的 omnigate 实例使用同一个 auths 目录**。
 // 探针会轮换 refresh_token 并落盘，运行中的实例内存里还是旧 token，
 // 会因 401 被标 session_dead 禁用（2026-09-25 实际发生过）。要么先停实例，要么用副本目录。
 //
@@ -45,7 +45,7 @@ import (
 	"testing"
 	"time"
 
-	"workbuddy-api/internal/auth"
+	"omnigate/internal/auth"
 )
 
 // sidOf 取 refresh_token 的 JWT `sid` 声明哈希（判断是否同一会话；不泄露原值）。

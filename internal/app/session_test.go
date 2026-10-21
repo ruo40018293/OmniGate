@@ -8,10 +8,10 @@ import (
 	"strings"
 	"testing"
 
-	"workbuddy-api/internal/auth"
-	"workbuddy-api/internal/config"
-	"workbuddy-api/internal/pool"
-	"workbuddy-api/internal/provider"
+	"omnigate/internal/auth"
+	"omnigate/internal/config"
+	"omnigate/internal/pool"
+	"omnigate/internal/provider"
 )
 
 // newPanelApp 构造一个带单渠道、单账号的最小 App，用于面板鉴权回归测试。

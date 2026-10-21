@@ -68,8 +68,8 @@ jobs:
         if: matrix.needs_rsrc
         run: |
           go install github.com/akavel/rsrc@latest
-          cp build/windows/icon.ico cmd/workbuddy-api/icon.ico
-          rsrc -ico cmd/workbuddy-api/icon.ico -o cmd/workbuddy-api/rsrc_windows_amd64.syso
+          cp build/windows/icon.ico cmd/omnigate/icon.ico
+          rsrc -ico cmd/omnigate/icon.ico -o cmd/omnigate/rsrc_windows_amd64.syso
 
       - name: Build
         env:
@@ -77,8 +77,8 @@ jobs:
           GOARCH: ${{ matrix.goarch }}
           CGO_ENABLED: ${{ matrix.cgo }}
         run: |
-          OUT="dist/workbuddy-api-${{ matrix.goos }}-${{ matrix.goarch }}${{ matrix.suffix }}"
-          go build -ldflags "${{ matrix.ldflags }}" -o "$OUT" ./cmd/workbuddy-api
+          OUT="dist/omnigate-${{ matrix.goos }}-${{ matrix.goarch }}${{ matrix.suffix }}"
+          go build -ldflags "${{ matrix.ldflags }}" -o "$OUT" ./cmd/omnigate
 
       # 前端静态检查（脚本随仓库走，见 scripts/ui-static-check.mjs）：
       # 断言冷却标签/汇总条渲染正确，且顶层函数/常量**不得重复定义**
@@ -143,7 +143,7 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: ${{ matrix.name }}
-          path: dist/workbuddy-api-${{ matrix.goos }}-${{ matrix.goarch }}${{ matrix.suffix }}
+          path: dist/omnigate-${{ matrix.goos }}-${{ matrix.goarch }}${{ matrix.suffix }}
 
       # dmg 单独作为 artifact 上传。release job 会 find 平铺 artifacts/ 下所有文件，
       # 因此这里不需要改 release 逻辑，dmg 会自动进入 release 资产。

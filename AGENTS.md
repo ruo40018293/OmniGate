@@ -1,4 +1,4 @@
-# workbuddy-api 开发约定（AGENTS.md）
+# OmniGate 开发约定（AGENTS.md）
 
 > 本文件面向 AI Agent 与开发者，记录**工具设计、架构选型、决议项**与开发约定。
 > 决议项（第 1 节）记录的是**为什么这么做**，改动前请先读对应条目 ——
@@ -21,10 +21,10 @@
 
 1. `internal/<channel>/` 协议封装，实现 `provider.Upstream`
 2. `internal/login_<channel>/` 凭据加载（面板登录 / 导入）
-3. `cmd/workbuddy-api/main.go` 装配 `Runtime`、`client`、代理同步项
-4. `cmd/workbuddy-api/main.go` 调度器启动处补 `go <sch>.Run(sctx)`
+3. `cmd/omnigate/main.go` 装配 `Runtime`、`client`、代理同步项
+4. `cmd/omnigate/main.go` 调度器启动处补 `go <sch>.Run(sctx)`
    —— 文件里有醒目注释标注此位置
-5. 前端 `cmd/workbuddy-api/web/` 加渠道展示与操作入口
+5. 前端 `cmd/omnigate/web/` 加渠道展示与操作入口
 
 另有渠道前缀白名单（`internal/stats/stats.go`）需同步新增，否则统计漏该渠道。
 
@@ -66,20 +66,20 @@
 | R31 | **每日登录积分走 `member-api/member/daily_login_score`，已接入保活流程** | 初版探测的路径名**全错**（`login_bonus`/`daily` 均 404），真实端点是 **`daily_login_score`**（2026-09-26 从 Web 主包挖出）。主包里它是**页面加载时自动调用**的（`errorMessageShow:false`）⇒ 调用它 ≈ 打开一次网页，特征与网页端一致，**不是跨端伪装**。响应：`status=0` 领取成功；`status=10001 "今日已领取"` = **幂等非错误**。**故无论上游是「自动发放」还是「需主动调用」，调它都安全且有益**。⚠️ **实现陷阱**：`doJSON` 在 `env.Status != 0` 时抛 error，会把 `10001` 误报成「领取失败」→ 新增 `doJSONEnvelope`（只把 HTTP ≥400 与非法 JSON 转 error，业务码交调用方解释）。回归测试 `internal/glm/daily_score_test.go` |
 | R32 | **不模拟 App 登录来触发额度发放** | 用户设想「模拟 App 登录动作」以避免手动开 App。**实测否决**：① Web 端**无**任何额度激活接口（8 个候选全 404）；② 换 App 头访问同一接口反而 401（`member_info` Web 头 200 / App 头 401）⇒ App 走**另一套认证**（设备指纹、App 签名等），不是加 UA 就能冒充；③ App 域名 `api.chatglm.cn` 独立存在。**风险不对称**：模拟 App 登录是**跨端伪装**，风控风险比只读 Web 私有接口高一个量级，且触发额度发放正是薅羊毛特征（与 R30 同一逻辑）。**结论：手动开 App 登录一次即可**（一次性成本，零风险，零开发） |
 | R33 | **三个 chatglm 变体的模型名带上游代号后缀 `:moe_53f`；旧名保留为别名** | **实测**：6 个模型名逐个测服务端上报的 `parts[].model` —— 三个 chatglm 变体（普通/`zero` 推理/`deep_research` 沉思）**都上报 `moe_53f`**，即**同一底层模型的不同推理等级**（`moe`=MoE 架构、`53` 很可能指 5.3）；search=`ai-search`、ppt/video=`all-tools-glms-glms-v2`。故给三个变体加 `:<model>` 后缀（`glm/chatglm:moe_53f` 等），**search/ppt/video 不改**（其代号是工具标识非模型版本）。**两个必须同步的点**：① `resolveAssistant` 查表前**剥掉 `:` 后缀**（同时保留完整名查表），否则 `chatglm:moe_53f` 只能靠兜底命中；② **旧名保留为别名**，已配置旧名的客户端不断，但 `/v1/models` 只列新名。新增 `UpstreamModel()` 辅助函数。回归测试 `TestResolveAssistantStripsUpstreamSuffix` 断言带/不带后缀解析结果一致 |
-| R34 | **新增渠道必须补 go xxxSch.Run(sctx)，否则该渠道的自动签到/保活从不运行** | **2026-09-27 实测发现**：加 glm 渠道时创建了 glmSch、注册进 runtimes、设了观察者，**但漏了 Run()** ⇒ GLM 的自动签到与保活**从未执行**。危害特征：**不报错、不崩溃**，且**手工触发仍可用**（面板按钮 / RunCheckinNow 走的是另一条路径），故极难发现——用户是手工签到后才察觉。**回归测试** cmd/workbuddy-api/scheduler_start_test.go：静态扫描「定义了 xxxSch := scheduler.New(...) 就必须有 go xxxSch.Run(」，并交叉校验 runtimes 里声明的 Scheduler 都已启动。**新增渠道清单应加一项：创建 → 注册 runtimes → 设观察者 → **go Run** → 补测试** |
+| R34 | **新增渠道必须补 go xxxSch.Run(sctx)，否则该渠道的自动签到/保活从不运行** | **2026-09-27 实测发现**：加 glm 渠道时创建了 glmSch、注册进 runtimes、设了观察者，**但漏了 Run()** ⇒ GLM 的自动签到与保活**从未执行**。危害特征：**不报错、不崩溃**，且**手工触发仍可用**（面板按钮 / RunCheckinNow 走的是另一条路径），故极难发现——用户是手工签到后才察觉。**回归测试** cmd/omnigate/scheduler_start_test.go：静态扫描「定义了 xxxSch := scheduler.New(...) 就必须有 go xxxSch.Run(」，并交叉校验 runtimes 里声明的 Scheduler 都已启动。**新增渠道清单应加一项：创建 → 注册 runtimes → 设观察者 → **go Run** → 补测试** |
 | R35 | **流式请求必须用独立的 StreamHTTP（不设 Client.Timeout）** | **2026-09-27 生产日志实证**：GLM 对话流走带 Client.Timeout 的 client，触发 context deadline exceeded **5 次**（09/26 22:42、09/27 00:03/00:09/00:12/00:18），**且无终止帧** ⇒ 客户端表现为「回答到一半停住」。根因：Go 的 Client.Timeout **覆盖整个请求生命周期（含读 body）**，对 SSE 意味着「长回答必被掐断」。**修法**（照 traework 既有模式）：Client 加 StreamHTTP *http.Client{Transport: tr}（**共用 Transport 复用连接池、但不设 Timeout**），ChatStream 改用它；main.go 两处 applyProxies 都要把 {glmUp.HTTP, glmUp.StreamHTTP} 一起传（SetTransportProxy 会**新建** Transport，只套一个会让流式漏掉代理）。**非流式 client 仍保留 Timeout**（一问一答需兜底）。回归测试 internal/glm/stream_timeout_test.go：证明流能跑过 HTTP.Timeout，且对照证明非流式仍会超时。**2026-09-29 推广到全部流式渠道**（issue #42）：此前只剩 glm/traework 有 StreamHTTP，qwenwork/qodercn/qodercom/qoder/workbuddy/workbuddyai 的 ChatStream 全用带 Timeout 的 HTTP ⇒ 长流式同样会被掐断。现已给全部流式渠道补 StreamHTTP（共用 Transport、不设 Timeout，流式里 Select{StreamHTTP 非 nil 则用之}），main.go **两处** applyProxies（启动 + 面板热更新）都要把 {HTTP, BillingHTTP?, StreamHTTP} 一起传，否则只套 HTTP 会让流式漏掉代理 |
 | R36 | **流被截断不得靠补 `data: [DONE]` 伪装成正常收尾**（issue #42） | **实证**：qwenwork/qodercn/qodercom/qoder 四份 sse.go 的 `sawDone` 是**死变量**（声明后从不赋值）⇒ 上游连接中断/读超时被掐断、或断在半个帧上（末行无换行），出口照样补 `data: [DONE]`，客户端拿到半截 tool_call arguments 报 "tool input was not fully received"，而网关日志**无任何错误**，极难排查。**修法**：parseNestedSSE 增加 `truncated` 出参（读错误/半帧 → true），`streamAsOpenAI` 里截断时改发一帧 OpenAI 规范 error（`code: upstream_truncated`）且**不发** [DONE]——调用方 `err!=nil` 同时保留。通用路径上游/sse.go streamCore 也做了同样的截断→error帧改造。刻意保留的行为：上游「正常 EOF 但漏发 [DONE]」（帧完整、末行有换行）仍兜底补 [DONE]，避免误伤本就补的渠道。回归测试：qwenwork/qodercn/qodercom/qoder 各 `stream_truncation_test.go` + 通用 `TestStreamTruncationNotDisguisedAsDone`，覆盖四种输入（传输层错误/半帧/正常 [DONE]/EOF 漏发） |
 | R37 | **TraeWork AuthCode 交换：4xx 属终态，不得换 origin 重试掩盖首因；设备号作用域 = 账号**（issue #50；2026-10-08 二次修订 issue #60/#70） | 旧实现 `ExchangeAuthCode` 对 4xx 也 `continue` 试下一个 origin，把首选 api.trae.cn 的真实错误（403/20401 设备数上限）覆盖成回退 origin 的 400/10101「无效参数」后再打印 ⇒ 表象彻底指向参数写错，且 authCode 一次性、4xx 后重试纯属刷屏。**修法**：4xx（除 429/408）立即返回携带**首个** origin 真实响应的 `*AuthCodeRejectedError`（含 origin/status/body）；`IsDeviceLimitReached` 单表识别 20401（可行动提示「去其它设备登出释放名额，最多 10 台」）；`login_trae.Poll` 把终态错误固化到 `login-state.json` 的 `Err` 并清空 AuthCode，后续轮询短路不再每 2s 重消耗。**设备号持久化**（初版）：官方客户端 `getDeviceId()` 是持久的，本仓每次登录 `randHex(32)` 随机新生成 = 每点一次都是新设备。改为从 `device-id.json`（`login-state.json` 同目录、独立文件）复用，缺失才生成并落盘（不复用 login-state，它登录成功/取消即删）。**二次修订（2026-10-08，#60/#70 实证推翻本机级共享）**：`device-id.json` 让一机多号共享同一设备号——#70 实测 15 号对照：共享设备号的 3 个账号全部撞 4017 common risk control（仅对话入口被拒、积分正常），一机一号的 12 个零风控；#60 实测同一编造设备号被多账号绑定后新账号授权恒 20401 Device limit reached（换设备号立即成功）。**修法**：设备号作用域从「本机」改为「登录会话」——每次 `Start()` 新生成一对 machineId/deviceId，登录成功随 `auths/trae-<uid>.json` 落盘成为该账号的稳定注册设备（满足 #3 的 x-device-id 稳定性，签到/对话头从 auth 文件读、不经过 Start）；`Poll` 成功后顺手删除遗留的 `device-id.json`（老用户自愈）。**#60 建议的「读官方客户端真实设备号」不做**：需移植 storage.json TC 解密且依赖本机装官方客户端，而 #70 数据已证明随机号本身可用，会话级新号即可消解两者。**权衡披露**：同账号重登会消耗一个设备名额（上限 10），但远低于旧随机版的消耗速度。回归测试 `internal/login_trae/login_device_test.go` |
 | R38 | **上游按模型限流时不得软化整个账号**（issue #53） | **2026-09-29 最小修复（不做大架构改动）**：WorkBuddyAI 上游模型级 429（6004 / body 含 `switch to the other models` / `usage exceeds frequency limit`）在 `Classify` 里判为 `ErrPassthrough`（请求级、不冷却账号），透传原文让客户端按 Retry-After 自退避或换模型——**不**把该账号其它还能用的模型一起拖进 SoftCooldown。与 R16 单账号渠道同哲学。**不做的部分**：pool 升级到 model 维度状态、`stickyKey(kind)`→`(kind,model)`、state v4（issue 作者提议的两种更大改造），它们动 pool/state/handler 三核心、~370 行，需单独评估（作者已主动提出可拆两个小 PR）。注意此判据仅限 WorkBuddyAI：其它渠道的 429 语义仍是账号级 |
 | R39 | **`scheduler.Config` 的时间字段：`nil` = 未配置（落默认），`[]int{}` = 本渠道没有这类定时任务** | **2026-09-23 实证**：`scheduler.New` 原用 `len(...) == 0` 判默认值，把两者混为一谈 ⇒ 传 `nil` 想关掉定时任务的渠道被静默补上默认时间。`main.go` 里命中四处：**qoder** 每天 09:00、21:00 各跑一次必然失败的签到（面板按 `last_checkin_ok` 渲染出红色「签到失败」标签，消息是「qoder 暂无签到活动」/「no refresh token」）；**workbuddyai** 注释写「Keepalive 关闭」但 22:00 照常每日刷 token；**qwenwork 最严重** —— 注释明写「定时保活反而会与千问办公 App 互踩」，而保活批次每天照跑。同一个「无签到活动」概念在 `app.go` 有 `noExplicitCheckin()` 守卫（手动签到、首次签到路径都据此跳过），唯独 `scheduler.New` 的零值兜底把它抹掉。**修法**：两处 `len(...) == 0` 改 `== nil`；四处调用点改传 `[]int{}`；`Run()` 补「两个列表都为空时阻塞等 ctx/配置变更」—— 否则 `nextFireMinutes` 返回零值走 `IsZero` 兜底，变成每天 1440 次空转。回归测试 `internal/scheduler/scheduler_defaults_test.go`（零值落默认 / 显式空关闭 / `CheckinHours` 旧字段兼容 / 无任务时 `Run` 阻塞且响应取消） |
 | R40 | **流内业务错误不得伪装成正常收尾；兼容层不得吞 error 帧**（2026-10-03） | **背景**：traework 的 `event:error`（3004 限流/1005 权益）旧实现写成 `delta.content` + `finish_reason:stop` + 补 `[DONE]`，且函数返回 `nil` ⇒ 客户端看到「正常结束、内容莫名其妙」、agent 拿半截回答继续跑，且 handler 无从得知失败 ⇒ **账号不冷却**；更糟的是 `NoteSuccess`/`stickySuccess` 在读流**之前**已执行，粘性路由把请求钉死在中招账号上，重试必然再撞。**修法**：① `solosse` 错误分支改发 OpenAI 规范 error 帧（限流标记 `upstream_rate_limited`）、**不补 `[DONE]`**、把错误返回调用方；② 新增 `provider.StreamErrorClassifier`（`Kind()`），handler 用 `errors.As` 取值后按 kind 冷却账号（软 60s / 硬 12h / 禁用），粘性路由见 `status.Cooling` 自动让位，无需显式 `stickyClear`；③ **兼容层必须识别 error 帧**——`gateway.parseChatSSELine` 此前只认 `choices`，error 帧被静默丢弃，致 `/v1/messages` 发 `end_turn`+`message_stop`、`/v1/responses` 发 `response.completed`+`[DONE]`，把失败伪装成成功（该缺口对内层所有渠道通用，含 R36 的 `upstream_truncated`）。**协议合规要点**：Anthropic `error.type` 是 **9 元判别联合**（`api_error`/`rate_limit_error`…），**不得填内层私有码**——限流映射为 `rate_limit_error`；Responses 用 `response.failed`（不补 `response.completed`/`[DONE]`），`response.error.code` 亦须映射到枚举（`server_error`/`rate_limit_exceeded`），私有码只放 `error` 事件的自由 `code` 字段。**3004 的限流维度是待强化假设**（R23b）：观察仅 1 例且来自 checkin 路径，只足以排除 IP/全局级；因软冷却仅 60s、判据不成立时最坏影响是闲置一分钟，故按账号级处置。回归：`traework/solosse_test.go`、`server/stream_error_penalty_test.go`、`gateway/stream_error_frame_test.go`、`scripts/ui-static-check.mjs` |
-| R41 | **小浣熊协议回调必须由 `main.go` 在初始化前拦截（`--raccoon-callback`）**（2026-10-05） | **背景**：小浣熊「浏览器授权登录」的授权码经自定义深链 `office-raccoon://auth/callback` 回传，实现方式是登录期间临时改写 HKCU 的 `office-raccoon` 注册表命令行为 `"<workbuddy-api.exe>" --raccoon-callback "%1"`。`internal/raccoon` 把 `CallbackFlag` 与 `SaveCallback()` 都写好了，**但 `cmd/workbuddy-api/main.go` 从未解析该 flag** ⇒ Windows 唤起回调子进程后，它当作普通启动又拉了一份 daemon：端口被占（`listen … bind: Only one usage…`）、**且它的启动自愈看到「残留的协议改写」立刻 `RestoreProtocol`+`ClearCallback`** ⇒ 授权码从未落盘，常驻进程轮询到 5 分钟超时。**全程不报错不崩溃**，用户只看到「点完授权但账号没加进来」。**修法**：`main.go` 在 `os.Chdir(workDir())` 之后、**任何初始化（config/日志/服务/托盘）之前** 拦截 `handleRaccoonCallback(os.Args[1:])`，命中即「落盘后 `os.Exit`」，绝不启动第二份服务。**同时**：`windowsgui` 构建无控制台，回调结果必须追加写进 `data/app.log`（否则失败时零线索）。**同类教训**：这与 R34（新增渠道漏 `go xxxSch.Run()`）同族 —— **「声明了却没接线」的疏漏在源码层就能判定**，故补静态回归 `cmd/workbuddy-api/raccoon_callback_test.go`（断言 main.go 调用了 handler、位置在服务初始化前、分支含 `os.Exit`），去掉修复即失败。**附带**：`/api/state` 新增 `login_error` —— 此前前端只看 `login_busy`，把**所有渠道**的登录失败/超时都显示成「登录完成」，正是它掩盖了本次问题；现由 `peekLoginError()` 非破坏式回传真实原因（读取即清空会被 `/api/state` 的其它调用方偷走） |
+| R41 | **小浣熊协议回调必须由 `main.go` 在初始化前拦截（`--raccoon-callback`）**（2026-10-05） | **背景**：小浣熊「浏览器授权登录」的授权码经自定义深链 `office-raccoon://auth/callback` 回传，实现方式是登录期间临时改写 HKCU 的 `office-raccoon` 注册表命令行为 `"<omnigate.exe>" --raccoon-callback "%1"`。`internal/raccoon` 把 `CallbackFlag` 与 `SaveCallback()` 都写好了，**但 `cmd/omnigate/main.go` 从未解析该 flag** ⇒ Windows 唤起回调子进程后，它当作普通启动又拉了一份 daemon：端口被占（`listen … bind: Only one usage…`）、**且它的启动自愈看到「残留的协议改写」立刻 `RestoreProtocol`+`ClearCallback`** ⇒ 授权码从未落盘，常驻进程轮询到 5 分钟超时。**全程不报错不崩溃**，用户只看到「点完授权但账号没加进来」。**修法**：`main.go` 在 `os.Chdir(workDir())` 之后、**任何初始化（config/日志/服务/托盘）之前** 拦截 `handleRaccoonCallback(os.Args[1:])`，命中即「落盘后 `os.Exit`」，绝不启动第二份服务。**同时**：`windowsgui` 构建无控制台，回调结果必须追加写进 `data/app.log`（否则失败时零线索）。**同类教训**：这与 R34（新增渠道漏 `go xxxSch.Run()`）同族 —— **「声明了却没接线」的疏漏在源码层就能判定**，故补静态回归 `cmd/omnigate/raccoon_callback_test.go`（断言 main.go 调用了 handler、位置在服务初始化前、分支含 `os.Exit`），去掉修复即失败。**附带**：`/api/state` 新增 `login_error` —— 此前前端只看 `login_busy`，把**所有渠道**的登录失败/超时都显示成「登录完成」，正是它掩盖了本次问题；现由 `peekLoginError()` 非破坏式回传真实原因（读取即清空会被 `/api/state` 的其它调用方偷走） |
 | R42 | **渠道本地模型校验必须取「静态表 ∪ 动态目录」的并集**（2026-10-05） | **背景**：raccoon / loomy 都做本地模型名校验（上游对未知模型名**静默回落到默认模型**并返回 200，不校验会让用户以为在用 A、实际扣 B 的额度），但实现只查**静态表**（`KnownModel(id)`）⇒ 上游目录新增的模型会被本地 400 误拒，而**同一个模型正被 `/v1/models` 正常列出**（后者读的是动态目录 `FetchModels` 结果）——表现为「面板列出却调不动」。**实测（2026-10-05）**：raccoon 账户 `/v1/models` 列出 9 个模型，其中 `sn-sensenova-6-8-flash` 调对话被本地 400 `model_not_found`，但直连上游同一模型 **HTTP 200 正常服务**（`sn-sensenova-6-8-flash-lite` 在静态表里、`sn-sensenova-6-8-flash` 不在，二者仅差一个后缀）。**修法**：`fetchCatalog` / `fetchModels` 成功后把目录里的模型名记进 Client（`liveIDs`，**单调扩大、只增不减**——避免目录瞬时抖动把可用模型判成未知），`ChatStream` 改查 `c.knownModel()`（静态表 ∪ liveIDs）。两渠道同款修复 + 回归测试 `TestKnownModelAcceptsLiveCatalog`（去掉并集即失败）。**顺带**：给两个 Client 加 `Base` 字段（默认常量端点，测试注入 httptest 假上游），避免为写这条测试而把 `LLMBase`/`GatewayBase` 从 const 改成 var |
 | R43 | **运行统计（`internal/stats`）与用量流水（`internal/ledger`）是两套并列口径，不合并、不互校**（2026-10-07，PR #71–#73） | **背景**：新增「运行统计」tab 时引入了第二套统计面。分工：`ledger` = 磁盘 JSONL 双流水（`data/ledger/{usage,credit}-*.jsonl`），账号**条目差分**口径，按需扫描聚合（R17）；`stats` = 内存实时 + 按日归档 `data/stats.json`，「今日」口径——消耗走**余额下降差值**、收入走**日志签到事件**（`events.go` 正则解析 `app.log`，因「登录即自动签到」等场景条目晚于入账建立，差值恒 0 漏记）、逐请求 token 走 **usage 帧精确值**（`usage.go`）。**决议**：两者**零共享状态、零互相写入**（stats 仅只读 `ledger.Query(1)` 取当日作废），各自标注口径、互不引用；**数字天然不同是设计而非缺陷**（差值含积分包到期作废，ledger 已拆 spend/expire），**不追求对齐**。**边界**：`ledger` 仍是面板「用量与积分」的数据源与 issue #67 等待修的口径；`stats` 只服务「运行统计」tab。新增统计需求时**先明确归属**（精确拆分→ledger；实时/今日/趋势→stats），**不得**为对齐数字而改动另一侧。**注入纪律**：stats 全部数据输入走**进程内直调**（`allStatuses` / `handler.StickySnapshot` / `ledger.Query`），**不得** HTTP 自环（R13）；`main.go` 须 `go appInst.StartStatsFeeders(sctx)`（漏接线即静默无数据，同 R34 家族） |
 | R44 | **WorkBuddyAI 对话必须带 `X-Conversation-ID`（三件套缺一不可）**（2026-10-20 实测） | **症状**：`workbuddyai/deepseek-v4.1-flash` 恒 400 `code=11-128 request illegal`，客户端以为是内容指纹问题。**校验顺序实测**：openresty → stream 校验（无 `stream:true` 先报 `11101 Non-stream chat request is currently not supported`）→ 渠道校验 11-128。**对照实验**（逐头删除二分，直发 `https://www.workbuddy.ai/v2/chat/completions`）：六组头组合全 400 ⇒ 不是「缺某个可选头」就是缺必填项；逐头删到最小集后**仅三个头必填**——`X-Conversation-ID`、`X-Conversation-Request-ID`、`X-Conversation-Message-ID`，缺任一即 400/11-128。其余（`X-Agent-Intent`/`acp-connection-id`/`X-Private-Data`/`x-codebuddy-request`/`X-Request-ID`/trace 全组/`X-Agent-Purpose`/`X-Domain`）均可删；旧 UA `CLI/2.63.2 CodeBuddy/2.63.2` 与旧 `X-IDE-Version 5.5.4`、`X-Product=WorkBuddy` 都能通过；**值格式不敏感**（UUID / 32hex / 三头同值全 PASS）。**依据**：官方客户端 `E:\WorkBuddyCN\WorkBuddyAI` 的 `app.asar` 内 `buildVlmGatewayHeaders`/`applyGatewayHeaders`（无 HMAC/签名，纯头校验）。**修法**：`internal/workbuddyai/client.go` 的 `chatHeaders` 补 `X-Conversation-ID`（与 Message-ID 同值，最小改动）。回归：`internal/workbuddyai/headers_test.go` 的 `TestChatHeadersConversationFamily`（去掉修复即 FAIL）。**遗留**：国内版 `internal/upstream/headers.go` 的 `injectConversationHeaders` 仍未发该头（上游尚未启用该校验） |
 | R45 | **「模型繁忙」（429 + `code:14003`）只重试、不冷却**（2026-10-20 实测） | **症状**：用户拿 `503 no_healthy_account`「模型繁忙，最早约 xx 解冻」，而**同一时刻官方客户端可用**。**观察**：`state-workbuddyai.json` 的 `model_cooling` 在 14:50/14:52/14:58 被三次 429 反复续期 60s ⇒ 上游的瞬时抖动被网关放大成整分钟不可用。**对照实验（R23b 纪律）**：官方 5.8.4 全套头与网关修复后的头**都既可能 200 也可能 429**；固定 8 秒间隔连发 5 次得 `429/200/429/200/200` ⇒ `14003` 与「请求头像不像官方客户端」无关，是**共享免费池的瞬时容量波动**，官方 Electron 客户端遇到它也是立刻重试。**修法**：`internal/workbuddyai/retry.go` 新增 `modelBusy()` 识别（429 + `"code":14003`/`Model busy`/`模型繁忙`）；`ChatStream` 对命中者重试 2 次（`busyBackoff` 500ms/1s 指数退避）；重试耗尽后 `Classify` 判 `ErrPassthrough` 原文透传，**不**进入模型级冷却（与 R16/R38 同哲学）。**验收实测**（新 exe 上线后连发 6 次）：5 次撞上游 429，**全部被内部重试消化**，用户侧 6/6 返回 200 且 `model_cooling` 不再出现。回归：`TestModelBusyDetect`、`TestChatStreamRetriesModelBusy`、`TestChatStreamModelBusyExhaustedPassthrough`、`TestClassify`（去任一修复即 FAIL） |
 | R46 | **QoderCN「模型排队」（`10605`/`isQueued`）必须识别为错误，不得透传或补 `[DONE]`；并以首帧看门狗兜住上游挂起**（2026-10-20/21 实测） | **症状**：`qodercn/deepseek-flash` 经网关「点了就排队、一直卡住」，客户端既无内容也无错误；同一时刻 `qodercn/qwen3.8-flash` 1.6s 正常返回 ⇒ 排队是**模型级**，与账号/请求头无关。**证据链**：①非流式请求 `ttfb=180.04s` 后网关回 `502 upstream_parse: unexpected EOF`；②上游报文为三层嵌套 `{"code":"403","message":"{\"code\":\"10605\",\"message\":\"{\\\"isQueued\\\":true,\\\"modelKey\\\":\\\"dfmodel\\\",\\\"queueCount\\\":3058,\\\"waitTime\\\":185,...}\"}"}` ⇒ 免费池排队，前方 3058 个请求、预计等 185s；③官方客户端此时同样显示「排队中/预计等待」⇒ 排队真实存在，官方能拿到 `queueCount/waitTime` 并展示；④**反证**：抓包（`QODERCN_CAPTURE=1`）显示同一模型正常时首帧 `firstTokenDuration=338ms`、2.0s 收尾 ⇒ 排队是间歇性的。**旧实现错在哪**：把该帧当普通 chunk 透传 → 客户端解析不出 `choices`（干等）、也拿不到 `error`（无法重试）；且 180s 后读错误被当成「截断」，既不可读也不可退避。**修法**：①`queue.go` 新增 `QueueError`（`Kind()` 恒 `ErrPassthrough`——排队不罚账号）+ `parseQueueFrame`（判据 `10605` 或 `isQueued:true`，**必须判 true**，因存在 `10606` + `isQueued:false` 的回执）；②`sse.go` 的 `onChunk` 首行识别排队帧 → 发 OpenAI 规范 error 帧（`code:model_queued`、`type:upstream_queued`，带 `retry_after/queue_count/wait_seconds/upstream_key`）后中止，**不补 `[DONE]`**（R36 同理）；③双窗口熔断：收到 `10605` 熔断 10 分钟（队列真实存在，分钟级不会清空），**首帧看门狗**超时只熔断 90 秒（可能只是抖动，避免误伤）；熔断期内 `ChatStream` 毫秒级 429，`retry_after` 给**剩余秒数**而非固定值；④`ChatStream` 加 `FirstByteTimeout=30s` 首帧看门狗：上游响应头已到但 body 不给数据（排队的真实形态是挂 180s）→ 超时即按排队快速失败，把「等 180 秒」压到「等 30 秒后 429」；只在**首字节之前**计时，首帧到达后仍交 `idle.Monitor`（R35/#42 不冲突）；⑤`Classify` 在通用「429→`ErrSoftRate`」**之前**拦 `model_queued/isqueued/10605` 判 `ErrPassthrough`，否则熔断 429 会被误判 soft_rate 而冷却账号；⑥`parseNestedSSE` 增加**扁平帧兜底**（无 `body` 信封、整帧即业务报文的错误帧也要交给 `onChunk`），避免只支持一种信封造成盲区。**回归测试**（`internal/qodercn/queue_test.go`）：`TestParseQueueFrameReal/Negative`、`TestClassifyModelQueued`、`TestStreamQueueEmitsErrorFrame`、`TestStreamQueueFrameBothEnvelopes`（嵌套+扁平两种信封）、`TestStreamFlatNoiseNotTreatedAsError`、`TestChatStreamFailsFastWhenQueued`（熔断期内**不得请求上游**）、`TestChatStreamFirstByteWatchdog`（上游挂住 → 阈值内 429 且写入熔断）、`TestChatStreamWatchdogPassesNormalStream`（正常流放行且**预读字节不丢**）。已验证：禁用看门狗后 `TestChatStreamFirstByteWatchdog` 必失败（测试有杀伤力）。**诚实的边界**：①「挂 180s 后才吐 `10605`」只观测到一次，且抓包未捕获任何排队帧 ⇒ 首帧看门狗是**兜底**而非已证实的唯一路径；②排队帧的信封形态真实值**尚未抓到**，故嵌套与扁平两种都做了兼容并在受控 mock 下验证通过；③真实上游若改用其它候选形态（如 `event:error` 行、`code` 在 `headers` 里），仍需按 R23b 重新抓包确认；④**上线后实测补充（18:04）**：上游排队挂起期间会发保活字节 ⇒ 首帧看门狗（按「首字节」判定）不会触发，本次挂起以 `upstream_truncated` 规范 error 帧收尾（旧版是垃圾透传/假 [DONE]），后续重试由上游直接给快速 429；该快速拒绝路径此前只透传不熔断（每跳 ~745ms 重打上游），已补 queue.go:parseQueueBody 在 HTTP ≥400 分支同样写熔断（回归 TestChatStreamHTTP429QueueRecordsBlock）；看门狗只兜「完全静默」的挂起，这是已知边界，不是缺陷。 |
-| R47 | **主 HTTP 服务必须显式设置 `IdleTimeout`（60s）**（2026-10-21 生产） | **症状**：DSH 走网关的对话「发出去了但网关零日志」，界面无限转圈；同一时刻换官方模型正常；重启 workbuddy-api 即恢复。**证据**：`app.log` 里 17:38:41→17:52:08 共 13 分 27 秒无任何业务请求（`/api/state` 轮询照常 200 ⇒ listener 健康、非进程假死）；3 天里另有 4 次 `wsasend: established connection was aborted`（客户端侧断开）。**根因**：`http.Server` 只设了 `ReadHeaderTimeout`，不设 `IdleTimeout` 时 Go 回退到 `ReadTimeout`，两者皆空 ⇒ keep-alive 空闲连接**永不超时**，关闭时机完全交给客户端；半死连接留在两侧连接池里被反复复用，请求在 TCP 层丢失。**修法**：`internal/app/app.go` 抽出 `newHTTPServer(handler)`，显式设 `IdleTimeout: 60s`（远大于单次请求 2–9s 与流式每次写续命，不影响长回答；给网关主动回收上界）。抽成纯函数是为了单测直接断言配置。回归：`internal/app/server_idle_test.go` 的 `TestNewHTTPServerTimeouts`（删掉 IdleTimeout 即 FAIL，已做杀伤力验证）。**诚实的边界**：本次是相关性证据（零日志窗口 + 重启恢复 + 配置缺陷成立），不是抓包级实锤——下次再卡时用 `Get-NetTCPConnection -LocalPort 7863 -State Established` 对照网关日志即可钉死；若钉死后仍存在，方向转向 DSH 侧连接池。 |
+| R47 | **主 HTTP 服务必须显式设置 `IdleTimeout`（60s）**（2026-10-21 生产） | **症状**：DSH 走网关的对话「发出去了但网关零日志」，界面无限转圈；同一时刻换官方模型正常；重启 omnigate 即恢复。**证据**：`app.log` 里 17:38:41→17:52:08 共 13 分 27 秒无任何业务请求（`/api/state` 轮询照常 200 ⇒ listener 健康、非进程假死）；3 天里另有 4 次 `wsasend: established connection was aborted`（客户端侧断开）。**根因**：`http.Server` 只设了 `ReadHeaderTimeout`，不设 `IdleTimeout` 时 Go 回退到 `ReadTimeout`，两者皆空 ⇒ keep-alive 空闲连接**永不超时**，关闭时机完全交给客户端；半死连接留在两侧连接池里被反复复用，请求在 TCP 层丢失。**修法**：`internal/app/app.go` 抽出 `newHTTPServer(handler)`，显式设 `IdleTimeout: 60s`（远大于单次请求 2–9s 与流式每次写续命，不影响长回答；给网关主动回收上界）。抽成纯函数是为了单测直接断言配置。回归：`internal/app/server_idle_test.go` 的 `TestNewHTTPServerTimeouts`（删掉 IdleTimeout 即 FAIL，已做杀伤力验证）。**诚实的边界**：本次是相关性证据（零日志窗口 + 重启恢复 + 配置缺陷成立），不是抓包级实锤——下次再卡时用 `Get-NetTCPConnection -LocalPort 7863 -State Established` 对照网关日志即可钉死；若钉死后仍存在，方向转向 DSH 侧连接池。 |
 ## 2. 架构选型（依据）
 
 | 主题 | 选型 | 理由 |
@@ -95,7 +95,7 @@
 ## 3. 托盘菜单设计（当前形态）
 
 ```
-workbuddy-api
+omnigate
 ──────────
 打开主界面          → 系统浏览器打开 http://<listen>/
 查看日志            → 系统默认编辑器打开 data/app.log
@@ -215,9 +215,9 @@ POST /api/quit                     # 退出程序
 
 ## 6. 关键不变量（改动前必读）
 
-0. **每次代码变更后必须本地重新构建 `dist/workbuddy-api.exe`**（见 §8）。
-   `dist/` 在 `.gitignore` 中，CI 只产出带平台后缀的 `workbuddy-api-<os>-<arch>`，
-   **不会**生成 `dist/workbuddy-api.exe`——该文件只能手动构建。
+0. **每次代码变更后必须本地重新构建 `dist/omnigate.exe`**（见 §8）。
+   `dist/` 在 `.gitignore` 中，CI 只产出带平台后缀的 `omnigate-<os>-<arch>`，
+   **不会**生成 `dist/omnigate.exe`——该文件只能手动构建。
    不重建会导致：本地运行的二进制与源码不一致（例如改了版本号但仍显示旧版本）。
 1. `PrepareBody` 三改写勿动：强制 `stream=true`、`tool_choice` 归一化、`developer→system`
 2. 日志/面板/消息框**零 token**：不得输出 access/refresh token（调试用假 token）
@@ -300,7 +300,7 @@ POST /api/quit                     # 退出程序
 
 ## 8. 构建
 
-> ⚠️ **本地构建是日常约束**：任何代码变更后都要重新构建 `dist/workbuddy-api.exe`
+> ⚠️ **本地构建是日常约束**：任何代码变更后都要重新构建 `dist/omnigate.exe`
 > （见 §6 第 0 条）。CI 不生成该文件，且 `dist/` 不入版本控制。
 > 标准流程：`go build ./... && go vet ./... && go test ./...` 全绿后再构建。
 
@@ -309,17 +309,17 @@ POST /api/quit                     # 退出程序
 bash scripts/build_release.sh          # 发布用构建（含 -trimpath -s -w + 产物自检）
 
 # macOS（需 macOS 真机或 CI，cgo 必需）
-GOOS=darwin GOARCH=arm64 go build -o dist/workbuddy-api-darwin ./cmd/workbuddy-api
+GOOS=darwin GOARCH=arm64 go build -o dist/omnigate-darwin ./cmd/omnigate
 
 # Linux 无头
-GOOS=linux GOARCH=amd64 CGO_ENABLED=0 go build -o dist/workbuddy-api-linux ./cmd/workbuddy-api
+GOOS=linux GOARCH=amd64 CGO_ENABLED=0 go build -o dist/omnigate-linux ./cmd/omnigate
 ```
 
 构建后核对版本号已进二进制（防止拿到旧文件）：
 
 ```bash
 # Windows bash 下用 python 字节计数（strings 对 Go 二进制的长串不可靠）
-python -c "b=open('dist/workbuddy-api.exe','rb').read(); print('new:',b.count(b'2.5.3'),'old:',b.count(b'2.5.2'))"
+python -c "b=open('dist/omnigate.exe','rb').read(); print('new:',b.count(b'2.5.3'),'old:',b.count(b'2.5.2'))"
 # 期望：new >= 1 且 old == 0。若旧版本号仍在，说明构建未生效。
 ```
 
@@ -331,7 +331,7 @@ push `v*` tag → GitHub Actions 构建五平台产物并创建正式 release。
 
 ```bash
 # 发版前确认：版本常量已 bump（internal/app/app.go const Version）、
-# RELEASE-vX.Y.Z.md 已写好且与 tag 名一致、dist/workbuddy-api.exe 已本地重建验证
+# RELEASE-vX.Y.Z.md 已写好且与 tag 名一致、dist/omnigate.exe 已本地重建验证
 git tag vX.Y.Z && git push origin vX.Y.Z
 ```
 

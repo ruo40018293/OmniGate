@@ -14,14 +14,14 @@ import (
 	"sync"
 	"time"
 
-	"workbuddy-api/internal/auth"
-	"workbuddy-api/internal/httpauth"
-	"workbuddy-api/internal/ledger"
-	"workbuddy-api/internal/pool"
-	"workbuddy-api/internal/provider"
-	"workbuddy-api/internal/session"
+	"omnigate/internal/auth"
+	"omnigate/internal/httpauth"
+	"omnigate/internal/ledger"
+	"omnigate/internal/pool"
+	"omnigate/internal/provider"
+	"omnigate/internal/session"
 	// 别名 statsEngine：与运行统计引擎包名一致（本包无同名局部变量，别名仅为与 app 包对齐可读）
-	statsEngine "workbuddy-api/internal/stats"
+	statsEngine "omnigate/internal/stats"
 )
 
 // Runtime 是一个平台的一组运行时资源：pool + upstream + 静态模型兜底。

@@ -17,7 +17,7 @@ import (
 	"sync"
 	"time"
 
-	"workbuddy-api/internal/config"
+	"omnigate/internal/config"
 )
 
 const (

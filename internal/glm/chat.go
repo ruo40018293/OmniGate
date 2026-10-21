@@ -11,8 +11,8 @@ import (
 	"regexp"
 	"strings"
 
-	"workbuddy-api/internal/auth"
-	"workbuddy-api/internal/idle"
+	"omnigate/internal/auth"
+	"omnigate/internal/idle"
 )
 
 // assistantIDRe 清言 assistant_id 形状：24 位以上小写 hex（官方智能体 ID）。

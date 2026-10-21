@@ -6,7 +6,7 @@ import (
 	"strings"
 	"testing"
 
-	"workbuddy-api/internal/auth"
+	"omnigate/internal/auth"
 )
 
 // TestUserResourceDetailCarriesExpiryAndUsable 明细须带到期日与可用标记。

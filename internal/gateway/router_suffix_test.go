@@ -14,7 +14,7 @@ package gateway
 import (
 	"testing"
 
-	"workbuddy-api/internal/provider"
+	"omnigate/internal/provider"
 )
 
 // TestResolveStripsSuffixBeforeMapLookup 后缀不得让映射失效。

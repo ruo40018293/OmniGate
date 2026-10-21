@@ -11,7 +11,7 @@ import (
 	"sort"
 	"strings"
 
-	"workbuddy-api/internal/provider"
+	"omnigate/internal/provider"
 )
 
 // Router 模型名解析规则。零值 Router 仅接受带前缀的模型名。

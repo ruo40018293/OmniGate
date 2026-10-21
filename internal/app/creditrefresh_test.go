@@ -9,10 +9,10 @@ import (
 	"testing"
 	"time"
 
-	"workbuddy-api/internal/auth"
-	"workbuddy-api/internal/config"
-	"workbuddy-api/internal/pool"
-	"workbuddy-api/internal/provider"
+	"omnigate/internal/auth"
+	"omnigate/internal/config"
+	"omnigate/internal/pool"
+	"omnigate/internal/provider"
 )
 
 // fakeUpstream 只实现 UserResource / RefreshToken，其余为空实现。

@@ -8,7 +8,7 @@ import (
 	"net/http"
 	"time"
 
-	"workbuddy-api/internal/auth"
+	"omnigate/internal/auth"
 )
 
 const (

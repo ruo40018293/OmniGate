@@ -15,8 +15,8 @@ import (
 	"sync"
 	"time"
 
-	"workbuddy-api/internal/auth"
-	"workbuddy-api/internal/provider"
+	"omnigate/internal/auth"
+	"omnigate/internal/provider"
 )
 
 // Client 讯飞 Loomy 上游客户端。

@@ -7,7 +7,7 @@
 //	② 用户在系统浏览器完成登录
 //	③ 页面跳 office-raccoon://auth/callback?code=<授权码>&state=<可选>
 //	④ 该深链由 HKCU\Software\Classes\office-raccoon 注册的协议处理器接收
-//	   （官方值指向「商汤小浣熊.exe」，本包在登录期间临时指向 workbuddy-api 自身）
+//	   （官方值指向「商汤小浣熊.exe」，本包在登录期间临时指向 omnigate 自身）
 //	⑤ 拿到 code 后 POST {authApi}/login_with_authorization_code 兑换 token
 //
 // 桌面客户端走的就是上述这条链路，本包只是把第④步的协议处理方临时换成本工具，

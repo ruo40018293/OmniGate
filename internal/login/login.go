@@ -16,7 +16,7 @@ import (
 	"strings"
 	"time"
 
-	"workbuddy-api/internal/auth"
+	"omnigate/internal/auth"
 )
 
 // 上游常量（国内版 / 国际版）。

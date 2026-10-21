@@ -8,7 +8,7 @@
 //   - accessToken 有效期约 365 天，refreshToken 轮换。
 package workbuddyai
 
-import "workbuddy-api/internal/provider"
+import "omnigate/internal/provider"
 
 // 上游域名与端点（国际版单域名，chat/billing/catalog/auth 同域）。
 const (

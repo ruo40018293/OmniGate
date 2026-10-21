@@ -9,8 +9,8 @@ import (
 	"net/http"
 	"strings"
 
-	"workbuddy-api/internal/sanitize"
-	"workbuddy-api/internal/upstream"
+	"omnigate/internal/sanitize"
+	"omnigate/internal/upstream"
 )
 
 // ---------------------------------------------------------------------------

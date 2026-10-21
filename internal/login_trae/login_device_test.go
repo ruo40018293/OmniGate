@@ -20,7 +20,7 @@ import (
 	"strings"
 	"testing"
 
-	"workbuddy-api/internal/traework"
+	"omnigate/internal/traework"
 )
 
 // withDeviceSource 临时替换设备号来源，测试结束自动还原。

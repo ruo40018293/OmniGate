@@ -4,10 +4,10 @@ import (
 	"path/filepath"
 	"testing"
 
-	"workbuddy-api/internal/auth"
-	"workbuddy-api/internal/config"
-	"workbuddy-api/internal/pool"
-	"workbuddy-api/internal/provider"
+	"omnigate/internal/auth"
+	"omnigate/internal/config"
+	"omnigate/internal/pool"
+	"omnigate/internal/provider"
 )
 
 // newAliasApp 构造 TraeWork（主渠道）+ TraeCode（别名，复用同一 Pool）的最小 App。

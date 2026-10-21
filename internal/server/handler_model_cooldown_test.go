@@ -18,9 +18,9 @@ import (
 	"testing"
 	"time"
 
-	"workbuddy-api/internal/auth"
-	"workbuddy-api/internal/pool"
-	"workbuddy-api/internal/provider"
+	"omnigate/internal/auth"
+	"omnigate/internal/pool"
+	"omnigate/internal/provider"
 )
 
 // rateLimitUpstream 假上游：对指定模型返回 429/6004（带未来重置时间戳），

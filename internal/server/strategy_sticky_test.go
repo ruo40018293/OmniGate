@@ -9,9 +9,9 @@ package server
 import (
 	"testing"
 
-	"workbuddy-api/internal/auth"
-	"workbuddy-api/internal/pool"
-	"workbuddy-api/internal/provider"
+	"omnigate/internal/auth"
+	"omnigate/internal/pool"
+	"omnigate/internal/provider"
 )
 
 // newStrategyPool 造一个 3 账号的池（同分：靠 UID tie-break 保证顺序确定）。

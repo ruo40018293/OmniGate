@@ -10,8 +10,8 @@ import (
 	"testing"
 	"time"
 
-	"workbuddy-api/internal/auth"
-	"workbuddy-api/internal/provider"
+	"omnigate/internal/auth"
+	"omnigate/internal/provider"
 )
 
 // realQueueChunk 复刻 2026-10-20 实盘抓到的排队帧（上游三层嵌套 JSON）。

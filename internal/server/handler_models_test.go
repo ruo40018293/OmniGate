@@ -6,7 +6,7 @@ import (
 	"encoding/json"
 	"testing"
 
-	"workbuddy-api/internal/provider"
+	"omnigate/internal/provider"
 )
 
 // TestModelEntryContract 单条模型条目应含 OpenAI 官方字段 + architecture 模态声明。

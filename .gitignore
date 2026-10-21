@@ -1,17 +1,17 @@
 # 编译产物
 dist/
 
-# 注意：cmd/workbuddy-api/rsrc_windows_amd64.syso **必须入库**，不再忽略。
+# 注意：cmd/omnigate/rsrc_windows_amd64.syso **必须入库**，不再忽略。
 # 它由 build/make_icon.py + build/make_syso.py 从 ico 生成，承载 exe 的
 # 图标与版本信息（RT_GROUP_ICON / RT_ICON / RT_VERSION）。
 # 若忽略它，任何人克隆后 `go build` 出的 exe 都**没有图标**，
 # 而构建过程不会报任何错 —— 症状是「图标莫名消失」，极难定位。
 # 改了图标/配色后跑 `python build/make_icon.py && python build/make_syso.py`
 # 重新生成即可，不必手改二进制。
-cmd/workbuddy-api/icon.ico
+cmd/omnigate/icon.ico
 
 # Docker 构建产物（二进制由 build-binary.sh 生成，镜像 tar 由 build-image.sh 生成）
-docker/workbuddy-api
+docker/omnigate
 docker/dist/
 
 # 运行时数据（含敏感凭据）

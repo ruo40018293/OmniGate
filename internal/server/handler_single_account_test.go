@@ -25,9 +25,9 @@ import (
 	"testing"
 	"time"
 
-	"workbuddy-api/internal/auth"
-	"workbuddy-api/internal/pool"
-	"workbuddy-api/internal/provider"
+	"omnigate/internal/auth"
+	"omnigate/internal/pool"
+	"omnigate/internal/provider"
 )
 
 // 测试用的「单账号渠道」标识：自造而非复用真实渠道，避免测试与生产渠道耦合。

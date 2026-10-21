@@ -13,10 +13,10 @@ import (
 	"sync"
 	"time"
 
-	"workbuddy-api/internal/auth"
-	"workbuddy-api/internal/ledger"
-	"workbuddy-api/internal/pool"
-	"workbuddy-api/internal/provider"
+	"omnigate/internal/auth"
+	"omnigate/internal/ledger"
+	"omnigate/internal/pool"
+	"omnigate/internal/provider"
 )
 
 // Config 调度器依赖。

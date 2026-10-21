@@ -8,8 +8,8 @@ import (
 	"testing"
 	"time"
 
-	"workbuddy-api/internal/auth"
-	"workbuddy-api/internal/provider"
+	"omnigate/internal/auth"
+	"omnigate/internal/provider"
 )
 
 // TestClassify 覆盖阶段 C 实测到的全部错误形态（LiteLLM 信封）。

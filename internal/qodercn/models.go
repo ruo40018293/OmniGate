@@ -16,8 +16,8 @@ import (
 	"sync"
 	"time"
 
-	"workbuddy-api/internal/auth"
-	"workbuddy-api/internal/provider"
+	"omnigate/internal/auth"
+	"omnigate/internal/provider"
 )
 
 // contextConfig 形状：{"<label>": {"is_default":bool,"token_count":int}}

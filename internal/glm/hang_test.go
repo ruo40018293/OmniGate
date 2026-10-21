@@ -11,8 +11,8 @@ import (
 	"testing"
 	"time"
 
-	"workbuddy-api/internal/auth"
-	"workbuddy-api/internal/provider"
+	"omnigate/internal/auth"
+	"omnigate/internal/provider"
 )
 
 // 本文件审计 glm 包的「挂起 / 泄漏 / 并发」问题。
@@ -264,7 +264,7 @@ func TestStreamConcurrentClients(t *testing.T) {
 	// 注意判据：不能直接数 runtime.NumGoroutine()——net/http 的连接池
 	// （Transport.dialConn / Server.Serve）会保留空闲 keep-alive 连接，
 	// 属于标准库正常行为，会按 IdleConnTimeout 自行回收。
-	// 这里只统计**卡在我们自己代码里**的 goroutine（栈含 workbuddy-api/internal/glm）。
+	// 这里只统计**卡在我们自己代码里**的 goroutine（栈含 omnigate/internal/glm）。
 	time.Sleep(1500 * time.Millisecond)
 	after := runtimeNumGoroutine()
 	ours := countOurGoroutines()
@@ -286,7 +286,7 @@ func countOurGoroutines() int {
 	blocks := strings.Split(string(buf[:n]), "\n\n")
 	count := 0
 	for _, b := range blocks {
-		if !strings.Contains(b, "workbuddy-api/internal/glm") {
+		if !strings.Contains(b, "omnigate/internal/glm") {
 			continue
 		}
 		// 排除测试函数自身

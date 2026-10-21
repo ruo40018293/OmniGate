@@ -1,10 +1,10 @@
-# workbuddy-api 极简运行镜像。
+# omnigate 极简运行镜像。
 #
 # 设计原则：镜像内**不编译、不拉依赖**，只 COPY 开发机交叉编译好的单个静态二进制 ——
 # 彻底规避在 NAS 上 go mod download 访问 proxy.golang.org 超时（i/o timeout）。
 # 那是同类项目在容器里现场构建时最常见的失败点。
 #
-# 二进制 workbuddy-api 由开发机交叉编译（GOOS=linux GOARCH=amd64 CGO_ENABLED=0）：
+# 二进制 omnigate 由开发机交叉编译（GOOS=linux GOARCH=amd64 CGO_ENABLED=0）：
 # 单进程 = OpenAI 兼容 HTTP 服务 + 双调度器 + 静态 Web 管理面板；
 # 容器内以 --no-tray 无头运行（容器无桌面环境）。
 FROM alpine:3.20
@@ -19,9 +19,9 @@ FROM alpine:3.20
 
 WORKDIR /app
 
-COPY workbuddy-api /app/workbuddy-api
+COPY omnigate /app/omnigate
 COPY entrypoint.sh /app/entrypoint.sh
-RUN chmod +x /app/workbuddy-api /app/entrypoint.sh
+RUN chmod +x /app/omnigate /app/entrypoint.sh
 
 # 只把「数据目录」声明为卷。**绝不声明或挂载单个文件** ——
 # 历史上曾把 config.json 作为单文件 bind 挂载，当宿主上该文件不存在时

@@ -19,8 +19,8 @@
 所以这个脚本就是**判据本身**：构建后跑一次，PASS 才算真的成功。
 
 用法:
-    python build/check_res.py cmd/workbuddy-api/rsrc_windows_amd64.syso
-    python build/check_res.py dist/workbuddy-api.exe
+    python build/check_res.py cmd/omnigate/rsrc_windows_amd64.syso
+    python build/check_res.py dist/omnigate.exe
 """
 
 from __future__ import annotations
@@ -304,7 +304,7 @@ def check_syso(path):
         if label != "RT_VERSION":
             continue
         u = sec[drva:drva + dsz].decode("utf-16-le", "replace")
-        has = "workbuddy-api" in u
+        has = "omnigate" in u
         print(f"  RT_VERSION {dsz}B, 含 ProductName: {has}")
         if not has:
             print("  FAIL: VS_VERSIONINFO 缺少 ProductName")
@@ -437,7 +437,7 @@ def check_exe(path):
         o = r2o(drva)
         if o is not None:
             u = d[o:o + dsz].decode("utf-16-le", "replace")
-            print(f"  RT_VERSION {dsz}B: ProductName={'workbuddy-api' in u} "
+            print(f"  RT_VERSION {dsz}B: ProductName={'omnigate' in u} "
                   f"Description={'账号聚合服务' in u}")
 
     print("  " + ("PASS" if ok else "FAIL"))

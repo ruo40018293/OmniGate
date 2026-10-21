@@ -1,8 +1,8 @@
-// sse.go 把上游的 Anthropic Messages SSE 流转成 workbuddy-api 内部统一使用的
+// sse.go 把上游的 Anthropic Messages SSE 流转成 omnigate 内部统一使用的
 // OpenAI Chat SSE 流，随后交给 internal/upstream 的 Stream/Aggregate 处理
 // （那里已有一整套规范化：tool_calls 分片合并、空 content 噪声剥离、错误帧等）。
 //
-// 为什么要转而不是让上层直接吃 Anthropic 形状：workbuddy-api 的内层协议恒为
+// 为什么要转而不是让上层直接吃 Anthropic 形状：omnigate 的内层协议恒为
 // OpenAI Chat（外层三接口在 internal/gateway 收敛），渠道层负责方言投影。
 // 转换后所有既有规范化逻辑零改动复用。
 package monkeycode
@@ -368,7 +368,7 @@ func (s *anthropicStreamReader) finish(reason string) []byte {
 	return append(out, []byte("data: [DONE]\n\n")...)
 }
 
-// errorFrame 透传上游错误（workbuddy-api 的 streamCore 会识别 error 帧）。
+// errorFrame 透传上游错误（omnigate 的 streamCore 会识别 error 帧）。
 func (s *anthropicStreamReader) errorFrame(msg string) []byte {
 	frame := map[string]any{"error": map[string]any{"message": msg, "type": "upstream_error"}}
 	out := s.encode(frame)

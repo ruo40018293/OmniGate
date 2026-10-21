@@ -24,7 +24,7 @@ import (
 	"strings"
 	"time"
 
-	"workbuddy-api/internal/auth"
+	"omnigate/internal/auth"
 )
 
 // growthAutomator 由支持成长中心的渠道实现（当前仅 workbuddy）。

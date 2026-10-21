@@ -19,8 +19,8 @@ import (
 	"strings"
 	"time"
 
-	"workbuddy-api/internal/auth"
-	"workbuddy-api/internal/provider"
+	"omnigate/internal/auth"
+	"omnigate/internal/provider"
 )
 
 // checkinHost 签到 API 域名（抓包确认 openapi.qoder.com.cn，与业务 API 同域）。

@@ -7,8 +7,8 @@ import (
 	"net/http/httptest"
 	"testing"
 
-	"workbuddy-api/internal/auth"
-	"workbuddy-api/internal/provider"
+	"omnigate/internal/auth"
+	"omnigate/internal/provider"
 )
 
 func TestNormalizeModelName(t *testing.T) {

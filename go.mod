@@ -1,4 +1,4 @@
-module workbuddy-api
+module omnigate
 
 go 1.25.0
 

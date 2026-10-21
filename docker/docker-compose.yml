@@ -1,4 +1,4 @@
-# workbuddy-api · Docker Compose 部署文件（NAS 上现场构建版）
+# omnigate · Docker Compose 部署文件（NAS 上现场构建版）
 #
 # 用法：把整个 docker/ 目录传到 NAS，cd 进去后执行：
 #   docker compose up -d --build
@@ -14,12 +14,12 @@
 # ⚠️ WB2A 时代的变量名已全部换成 WILDWORK_*，迁移旧部署时注意。
 
 services:
-  workbuddy-api:
+  omnigate:
     build:
       context: .
       dockerfile: Dockerfile
-    image: workbuddy-api:latest
-    container_name: workbuddy-api
+    image: omnigate:latest
+    container_name: omnigate
     restart: unless-stopped
     environment:
       # 容器内必须监听全部网卡（不能写 127.0.0.1，否则宿主访问不到）。

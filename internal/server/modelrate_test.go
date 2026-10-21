@@ -12,9 +12,9 @@ import (
 	"strings"
 	"testing"
 
-	"workbuddy-api/internal/auth"
-	"workbuddy-api/internal/pool"
-	"workbuddy-api/internal/provider"
+	"omnigate/internal/auth"
+	"omnigate/internal/pool"
+	"omnigate/internal/provider"
 )
 
 // rateHandler 造一个带倍率查询钩子的 handler（固定倍率表）。

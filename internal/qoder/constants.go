@@ -6,7 +6,7 @@ package qoder
 import (
 	"sort"
 
-	"workbuddy-api/internal/provider"
+	"omnigate/internal/provider"
 )
 
 // 上游域名与端点（CN only）。

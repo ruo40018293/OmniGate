@@ -6,7 +6,7 @@ import (
 	"net/http/httptest"
 	"testing"
 
-	"workbuddy-api/internal/server"
+	"omnigate/internal/server"
 )
 
 // TestWebUIHeadersEndToEnd 用**真实的 embed 前端资源**验证安全头。

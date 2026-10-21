@@ -11,8 +11,8 @@ import (
 	"testing"
 	"time"
 
-	"workbuddy-api/internal/auth"
-	"workbuddy-api/internal/provider"
+	"omnigate/internal/auth"
+	"omnigate/internal/provider"
 )
 
 // mockChatGLM 模拟 chatglm.cn 的私有接口，用于端到端验证本渠道的完整链路。

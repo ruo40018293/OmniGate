@@ -1,4 +1,4 @@
-// Command workbuddy-api 系统托盘 daemon 入口。
+// Command omnigate 系统托盘 daemon 入口。
 // 单进程 = OpenAI 兼容 HTTP 服务 + 自动签到调度器 + 系统托盘 + 静态 Web UI。
 // 双击 exe 启动常驻托盘；托盘菜单：打开主界面 / 刷新积分 / 查看日志 / 退出；
 // 打开主界面或双击托盘 → 系统浏览器打开 Web UI。
@@ -34,28 +34,28 @@ import (
 	// 且日志里看不出任何异常。内嵌后二进制自带时区表，与运行环境解耦（约 +450KB）。
 	_ "time/tzdata"
 
-	"workbuddy-api/internal/app"
-	"workbuddy-api/internal/auth"
-	"workbuddy-api/internal/config"
-	"workbuddy-api/internal/gateway"
-	"workbuddy-api/internal/glm"
-	"workbuddy-api/internal/ledger"
-	"workbuddy-api/internal/loomy"
-	"workbuddy-api/internal/monkeycode"
-	"workbuddy-api/internal/platform"
-	"workbuddy-api/internal/pool"
-	"workbuddy-api/internal/provider"
-	"workbuddy-api/internal/qoder"
-	"workbuddy-api/internal/qodercn"
-	"workbuddy-api/internal/qodercom"
-	"workbuddy-api/internal/qwenwork"
-	"workbuddy-api/internal/raccoon"
-	"workbuddy-api/internal/scheduler"
-	"workbuddy-api/internal/server"
-	"workbuddy-api/internal/systray"
-	"workbuddy-api/internal/traework"
-	"workbuddy-api/internal/upstream"
-	"workbuddy-api/internal/workbuddyai"
+	"omnigate/internal/app"
+	"omnigate/internal/auth"
+	"omnigate/internal/config"
+	"omnigate/internal/gateway"
+	"omnigate/internal/glm"
+	"omnigate/internal/ledger"
+	"omnigate/internal/loomy"
+	"omnigate/internal/monkeycode"
+	"omnigate/internal/platform"
+	"omnigate/internal/pool"
+	"omnigate/internal/provider"
+	"omnigate/internal/qoder"
+	"omnigate/internal/qodercn"
+	"omnigate/internal/qodercom"
+	"omnigate/internal/qwenwork"
+	"omnigate/internal/raccoon"
+	"omnigate/internal/scheduler"
+	"omnigate/internal/server"
+	"omnigate/internal/systray"
+	"omnigate/internal/traework"
+	"omnigate/internal/upstream"
+	"omnigate/internal/workbuddyai"
 )
 
 //go:embed all:web
@@ -89,11 +89,11 @@ func main() {
 	//
 	// 同时必须放在 HTTP 服务 / 调度器之前：本项目的基线曾出现过
 	// 「先起 HTTP 再查锁」导致第二个实例 bind 失败、留下僵尸进程的问题。
-	if !platform.AcquireSingleInstance("WorkBuddy-API-SingleInstance") {
+	if !platform.AcquireSingleInstance("OmniGate-SingleInstance") {
 		log.Printf("已有实例在运行，本实例退出")
 		// 交互式启动时给用户一个可见反馈（无头模式只写日志）
 		if !slices.Contains(os.Args[1:], "--no-tray") {
-			platform.InfoBox("WorkBuddy-API",
+			platform.InfoBox("OmniGate",
 				"程序已在运行。\n\n"+
 					"请从右下角托盘图标打开管理面板，或先在托盘菜单中退出后再启动。")
 		}
@@ -657,14 +657,14 @@ func main() {
 
 	// 启动提示（非 --autostart）：系统通知
 	if !autostart && !noTray {
-		platform.Notify("workbuddy-api 已启动",
+		platform.Notify("omnigate 已启动",
 			fmt.Sprintf("OpenAI 兼容 API 地址：\nhttp://%s:%d\n\n点击右下角托盘图标或菜单打开主界面。", displayHost(cfg), cfg.Listen.Port))
 	}
 
 	if noTray {
 		// 无头模式：打印信息，阻塞等待信号
 		addr := cfg.Listen.Addr()
-		fmt.Printf("workbuddy-api headless mode started\n")
+		fmt.Printf("omnigate headless mode started\n")
 		fmt.Printf("  OpenAI API:    http://%s:%d/v1\n", displayHost(cfg), cfg.Listen.Port)
 		fmt.Printf("  API-Key:       %s\n", cfg.APIKey)
 		fmt.Printf("  Web UI (本机): http://%s:%d/\n", openHost(cfg), cfg.Listen.Port)
@@ -695,7 +695,7 @@ func main() {
 				os.Exit(1)
 			}
 		}()
-		systray.Run(trayIconICO, "workbuddy-api — 渠道聚合代理", systray.Actions{
+		systray.Run(trayIconICO, "omnigate — 渠道聚合代理", systray.Actions{
 			OpenUI: func() {
 				// 本机打开面板：通配监听时浏览器访问不了 0.0.0.0，用局域网 IP 兑底
 				_ = platform.OpenURL(fmt.Sprintf("http://%s:%d/", openHost(cfg), cfg.Listen.Port))
@@ -706,7 +706,7 @@ func main() {
 				}
 			},
 			Quit: func() {
-				if platform.AskYesNo("workbuddy-api", "确定退出 workbuddy-api 吗？") {
+				if platform.AskYesNo("omnigate", "确定退出 omnigate 吗？") {
 					// 先摘托盘图标：NIM_DELETE 由托盘消息循环执行，返回即已回收。
 					// 直接 os.Exit 会跳过这一步，Windows 任务栏留下幽灵图标。
 					systray.Quit(3 * time.Second)
@@ -724,7 +724,7 @@ func main() {
 //
 // 背景：小浣熊登录期间会把 HKCU 的 `office-raccoon` 协议命令行临时改成
 //
-//	"<workbuddy-api.exe>" --raccoon-callback "%1"
+//	"<omnigate.exe>" --raccoon-callback "%1"
 //
 // 用户授权完成后 Windows 按该命令行再拉起一份本 exe。该子进程的**唯一职责**
 // 是把深链解析后原子落盘（raccoon.SaveCallback），由常驻 daemon 的轮询读取。
@@ -852,7 +852,7 @@ func openHost(cfg *config.Config) string {
 func fatal(format string, args ...any) {
 	msg := fmt.Sprintf(format, args...)
 	log.Printf("%s", msg)
-	platform.InfoBox("workbuddy-api", msg)
+	platform.InfoBox("OmniGate", msg)
 	os.Exit(1)
 }
 

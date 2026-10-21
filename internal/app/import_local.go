@@ -14,9 +14,9 @@ import (
 	"strings"
 	"time"
 
-	"workbuddy-api/internal/auth"
-	"workbuddy-api/internal/monkeycode"
-	"workbuddy-api/internal/provider"
+	"omnigate/internal/auth"
+	"omnigate/internal/monkeycode"
+	"omnigate/internal/provider"
 )
 
 // 本文件实现「导入型」渠道的凭据获取：凭据由官方客户端在本机维护，
@@ -501,7 +501,7 @@ func (a *App) importRaccoon() (*ImportLocalResult, error) {
 	a.afterAccountAdded(provider.Raccoon)
 	return &ImportLocalResult{
 		Channel: "raccoon", UID: uid, File: filepath.Base(file),
-		Note: "access_token 约 2 小时有效，workbuddy-api 会用 refresh_token 自动续期（上游会轮换 refresh_token，新值已随刷新落盘）",
+		Note: "access_token 约 2 小时有效，omnigate 会用 refresh_token 自动续期（上游会轮换 refresh_token，新值已随刷新落盘）",
 	}, nil
 }
 

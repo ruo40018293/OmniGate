@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""生成 workbuddy-api 的多尺寸 Windows 图标。
+"""生成 omnigate 的多尺寸 Windows 图标。
 
 ## 为什么不用一张图直接缩
 

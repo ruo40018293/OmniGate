@@ -8,7 +8,7 @@ import (
 	"log"
 	"strings"
 
-	"workbuddy-api/internal/sanitize"
+	"omnigate/internal/sanitize"
 )
 
 // PrepareBody 单 pass 改写；无法解析时原样返回。

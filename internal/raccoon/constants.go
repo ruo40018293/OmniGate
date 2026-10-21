@@ -12,7 +12,7 @@
 //     否则用户写错模型会静默消耗默认模型额度（阶段 C 实测）。
 package raccoon
 
-import "workbuddy-api/internal/provider"
+import "omnigate/internal/provider"
 
 // 上游域名与端点。
 const (

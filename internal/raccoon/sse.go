@@ -11,7 +11,7 @@ import (
 	"strings"
 	"time"
 
-	"workbuddy-api/internal/provider"
+	"omnigate/internal/provider"
 )
 
 // 上游已是标准 OpenAI SSE（`data: {...}` + 结尾 `data: [DONE]`），

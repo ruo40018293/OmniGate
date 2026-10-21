@@ -15,9 +15,9 @@ import (
 	"sync"
 	"time"
 
-	"workbuddy-api/internal/auth"
-	"workbuddy-api/internal/idle"
-	"workbuddy-api/internal/provider"
+	"omnigate/internal/auth"
+	"omnigate/internal/idle"
+	"omnigate/internal/provider"
 )
 
 // Client QoderWork 上游客户端。

@@ -1,5 +1,5 @@
 // Package app 业务编排层：HTTP 管理 API + 托盘动作 + 登录编排 + 日志。
-// 由 daemon 入口（cmd/workbuddy-api）装配，替代旧版 wails 绑定层。
+// 由 daemon 入口（cmd/omnigate）装配，替代旧版 wails 绑定层。
 package app
 
 import (
@@ -19,31 +19,31 @@ import (
 	"sync"
 	"time"
 
-	"workbuddy-api/internal/auth"
-	"workbuddy-api/internal/config"
-	"workbuddy-api/internal/ledger"
-	"workbuddy-api/internal/login"
-	"workbuddy-api/internal/login_glm"
-	loginqoder "workbuddy-api/internal/login_qoder"
-	loginqodercn "workbuddy-api/internal/login_qodercn"
-	loginqodercom "workbuddy-api/internal/login_qodercom"
-	loginqwenwork "workbuddy-api/internal/login_qwenwork"
-	loginraccoon "workbuddy-api/internal/login_raccoon"
-	logintrae "workbuddy-api/internal/login_trae"
-	"workbuddy-api/internal/login_wbai"
-	"workbuddy-api/internal/platform"
-	"workbuddy-api/internal/pool"
-	"workbuddy-api/internal/provider"
-	"workbuddy-api/internal/qoder"
-	"workbuddy-api/internal/qodercn"
-	"workbuddy-api/internal/qodercom"
-	"workbuddy-api/internal/qwenwork"
-	"workbuddy-api/internal/raccoon"
-	"workbuddy-api/internal/scheduler"
-	"workbuddy-api/internal/server"
+	"omnigate/internal/auth"
+	"omnigate/internal/config"
+	"omnigate/internal/ledger"
+	"omnigate/internal/login"
+	"omnigate/internal/login_glm"
+	loginqoder "omnigate/internal/login_qoder"
+	loginqodercn "omnigate/internal/login_qodercn"
+	loginqodercom "omnigate/internal/login_qodercom"
+	loginqwenwork "omnigate/internal/login_qwenwork"
+	loginraccoon "omnigate/internal/login_raccoon"
+	logintrae "omnigate/internal/login_trae"
+	"omnigate/internal/login_wbai"
+	"omnigate/internal/platform"
+	"omnigate/internal/pool"
+	"omnigate/internal/provider"
+	"omnigate/internal/qoder"
+	"omnigate/internal/qodercn"
+	"omnigate/internal/qodercom"
+	"omnigate/internal/qwenwork"
+	"omnigate/internal/raccoon"
+	"omnigate/internal/scheduler"
+	"omnigate/internal/server"
 	// 别名 statsEngine：/api/usage handler 内有同名局部变量 stats（遮蔽包名）
-	statsEngine "workbuddy-api/internal/stats"
-	"workbuddy-api/internal/systray"
+	statsEngine "omnigate/internal/stats"
+	"omnigate/internal/systray"
 )
 
 // Version 版本号。
@@ -53,7 +53,7 @@ import (
 // macOS 打包产物名（build/macos/build-app.sh grep 本行）都读这里。
 //
 // ⚠️ 别只改这里就以为发版完成了：exe 里内嵌的 RT_VERSION 资源
-// （cmd/workbuddy-api/rsrc_windows_amd64.syso，由 build/make_syso.py 从
+// （cmd/omnigate/rsrc_windows_amd64.syso，由 build/make_syso.py 从
 // icon.ico 生成）也带版本号，须重新生成 —— 见 build/ICON_README.md。
 // 否则文件属性里显示的还是旧版本，与面板显示不一致。
 const Version = "0.1.4"

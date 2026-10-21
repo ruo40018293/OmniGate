@@ -12,7 +12,7 @@ import (
 	"strings"
 	"testing"
 
-	"workbuddy-api/internal/auth"
+	"omnigate/internal/auth"
 )
 
 const (

@@ -19,7 +19,7 @@
 //
 // ## 用法
 //
-// 1. 先启动 workbuddy-api（任意目录，需已导入账号）
+// 1. 先启动 omnigate（任意目录，需已导入账号）
 // 2. NODE_PATH=<node_modules 路径> node tools/panel_smoke.js
 //    （需要 playwright；Windows 上默认用 Edge，无需额外下载 Chromium）
 //

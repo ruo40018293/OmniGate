@@ -19,7 +19,7 @@ import (
 func callbackPage(ok bool, msg string) string {
 	if ok {
 		return fmt.Sprintf(callbackPageBase, "ok", "✓", "登录成功",
-			"凭证已保存，请回到 workbuddy-api 面板查看账号。<br>本页面即将自动关闭…",
+			"凭证已保存，请回到 omnigate 面板查看账号。<br>本页面即将自动关闭…",
 			"true", 1500, 2500)
 	}
 	return fmt.Sprintf(callbackPageBase, "err", "✕", "登录失败",
@@ -33,7 +33,7 @@ const callbackPageBase = `<!doctype html>
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
-<title>workbuddy-api 登录回调</title>
+<title>omnigate 登录回调</title>
 <style>
   :root { color-scheme: light; }
   * { margin: 0; padding: 0; box-sizing: border-box; }
@@ -74,7 +74,7 @@ const callbackPageBase = `<!doctype html>
     <h1>%s</h1>
     <p>%s</p>
     <button class="close-btn" onclick="tryClose()">立即关闭</button>
-    <div class="brand">workbuddy-api · 本页面由本机回调服务生成，可安全关闭</div>
+    <div class="brand">omnigate · 本页面由本机回调服务生成，可安全关闭</div>
   </div>
 <script>
 var autoClose = %s;

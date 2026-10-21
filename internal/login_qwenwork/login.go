@@ -33,7 +33,7 @@ import (
 	"sync"
 	"time"
 
-	"workbuddy-api/internal/auth"
+	"omnigate/internal/auth"
 )
 
 // 上游常量（IDE 桌面版同款）。

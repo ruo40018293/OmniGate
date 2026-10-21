@@ -10,7 +10,7 @@ import (
 	"sync"
 	"time"
 
-	"workbuddy-api/internal/auth"
+	"omnigate/internal/auth"
 )
 
 // CoolKind 冷却类型。

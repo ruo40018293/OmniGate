@@ -10,7 +10,7 @@ import (
 	"testing"
 	"time"
 
-	"workbuddy-api/internal/auth"
+	"omnigate/internal/auth"
 )
 
 // 本文件锁定一个**真实 bug**（2026-09-27 从生产日志发现）：

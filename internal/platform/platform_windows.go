@@ -151,7 +151,7 @@ func OpenURL(url string) error {
 // ---------------------------------------------------------------------------
 
 const autostartKey = `Software\Microsoft\Windows\CurrentVersion\Run`
-const autostartValue = "workbuddy-api"
+const autostartValue = "omnigate"
 
 // SetAutostart 设置/取消当前 exe 的开机自启。
 func SetAutostart(on bool) error {

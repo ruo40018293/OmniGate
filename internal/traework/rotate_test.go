@@ -26,7 +26,7 @@ import (
 	"testing"
 	"time"
 
-	"workbuddy-api/internal/auth"
+	"omnigate/internal/auth"
 )
 
 // rotateFixture 模拟一个「多账号共用设备号」的上游。

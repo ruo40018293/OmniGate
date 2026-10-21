@@ -15,11 +15,11 @@ import (
 	"testing"
 	"time"
 
-	"workbuddy-api/internal/auth"
-	"workbuddy-api/internal/config"
-	"workbuddy-api/internal/pool"
-	"workbuddy-api/internal/provider"
-	"workbuddy-api/internal/server"
+	"omnigate/internal/auth"
+	"omnigate/internal/config"
+	"omnigate/internal/pool"
+	"omnigate/internal/provider"
+	"omnigate/internal/server"
 )
 
 // withHome 把用户主目录指向临时目录（ModelsJSONPath 依赖它），返回 models.json 路径。

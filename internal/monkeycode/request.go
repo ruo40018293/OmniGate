@@ -1,6 +1,6 @@
-// request.go 把 workbuddy-api 内部的 OpenAI Chat 请求体翻译成 Anthropic Messages 请求体。
+// request.go 把 omnigate 内部的 OpenAI Chat 请求体翻译成 Anthropic Messages 请求体。
 //
-// workbuddy-api 的架构是「外层三接口（Chat / Responses / Anthropic）统一收敛成
+// omnigate 的架构是「外层三接口（Chat / Responses / Anthropic）统一收敛成
 // OpenAI Chat 形状，再交给渠道」；而 MonkeyCode 上游是 **Anthropic 形状**
 // （客户端 settings.json 里 type=anthropic），因此本渠道需要一层请求方言投影。
 //

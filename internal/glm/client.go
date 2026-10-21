@@ -19,9 +19,9 @@ import (
 	"sync"
 	"time"
 
-	"workbuddy-api/internal/auth"
-	"workbuddy-api/internal/idle"
-	"workbuddy-api/internal/provider"
+	"omnigate/internal/auth"
+	"omnigate/internal/idle"
+	"omnigate/internal/provider"
 )
 
 // Client 上游 HTTP 客户端。Base 可覆盖以便测试。
@@ -217,7 +217,7 @@ func (c *Client) doJSONEnvelope(ctx context.Context, method, path, token string,
 }
 
 // classifyEnvelope 把信封错误映射成 provider.Error。
-// 判据顺序很关键（对齐 workbuddy-api 既有教训）：
+// 判据顺序很关键（对齐 omnigate 既有教训）：
 //   - 40102 unauthorized user → 登录态失效，可 refresh 自愈
 //   - 429 → 软限流
 //   - 其余 4xx → 请求级问题，不罚账号
@@ -245,7 +245,7 @@ func classifyEnvelope(status int, env *envelope) error {
 // RefreshToken 用 refresh_token 换 access_token 并**落盘轮换后的新 refresh_token**。
 //
 // 关键：清言刷新会同时轮换 refresh_token。不落盘 = 下次启动用旧 refresh token，
-// 而旧的那个已被上游作废 → 账号永久失效（workbuddy-api 不变量 19/20 的同款陷阱）。
+// 而旧的那个已被上游作废 → 账号永久失效（omnigate 不变量 19/20 的同款陷阱）。
 func (c *Client) RefreshToken(a *auth.Auth) error {
 	res, err := c.refresh(context.Background(), a.RefreshTokenValue())
 	if err != nil {
@@ -456,7 +456,7 @@ func jwtExpiry(token string) int64 {
 // 导致每次请求都刷 token。加载凭证时调用本方法即可原地修好（仅内存，不写盘——
 // 校正后不再触发刷新路径，下次真正刷新时自然落盘正确值）。
 //
-// 对应 workbuddy-api 不变式 19（401 必须自愈）与 R21（expires_in 单位陷阱）的同族问题。
+// 对应 omnigate 不变式 19（401 必须自愈）与 R21（expires_in 单位陷阱）的同族问题。
 func AdoptJWTExpiry(a *auth.Auth) {
 	if a == nil {
 		return
@@ -638,7 +638,7 @@ func (c *Client) Classify(status int, body string) provider.ErrKind {
 
 // Classify 错误分类（独立函数便于测试）。
 //
-// 判据顺序（对齐 workbuddy-api 不变量 15：429 必须优先于余额类判据）：
+// 判据顺序（对齐 omnigate 不变量 15：429 必须优先于余额类判据）：
 //   - 40102 / 401 → ErrSessionDead（可 refresh 自愈，调度器会重试）
 //   - 429 → ErrSoftRate
 //   - 403 → ErrWafBlock（WAF 拦截页，账号软冷却）

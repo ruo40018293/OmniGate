@@ -26,9 +26,9 @@ import (
 	"strings"
 	"time"
 
-	"workbuddy-api/internal/auth"
-	"workbuddy-api/internal/provider"
-	"workbuddy-api/internal/upstream"
+	"omnigate/internal/auth"
+	"omnigate/internal/provider"
+	"omnigate/internal/upstream"
 )
 
 // Client 上游 HTTP 客户端。Base 可覆盖以便测试。
