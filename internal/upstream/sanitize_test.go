@@ -364,7 +364,7 @@ func TestSanitizeLiteralByteExact(t *testing.T) {
 		},
 		{
 			"You are an AI agent powered by DeepSeek Harness",
-			"You are an AI agent powered by the DeepSeek Harness",
+			"",
 		},
 		{
 			"DeepSeek Harness Web GUI",
@@ -418,8 +418,8 @@ func TestDSHIdentityRewritten(t *testing.T) {
 	if strings.Contains(out, dshIdentity) {
 		t.Errorf("DSH identity still present: %q", out)
 	}
-	if !strings.Contains(out, "You are an AI agent powered by the DeepSeek Harness") {
-		t.Errorf("DSH identity not rewritten as expected: %q", out)
+	if strings.Contains(out, "DeepSeek Harness") {
+		t.Errorf("R53: identity must be deleted, got: %q", out)
 	}
 }
 
@@ -430,8 +430,8 @@ func TestDSHIdentityWithSuffixRewritten(t *testing.T) {
 	if strings.Contains(out, "powered by DeepSeek Harness") {
 		t.Errorf("DSH fingerprint still present: %q", out)
 	}
-	if !strings.Contains(out, "powered by the DeepSeek Harness") {
-		t.Errorf("DSH identity not rewritten as expected: %q", out)
+	if strings.Contains(out, "DeepSeek Harness") {
+		t.Errorf("R53: identity must be deleted, got: %q", out)
 	}
 }
 
@@ -465,8 +465,8 @@ func TestDSHPrepareBodyNoFingerprintRemains(t *testing.T) {
 	if strings.Contains(sys, "powered by DeepSeek Harness") {
 		t.Errorf("DSH fingerprint remains in wire body: %q", sys)
 	}
-	if !strings.Contains(sys, "powered by the DeepSeek Harness") {
-		t.Errorf("DSH rewrite missing in wire body: %q", sys)
+	if strings.Contains(sys, "DeepSeek Harness") {
+		t.Errorf("R53: identity must be deleted from wire body, got: %q", sys)
 	}
 }
 

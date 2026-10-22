@@ -54,7 +54,7 @@ var rewrites = [][2]string{
 	{
 		// DSH 身份句：上游只认 system 开头的逐字形态，插入冠词 the 即绕过（实测 200）。
 		"You are an AI agent powered by DeepSeek Harness",
-		"You are an AI agent powered by the DeepSeek Harness",
+		"",
 	},
 	// R52：GUI 身份段两处一词改写——「Web GUI」→「web console」、
 	// 「they mean this GUI」→「they mean this console」，指纹断裂但语义不变。

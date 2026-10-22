@@ -144,8 +144,8 @@ func TestSanitizeBothPackagesStripDSHIdentity(t *testing.T) {
 		if strings.Contains(sys, dshIdentity) {
 			t.Errorf("%s 未处理 DSH 身份句（R52 跨包护栏）：%q", name, sys)
 		}
-		if !strings.Contains(sys, "powered by the DeepSeek Harness") {
-			t.Errorf("%s 把身份句改得面目全非：%q", name, sys)
+		if strings.Contains(sys, "DeepSeek Harness") {
+			t.Errorf("%s did not delete DSH identity (R53 parity guard): %q", name, sys)
 		}
 	}
 }

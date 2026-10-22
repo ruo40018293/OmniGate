@@ -82,7 +82,7 @@ var sanitizeRewrites = [][2]string{
 	{
 		// DSH 身份句：上游只认 system 开头的逐字形态，插入冠词 the 即绕过（实测 200）。
 		"You are an AI agent powered by DeepSeek Harness",
-		"You are an AI agent powered by the DeepSeek Harness",
+		"",
 	},
 	{
 		// DSH 运行时上下文两句话：上游 10-21 起对**连排原文**回 11128——对照实验判据：
