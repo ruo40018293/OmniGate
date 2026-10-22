@@ -312,8 +312,8 @@ func TestPrepareBodySanitizesSystem(t *testing.T) {
 	}
 }
 
-// TestSanitizeLiteralByteExact 逐字节快照护栏：把 sanitizeFeatures 7 项 +
-// sanitizeRewrites 5 对 + 3 个正则的当前字节值硬编码断言。
+// TestSanitizeLiteralByteExact 逐字节快照护栏：把 sanitizeFeatures 10 项 +
+// sanitizeRewrites 8 对 + 3 个正则的当前字节值硬编码断言。
 // 这些字面量是实验逆向出的上游内容审核黑名单（无契约可引用），上游按逐字精确
 // 匹配拦截，一字之差即漏拦（400 code=11128）或误伤。任何未来改动（含看似无害的
 // 统一常量/抽配置）都会先红在本测试——必须走 analysis 报告 #6 的逐字节验证
@@ -329,6 +329,8 @@ func TestSanitizeLiteralByteExact(t *testing.T) {
 		"github.com/anthropics/",                          // 反馈句里的 Anthropic 仓库链接
 		"11128",                                           // 上游反探测：裸数字错误码
 		"You are an AI agent powered by DeepSeek Harness",
+		"DeepSeek Harness Web GUI",
+		"they mean this GUI",
 	}
 	if len(sanitizeFeatures) != len(features) {
 		t.Fatalf("sanitizeFeatures 项数=%d want %d（快照与实现不同步，见测试头注释的验证步骤）", len(sanitizeFeatures), len(features))
@@ -363,6 +365,14 @@ func TestSanitizeLiteralByteExact(t *testing.T) {
 		{
 			"You are an AI agent powered by DeepSeek Harness",
 			"You are an AI agent powered by the DeepSeek Harness",
+		},
+		{
+			"DeepSeek Harness Web GUI",
+			"DeepSeek Harness web console",
+		},
+		{
+			"without naming another target, they mean this GUI",
+			"without naming another target, they mean this console",
 		},
 	}
 	if len(sanitizeRewrites) != len(rewrites) {
@@ -457,5 +467,28 @@ func TestDSHPrepareBodyNoFingerprintRemains(t *testing.T) {
 	}
 	if !strings.Contains(sys, "powered by the DeepSeek Harness") {
 		t.Errorf("DSH rewrite missing in wire body: %q", sys)
+	}
+}
+
+// TestDSHGuiPairLiteral R50：DSH 运行时上下文两句连排是上游 11128 触发字面
+// （v6 判据：单句 200、拆开 200、连排 400）。净化后两句的字面必须断链，
+// 且 "Current … Web GUI URL" 行同样被最小改写。删掉 sanitizeRewrites 里
+// 任一条目，本测试对应断言失败（杀伤力已验证）。
+func TestDSHGuiPairLiteral(t *testing.T) {
+	A := "You are interacting with the user through the DeepSeek Harness Web GUI whose URL the runtime context names."
+	B := "When the user refers to \"this page\", \"this GUI\", or \"this app\" without naming another target, they mean this GUI."
+	C := "Current DeepSeek Harness Web GUI URL: http://127.0.0.1:53138."
+	out := sanitizeText(A + " " + B + "\n" + C)
+	if strings.Contains(out, "DeepSeek Harness Web GUI") {
+		t.Errorf("句 A / URL 行残留原字面: %q", out)
+	}
+	if strings.Contains(out, "they mean this GUI") {
+		t.Errorf("句 B 收尾残留原字面: %q", out)
+	}
+	if !strings.Contains(out, "DeepSeek Harness web console") || !strings.Contains(out, "they mean this console") {
+		t.Errorf("改写未生效（语义应保留）: %q", out)
+	}
+	if out == A+" "+B+"\n"+C {
+		t.Errorf("净化未生效，原样返回")
 	}
 }

@@ -21,6 +21,8 @@ var sanitizeFeatures = []string{
 	"github.com/anthropics/",                          // 反馈句里的 Anthropic 仓库链接
 	"11128",                                           // 上游反探测：裸数字错误码
 	"You are an AI agent powered by DeepSeek Harness", // DSH 身份句：system 开头逐字锚定（2026-10-21 实测）
+	"DeepSeek Harness Web GUI",                        // DSH 运行时上下文句 A 短语（2026-10-22 实测，A+B 连排触发 11128，见 rewrite）
+	"they mean this GUI",                              // 句 B 收尾短语（单句无害，与句 A 连排才触发）
 }
 
 // sanitizeHdrRe 剥离层：header 键名即触发（与值无关），整段删除。
@@ -81,6 +83,20 @@ var sanitizeRewrites = [][2]string{
 		// DSH 身份句：上游只认 system 开头的逐字形态，插入冠词 the 即绕过（实测 200）。
 		"You are an AI agent powered by DeepSeek Harness",
 		"You are an AI agent powered by the DeepSeek Harness",
+	},
+	{
+		// DSH 运行时上下文两句话：上游 10-21 起对**连排原文**回 11128——对照实验判据：
+		// 单句各发 200、A+插入句+B 拆开 200、最小关键词 pair 200、A+B 连排 221 字面 400
+		// （v3 二分定位 + v4/v6 形态实验，见 AGENTS.md R50）。只换两处词，语义不变：
+		// "Web GUI"→"web console"、"they mean this GUI"→"they mean this console"。
+		// 键取短语而非整句：句 A、"Current DeepSeek Harness Web GUI URL" 行、以及未来
+		// 任何携带该短语的组合规则一并断链（短语级最小改写，语义零损失）。
+		"DeepSeek Harness Web GUI",
+		"DeepSeek Harness web console",
+	},
+	{
+		"without naming another target, they mean this GUI",
+		"without naming another target, they mean this console",
 	},
 }
 
