@@ -59,6 +59,13 @@ type Client struct {
 	queueMu    sync.Mutex
 	queueUntil map[string]time.Time
 	queueInfo  map[string]*QueueError
+
+	// R55 排队保活重投：单次请求内观察到排队时，在预算内暂停后重投整个上游请求，
+	// 客户端不用「重新发一轮=重新排队」。0 = 用默认值（5min / 跟随上游 retry_after）。
+	// queueHoldPause 仅测试注入（缩短重投间隔）；queueHoldBudget 置 time.Nanosecond
+	// 可关闭保活退回 R46 快速失败语义。
+	queueHoldBudget time.Duration
+	queueHoldPause  time.Duration
 }
 
 // defaultFirstByteTimeout 首帧看门狗默认阈值。
@@ -324,13 +331,20 @@ func (c *Client) ChatStream(a *auth.Auth, body []byte) (rc io.ReadCloser, status
 		modelKey = clientName
 	}
 
-	// 排队熔断命中：直接快速失败，不陪上游挂 180 秒。
-	// retry_after 给「剩余秒数」而非固定值，客户端退避才准。
+	// 排队熔断（R46）：retry_after 给「剩余秒数」而非固定值，客户端退避才准。
+	// R55：熔断剩余在保活预算内 → 不在门口干等（门口 sleep 会把预算耗在零信息量
+	// 的等待上），直接进保活循环，按上游 retry_after 节奏排队重投；
+	// 剩余超出预算（窗口被调大/预算被调小的异常态）才快速失败换模型兜底。
+	holdStart := time.Now()
 	if q, remain := c.queueBlocked(clientName); q != nil {
-		retryAfter := int(remain.Seconds() + 0.5)
-		log.Printf("qodercn chat_stream uid=%s model=%s: 排队熔断中，快速返回 429（%s，剩余 %ds）",
-			a.UID, clientName, q.Error(), retryAfter)
-		return nil, http.StatusTooManyRequests, queuedBody(clientName, q, retryAfter), nil
+		if remain > c.holdBudget() {
+			retryAfter := int(remain.Seconds() + 0.5)
+			log.Printf("qodercn chat_stream uid=%s model=%s: 排队熔断中，快速返回 429（%s，剩余 %ds）",
+				a.UID, clientName, q.Error(), retryAfter)
+			return nil, http.StatusTooManyRequests, queuedBody(clientName, q, retryAfter), nil
+		}
+		log.Printf("qodercn hold-resend uid=%s model=%s: 熔断剩余 %v 在预算内，转保活重投节奏（上次：%s）",
+			a.UID, clientName, remain.Round(time.Second), q.Error())
 	}
 
 	// 思考开关：reasoning_effort 或 thinking:{type:"enabled"} → 启用推理
@@ -351,90 +365,169 @@ func (c *Client) ChatStream(a *auth.Auth, body []byte) (rc io.ReadCloser, status
 	}
 	encoded := qoderEncode(rawBody)
 	url := c.Gateway + EpChat
-	req, err := http.NewRequest(http.MethodPost, url, strings.NewReader(encoded))
-	if err != nil {
-		return nil, 0, nil, err
-	}
-	dt := a.JWT()
-	sess, err := NewCosySession(a.MachineID, a.MachineToken, a.MachineType, a.Nickname, a.UID, dt, a.RefreshToken, c.userTypeOf(a))
-	if err != nil {
-		return nil, 0, nil, fmt.Errorf("cosy session: %w", err)
-	}
-	if err := sess.ApplyHeaders(req, encoded, url, a.UID, "text/event-stream", true, modelKey); err != nil {
-		return nil, 0, nil, fmt.Errorf("cosy headers: %w", err)
-	}
-	req, cancel := idle.WithCancel(req)
-	resp, err := c.streamHTTP().Do(req)
-	if err != nil {
-		cancel()
-		log.Printf("qodercn chat_stream uid=%s model=%s: transport error: %v", a.UID, modelKey, err)
-		// R54 异常取证：传输层失败也留证（截断/握手失败常是风控前置信号）。
-		capture.Save(capture.Record{
-			Channel: "qodercn",
-			UID:     a.UID,
-			Model:   modelKey,
-			Err:     err.Error(),
-			Request: []byte(encoded),
-		})
-		return nil, 0, nil, err
-	}
-	if resp.StatusCode >= 400 {
-		cancel()
-		raw, _ := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
-		resp.Body.Close()
-		log.Printf("qodercn chat_stream uid=%s model=%s: upstream %d body=%s",
-			a.UID, modelKey, resp.StatusCode, truncate(string(raw), 200))
-		// R54 异常取证：真实失败时的「出站字节 + 上游回包」是唯一能定位的依据。
-		capture.Save(capture.Record{
-			Channel:  "qodercn",
-			UID:      a.UID,
-			Model:    modelKey,
-			Status:   resp.StatusCode,
-			Classify: fmt.Sprint(Classify(resp.StatusCode, string(raw))),
-			Request:  []byte(encoded),
-			Response: raw,
-		})
-		// HTTP 级排队快速拒绝（R46 第三路径）：同样写熔断窗口，后续重试毫秒级失败。
-		if q := parseQueueBody(raw); q != nil {
-			c.rememberQueue(clientName, q)
+
+	// R55 保活重投循环：观察到任一形态的排队（HTTP 429 快速拒绝 / 200 流内排队帧 /
+	// 无字节挂起）时，预算内暂停后在**同一个客户端请求内**重投整个上游请求；
+	// encoded/modelKey/熔断键跨跳不变，预算耗尽各路径回落 R46 语义。
+holdLoop:
+	for {
+		req, err := http.NewRequest(http.MethodPost, url, strings.NewReader(encoded))
+		if err != nil {
+			return nil, 0, nil, err
 		}
-		return nil, resp.StatusCode, raw, nil
-	}
-	// 首帧看门狗（R46）：上游排队时响应头立刻返回、body 挂住（实测 180s 后才吐
-	// 10605 排队帧），官方客户端此时显示「排队中·预计等待 N 秒」。网关不能陪等——
-	// 在首个字节到达前设阈值，超时即按排队快速失败并短时熔断该模型。
-	// 注意只在「首字节之前」计时：首帧到达后面交 idle.Monitor 管空闲（R35/#42）。
-	br := bufio.NewReaderSize(resp.Body, 64*1024)
-	if c.FirstByteTimeout > 0 {
-		peeked := make(chan error, 1)
-		go func() {
-			_, perr := br.Peek(1) // 阻塞到有任何字节或错误
-			peeked <- perr
-		}()
-		timer := time.NewTimer(c.FirstByteTimeout)
-		defer timer.Stop()
-		select {
-		case perr := <-peeked:
-			if perr != nil {
+		dt := a.JWT()
+		sess, err := NewCosySession(a.MachineID, a.MachineToken, a.MachineType, a.Nickname, a.UID, dt, a.RefreshToken, c.userTypeOf(a))
+		if err != nil {
+			return nil, 0, nil, fmt.Errorf("cosy session: %w", err)
+		}
+		if err := sess.ApplyHeaders(req, encoded, url, a.UID, "text/event-stream", true, modelKey); err != nil {
+			return nil, 0, nil, fmt.Errorf("cosy headers: %w", err)
+		}
+		req, cancel := idle.WithCancel(req)
+		resp, err := c.streamHTTP().Do(req)
+		if err != nil {
+			cancel()
+			log.Printf("qodercn chat_stream uid=%s model=%s: transport error: %v", a.UID, modelKey, err)
+			// R54 异常取证：传输层失败也留证（截断/握手失败常是风控前置信号）。
+			capture.Save(capture.Record{
+				Channel: "qodercn",
+				UID:     a.UID,
+				Model:   modelKey,
+				Err:     err.Error(),
+				Request: []byte(encoded),
+			})
+			return nil, 0, nil, err
+		}
+		if resp.StatusCode >= 400 {
+			cancel()
+			raw, _ := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
+			resp.Body.Close()
+			log.Printf("qodercn chat_stream uid=%s model=%s: upstream %d body=%s",
+				a.UID, modelKey, resp.StatusCode, truncate(string(raw), 200))
+			// R54 异常取证：真实失败时的「出站字节 + 上游回包」是唯一能定位的依据。
+			capture.Save(capture.Record{
+				Channel:  "qodercn",
+				UID:      a.UID,
+				Model:    modelKey,
+				Status:   resp.StatusCode,
+				Classify: fmt.Sprint(Classify(resp.StatusCode, string(raw))),
+				Request:  []byte(encoded),
+				Response: raw,
+			})
+			// HTTP 级排队快速拒绝（R46 第三路径）：写熔断窗口；R55 预算内先保活重投，
+			// 预算耗尽才回落原文透传（客户端拿到上游原始 429 体，按 R46 语义自行退避）。
+			if q := parseQueueBody(raw); q != nil {
+				c.rememberQueue(clientName, q)
+				if pause, ok := c.holdRemaining(holdStart, q); ok {
+					log.Printf("qodercn hold-resend uid=%s model=%s: 上游 %d 排队快速拒绝（前方 %d 个，等待 %ds），%v 后重投（已用 %v / 预算 %v）",
+						a.UID, clientName, resp.StatusCode, q.QueueCount, q.WaitSeconds, pause,
+						time.Since(holdStart).Round(time.Second), c.holdBudget())
+					time.Sleep(pause)
+					continue holdLoop
+				}
+			}
+			return nil, resp.StatusCode, raw, nil
+		}
+		// 首帧看门狗（R46）：上游排队时响应头立刻返回、body 挂住（实测 180s 后才吐
+		// 10605 排队帧），官方客户端此时显示「排队中·预计等待 N 秒」。网关不能陪等——
+		// 在首个字节到达前设阈值，超时即按排队快速失败并短时熔断该模型。
+		// 注意只在「首字节之前」计时：首帧到达后面交 idle.Monitor 管空闲（R35/#42）。
+		br := bufio.NewReaderSize(resp.Body, 64*1024)
+		if c.FirstByteTimeout > 0 {
+			peeked := make(chan error, 1)
+			go func() {
+				_, perr := br.Peek(1) // 阻塞到有任何字节或错误
+				peeked <- perr
+			}()
+			timer := time.NewTimer(c.FirstByteTimeout)
+			defer timer.Stop()
+			select {
+			case perr := <-peeked:
+				if perr != nil {
+					cancel()
+					resp.Body.Close()
+					log.Printf("qodercn chat_stream uid=%s model=%s: 上游无首帧即结束: %v", a.UID, modelKey, perr)
+					return nil, http.StatusBadGateway, []byte(`{"error":{"message":"upstream closed before first frame","type":"upstream_error","code":"upstream_empty"}}`), nil
+				}
+			case <-timer.C:
 				cancel()
 				resp.Body.Close()
-				log.Printf("qodercn chat_stream uid=%s model=%s: 上游无首帧即结束: %v", a.UID, modelKey, perr)
-				return nil, http.StatusBadGateway, []byte(`{"error":{"message":"upstream closed before first frame","type":"upstream_error","code":"upstream_empty"}}`), nil
+				q := &QueueError{ModelKey: modelKey, Hang: true}
+				c.rememberQueueFor(clientName, q, queueHangWindow)
+				if pause, ok := c.holdRemaining(holdStart, q); ok {
+					log.Printf("qodercn hold-resend uid=%s model=%s: 首帧 %v 无字节（挂起形态），%v 后重投（已用 %v / 预算 %v）",
+						a.UID, clientName, c.FirstByteTimeout, pause,
+						time.Since(holdStart).Round(time.Second), c.holdBudget())
+					time.Sleep(pause)
+					continue holdLoop
+				}
+				retryAfter := int(queueHangWindow.Seconds())
+				log.Printf("qodercn chat_stream uid=%s model=%s: 首帧看门狗超时 %v，按排队处理并熔断 %v",
+					a.UID, clientName, c.FirstByteTimeout, queueHangWindow)
+				return nil, http.StatusTooManyRequests, queuedBody(clientName, q, retryAfter), nil
 			}
-		case <-timer.C:
-			cancel()
-			resp.Body.Close()
-			q := &QueueError{ModelKey: modelKey, Hang: true}
-			c.rememberQueueFor(clientName, q, queueHangWindow)
-			retryAfter := int(queueHangWindow.Seconds())
-			log.Printf("qodercn chat_stream uid=%s model=%s: 首帧看门狗超时 %v，按排队处理并熔断 %v",
-				a.UID, clientName, c.FirstByteTimeout, queueHangWindow)
-			return nil, http.StatusTooManyRequests, queuedBody(clientName, q, retryAfter), nil
 		}
+		// R55 首帧扫描（形态②）：排队时上游先发保活字节（可能迟迟不成行），
+		// 挂满约 180s 才吐流内排队帧。逐行读到「排队帧」或「内容帧/流结束」为止：
+		//   - 排队帧 → 丢弃已读字节，保活重投；预算耗尽则原样放行，交下游 Stream()
+		//     按 R46 出 error 帧并熔断（语义不变）；
+		//   - 内容帧/EOF/异常量 → 把已缓冲字节与后续流拼回原顺序交给 idle.Monitor，
+		//     客户端拿到的字节序列与不扫描时完全一致。
+		// 前提（抓包证实）：上游不会先吐内容帧再吐排队帧，排队判定恒在任何内容之前。
+		acc := make([]byte, 0, 4*1024)
+		lineCh := make(chan scanLine, 1)
+	scanLoop:
+		for {
+			go func() {
+				line, lerr := br.ReadString('\n')
+				lineCh <- scanLine{line, lerr}
+			}()
+			var sl scanLine
+			select {
+			case sl = <-lineCh:
+			case <-time.After(queueScanStall):
+				cancel()
+				resp.Body.Close()
+				q := &QueueError{ModelKey: modelKey, Hang: true}
+				c.rememberQueueFor(clientName, q, queueHangWindow)
+				if pause, ok := c.holdRemaining(holdStart, q); ok {
+					log.Printf("qodercn hold-resend uid=%s model=%s: 流内静默 %v（只有保活碎片），%v 后重投（已用 %v / 预算 %v）",
+						a.UID, clientName, queueScanStall, pause,
+						time.Since(holdStart).Round(time.Second), c.holdBudget())
+					time.Sleep(pause)
+					continue holdLoop
+				}
+				log.Printf("qodercn chat_stream uid=%s model=%s: 流内静默按排队处理，熔断 %v", a.UID, clientName, queueHangWindow)
+				return nil, http.StatusTooManyRequests, queuedBody(clientName, q, int(queueHangWindow.Seconds())), nil
+			}
+			acc = append(acc, sl.line...)
+			if q, content := classifyLeadFrame(sl.line); q != nil {
+				c.rememberQueue(clientName, q)
+				if pause, ok := c.holdRemaining(holdStart, q); ok {
+					cancel()
+					resp.Body.Close()
+					log.Printf("qodercn hold-resend uid=%s model=%s: 流内排队帧（前方 %d 个，等待 %ds），%v 后重投（已用 %v / 预算 %v）",
+						a.UID, clientName, q.QueueCount, q.WaitSeconds, pause,
+						time.Since(holdStart).Round(time.Second), c.holdBudget())
+					time.Sleep(pause)
+					continue holdLoop
+				}
+				break scanLoop // 预算耗尽：原样放行，下游按 R46 出 error 帧
+			} else if content || sl.err != nil || len(acc) > 1<<20 {
+				break scanLoop
+			}
+		}
+		// 成功分支：cancel 所有权交给 idle.Monitor（其 Close 会 cancel；静默超时也会 cancel）。
+		// merged 保住扫描期间已读的字节，顺序不变；br 的缓冲继续供后续读取。
+		merged := bufio.NewReader(io.MultiReader(bytes.NewReader(acc), br))
+		return idle.Monitor(&bufferedBody{Reader: merged, body: resp.Body}, c.IdleTimeout, cancel), resp.StatusCode, nil, nil
 	}
-	// 成功分支：cancel 所有权交给 idle.Monitor（其 Close 会 cancel；静默超时也会 cancel）。
-	// 用 br 包一层，保证已被 Peek 进缓冲的首帧不会丢。
-	return idle.Monitor(&bufferedBody{Reader: br, body: resp.Body}, c.IdleTimeout, cancel), resp.StatusCode, nil, nil
+}
+
+// scanLine 首帧扫描逐行读取的结果（行内容 + 读取错误）。
+type scanLine struct {
+	line string
+	err  error
 }
 
 // bufferedBody 把 bufio.Reader（含预读缓冲）与底层 body 合成一个 ReadCloser，

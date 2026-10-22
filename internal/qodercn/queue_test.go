@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -183,6 +184,7 @@ func TestChatStreamFailsFastWhenQueued(t *testing.T) {
 	defer srv.Close()
 
 	c := NewWithBase(srv.URL, srv.URL)
+	c.queueHoldBudget = time.Nanosecond // 本用例断言的是 R46 快速失败语义，关保活（R55 窗口动态化后默认预算会转入排队）
 	c.rememberQueue("deepseek-flash", &QueueError{ModelKey: "dfmodel", QueueCount: 3058, WaitSeconds: 185, RetryAfter: 30})
 
 	rc, status, body, err := c.ChatStream(fakeAuth(), []byte(`{"model":"deepseek-flash","messages":[]}`))
@@ -230,6 +232,7 @@ func TestChatStreamFirstByteWatchdog(t *testing.T) {
 
 	c := NewWithBase(srv.URL, srv.URL)
 	c.FirstByteTimeout = 120 * time.Millisecond
+	c.queueHoldBudget = time.Nanosecond // R55：关保活重投，保持「看门狗超时即 429」的 R46 断言语义
 
 	start := time.Now()
 	rc, status, body, err := c.ChatStream(fakeAuth(), []byte(`{"model":"deepseek-flash","messages":[]}`))
@@ -304,6 +307,7 @@ func TestChatStreamHTTP429QueueRecordsBlock(t *testing.T) {
 	defer srv.Close()
 
 	c := NewWithBase(srv.URL, srv.URL)
+	c.queueHoldBudget = time.Nanosecond // R55：关保活重投，保持 R46「透传原文+熔断」断言语义
 	a := fakeAuth()
 	body := []byte(`{"model":"deepseek-flash","messages":[]}`)
 
@@ -340,5 +344,239 @@ func TestChatStreamHTTP429QueueRecordsBlock(t *testing.T) {
 	}
 	if time.Since(start) > time.Second {
 		t.Fatalf("熔断快速失败应毫秒级，耗时 %v", time.Since(start))
+	}
+}
+
+// ── R55 回归：熔断 key 归一化 + 排队保活重投 ──
+
+// TestFuseKeyCrossNamespaceBlock 回归 R55-a 根因（2026-10-22 17:21 生产日志实锤）：
+// Stream() 侧用客户端原始名（含渠道前缀与费率后缀）写熔断，ChatStream() 侧用
+// rewriteModel 改写后的去前缀名查熔断 —— 修复前两端键空间不同，生产熔断 0 次命中。
+func TestFuseKeyCrossNamespaceBlock(t *testing.T) {
+	c := New()
+	c.rememberQueue("qodercn/deepseek-flash (0.00x)", &QueueError{ModelKey: "dfmodel", QueueCount: 5630, WaitSeconds: 295, RetryAfter: 30})
+	q, remain := c.queueBlocked("deepseek-flash")
+	if q == nil || remain <= 0 {
+		t.Fatal("带渠道前缀+费率后缀写入的熔断，必须能被去前缀名命中（同一键空间）")
+	}
+	if q.QueueCount != 5630 {
+		t.Fatalf("命中了错误的熔断记录：%+v", q)
+	}
+	// 大小写、前缀、后缀变体都归一到同一键；别的模型不受牵连。
+	if q2, _ := c.queueBlocked("QODERCN/DeepSeek-Flash (0.11x)"); q2 == nil {
+		t.Fatal("大小写/变体应归一化命中")
+	}
+	if q3, _ := c.queueBlocked("qwen3.8-flash"); q3 != nil {
+		t.Fatalf("其它模型被误熔断：%+v", q3)
+	}
+}
+
+// envelopeLine 把内层 chunk 包进上游 body 信封成一行 SSE。
+func envelopeLine(t *testing.T, inner any) string {
+	t.Helper()
+	return "data: " + string(mustJSON(map[string]any{"body": string(mustJSON(inner))})) + "\n\n"
+}
+
+// TestChatStreamHoldResubmitsMidStreamQueue R55 形态②：首跳 200 流、首帧即流内排队帧
+// → 同一客户端请求内重投，二跳内容成功 → 客户端拿到 200 正常流，全程没见过排队帧。
+func TestChatStreamHoldResubmitsMidStreamQueue(t *testing.T) {
+	var calls int32
+	content := map[string]any{"choices": []any{map[string]any{"index": 0, "delta": map[string]any{"content": "hi"}}}}
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		n := atomic.AddInt32(&calls, 1)
+		w.Header().Set("Content-Type", "text/event-stream")
+		w.WriteHeader(http.StatusOK)
+		f := w.(http.Flusher)
+		if n == 1 {
+			// 实盘形态：排队帧走扁平三层 JSON（R49 抓包）。
+			io.WriteString(w, "data: "+string(mustJSON(realQueueChunk()))+"\n\n")
+			f.Flush()
+			return
+		}
+		io.WriteString(w, envelopeLine(t, content))
+		io.WriteString(w, "data: "+string(mustJSON(map[string]any{"body": "[DONE]"}))+"\n\n")
+		f.Flush()
+	}))
+	defer srv.Close()
+
+	c := NewWithBase(srv.URL, srv.URL)
+	c.queueHoldBudget = 3 * time.Second
+	c.queueHoldPause = 10 * time.Millisecond
+
+	rc, status, body, err := c.ChatStream(fakeAuth(), []byte(`{"model":"deepseek-flash","messages":[]}`))
+	if err != nil {
+		t.Fatalf("err = %v", err)
+	}
+	if rc == nil || status != http.StatusOK {
+		if rc != nil {
+			rc.Close()
+		}
+		t.Fatalf("保活重投后应返回 200 流：status=%d body=%.200s", status, body)
+	}
+	defer rc.Close()
+	out, _ := io.ReadAll(rc)
+	if !bytes.Contains(out, []byte("hi")) {
+		t.Fatalf("放行字节缺内容帧：%q", out)
+	}
+	if bytes.Contains(out, []byte("10605")) {
+		t.Fatalf("排队帧应被保活消化，不该透传给客户端：%q", out)
+	}
+	if n := atomic.LoadInt32(&calls); n != 2 {
+		t.Fatalf("应恰好打上游 2 次（首跳排队、重投成功），got %d", n)
+	}
+}
+
+// TestChatStreamHoldBudgetExhaust R55 预算耗尽回落 R46：每一跳都是排队帧 →
+// 预算内重投若干次，耗尽后原样放行最后一跳的流（下游 Stream() 照旧出 error 帧），
+// 熔断同时被写入。
+func TestChatStreamHoldBudgetExhaust(t *testing.T) {
+	var calls int32
+	queueLine := "data: " + string(mustJSON(realQueueChunk())) + "\n\n"
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		atomic.AddInt32(&calls, 1)
+		w.Header().Set("Content-Type", "text/event-stream")
+		w.WriteHeader(http.StatusOK)
+		io.WriteString(w, queueLine)
+		w.(http.Flusher).Flush()
+	}))
+	defer srv.Close()
+
+	c := NewWithBase(srv.URL, srv.URL)
+	c.queueHoldBudget = 150 * time.Millisecond
+	c.queueHoldPause = 10 * time.Millisecond
+
+	start := time.Now()
+	rc, status, _, err := c.ChatStream(fakeAuth(), []byte(`{"model":"deepseek-flash","messages":[]}`))
+	if err != nil {
+		t.Fatalf("err = %v", err)
+	}
+	if rc == nil || status != http.StatusOK {
+		t.Fatalf("预算耗尽应原样放行排队流交下游出 error 帧：status=%d", status)
+	}
+	defer rc.Close()
+	out, _ := io.ReadAll(rc)
+	if !bytes.Contains(out, []byte("10605")) {
+		t.Fatalf("最后一跳的排队帧应原样透传：%q", out)
+	}
+	if n := atomic.LoadInt32(&calls); n < 2 {
+		t.Fatalf("保活应重投过多跳，got %d", n)
+	}
+	if elapsed := time.Since(start); elapsed > 5*time.Second {
+		t.Fatalf("保活受预算上界约束，耗时 %v", elapsed)
+	}
+	if q, remain := c.queueBlocked("deepseek-flash"); q == nil || remain <= 0 {
+		t.Fatal("排队期间必须写熔断，保护并发请求不陪等")
+	}
+}
+
+// TestChatStreamHoldOnHTTP429 R55 形态①：首跳 HTTP 429 + 排队 body → 重投，
+// 二跳 200 正常流 → 客户端拿到成功响应。
+func TestChatStreamHoldOnHTTP429(t *testing.T) {
+	var calls int32
+	queueJSON := string(mustJSON(realQueueChunk()))
+	content := map[string]any{"choices": []any{map[string]any{"index": 0, "delta": map[string]any{"content": "ok"}}}}
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if atomic.AddInt32(&calls, 1) == 1 {
+			w.WriteHeader(http.StatusTooManyRequests)
+			io.WriteString(w, queueJSON)
+			return
+		}
+		w.Header().Set("Content-Type", "text/event-stream")
+		w.WriteHeader(http.StatusOK)
+		io.WriteString(w, envelopeLine(t, content))
+		w.(http.Flusher).Flush()
+	}))
+	defer srv.Close()
+
+	c := NewWithBase(srv.URL, srv.URL)
+	c.queueHoldBudget = 3 * time.Second
+	c.queueHoldPause = 10 * time.Millisecond
+
+	rc, status, body, err := c.ChatStream(fakeAuth(), []byte(`{"model":"deepseek-flash","messages":[]}`))
+	if err != nil {
+		t.Fatalf("err = %v", err)
+	}
+	if rc == nil || status != http.StatusOK {
+		if rc != nil {
+			rc.Close()
+		}
+		t.Fatalf("429 排队快速拒绝应在预算内重投成功：status=%d body=%.200s", status, body)
+	}
+	defer rc.Close()
+	out, _ := io.ReadAll(rc)
+	if !bytes.Contains(out, []byte("ok")) {
+		t.Fatalf("重投成功但缺内容：%q", out)
+	}
+	if n := atomic.LoadInt32(&calls); n != 2 {
+		t.Fatalf("应恰好打上游 2 次，got %d", n)
+	}
+}
+
+// TestFuseWindowBoundedByHoldBudget 回归 R55c（2026-10-22 20:00 生产）：
+// 熔断窗口必须动态且**严格小于保活预算** —— 10min 固定窗被保活循环每跳续期后，
+// 剩余永远 ~578s > 预算 300s，DSH 的等待请求被永久锁在门外 10ms 硬拒。
+func TestFuseWindowBoundedByHoldBudget(t *testing.T) {
+	if w := fuseWindow(&QueueError{WaitSeconds: 36}); w != time.Minute+360*time.Second/10 {
+		t.Fatalf("waitTime=36 应为 96s，got %v", w)
+	}
+	if w := fuseWindow(&QueueError{WaitSeconds: 10}); w != queueHangWindow {
+		t.Fatalf("小 waitTime 应夹到下界 %v，got %v", queueHangWindow, w)
+	}
+	if w := fuseWindow(&QueueError{WaitSeconds: 480}); w != queueBlockWindow {
+		t.Fatalf("大 waitTime 应夹到上界 %v，got %v", queueBlockWindow, w)
+	}
+	if queueBlockWindow >= defaultQueueHoldBudget {
+		t.Fatalf("熔断上界 %v 必须小于保活预算 %v，否则续期后的熔断会把等待者永久锁在门外",
+			queueBlockWindow, defaultQueueHoldBudget)
+	}
+	// 写入侧同样走动态窗：排队帧 185s → 245s，而非旧固定 10min。
+	c := New()
+	c.rememberQueue("some-model", &QueueError{ModelKey: "m", WaitSeconds: 185, QueueCount: 3058})
+	if q, remain := c.queueBlocked("some-model"); q == nil || remain > 246*time.Second || remain < 200*time.Second {
+		t.Fatalf("熔断窗口应≈waitTime+60s（245s），got %v", remain)
+	}
+}
+
+// TestChatStreamEntryFuseWithinBudgetHolds R55c：熔断剩余在预算内时，新请求
+// 不在门口被拒也不干等，直接进保活循环按节奏排队 —— 上游恢复即成功。
+func TestChatStreamEntryFuseWithinBudgetHolds(t *testing.T) {
+	var calls int32
+	content := map[string]any{"choices": []any{map[string]any{"index": 0, "delta": map[string]any{"content": "late"}}}}
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		n := atomic.AddInt32(&calls, 1)
+		w.Header().Set("Content-Type", "text/event-stream")
+		w.WriteHeader(http.StatusOK)
+		if n == 1 {
+			io.WriteString(w, "data: "+string(mustJSON(realQueueChunk()))+"\n\n")
+		} else {
+			io.WriteString(w, envelopeLine(t, content))
+		}
+		w.(http.Flusher).Flush()
+	}))
+	defer srv.Close()
+
+	c := NewWithBase(srv.URL, srv.URL)
+	c.queueHoldBudget = 3 * time.Minute // 大于熔断剩余 90s：进入「预算内转保活」分支
+	c.queueHoldPause = 10 * time.Millisecond
+	// 先写一个「剩余在预算内」的熔断（waitTime=30 → 窗口 90s）。
+	c.rememberQueue("deepseek-flash", &QueueError{ModelKey: "dfmodel", QueueCount: 100, WaitSeconds: 30, RetryAfter: 30})
+
+	rc, status, body, err := c.ChatStream(fakeAuth(), []byte(`{"model":"deepseek-flash","messages":[]}`))
+	if err != nil {
+		t.Fatalf("err = %v", err)
+	}
+	if rc == nil || status != http.StatusOK {
+		if rc != nil {
+			rc.Close()
+		}
+		t.Fatalf("熔断在预算内应转入保活排队并最终成功：status=%d body=%.200s", status, body)
+	}
+	defer rc.Close()
+	out, _ := io.ReadAll(rc)
+	if !bytes.Contains(out, []byte("late")) {
+		t.Fatalf("缺内容帧：%q", out)
+	}
+	if n := atomic.LoadInt32(&calls); n != 2 {
+		t.Fatalf("入口未拒 + 一跳排队 + 二跳成功 = 2 次，got %d", n)
 	}
 }
