@@ -107,8 +107,16 @@ func injectAttribution(req *http.Request, a *auth.Auth) {
 }
 
 // injectConversationHeaders 注入会话头族（X-Conversation-Request-ID / B3 链路）。
+//
+// R49（2026-10-22）：补 X-Conversation-ID。国际版上游已强制该三件套（缺任一
+// 400/11-128，见 AGENTS.md R44）；国内版 10-21 起偶发 400/11128
+// "Illegal API invocation from an unapproved channel"（11h 内 3 次、随后自愈，
+// 灰度特征），直发对照实验未能钉死触发条件——但 12 发带该头全部 200，
+// 证明**无害**；两区同源 API 的校验只可能趋同，先对齐即把已知的最后一个
+// 头差异关掉。真正的定案数据靠 OMNIGATE_CAPTURE_CHAT 捕获下次复现（见 client.go）。
 func injectConversationHeaders(req *http.Request, messageID string) {
 	cid := newMessageID()
+	req.Header.Set("X-Conversation-ID", messageID)
 	req.Header.Set("X-Conversation-Request-ID", cid)
 	req.Header.Set("X-Conversation-Message-ID", messageID)
 	req.Header.Set("X-Request-ID", messageID)

@@ -11,6 +11,8 @@ import (
 	"log"
 	"net"
 	"net/http"
+	"os"
+	"path/filepath"
 	"strings"
 	"time"
 
@@ -330,7 +332,17 @@ func (c *Client) RefreshToken(a *auth.Auth) error {
 // 只有传输层失败才返回 err。
 func (c *Client) ChatStream(a *auth.Auth, body []byte) (rc io.ReadCloser, status int, respBody []byte, err error) {
 	url := c.chatBase(a) + "/v2/chat/completions"
-	req, err := http.NewRequest(http.MethodPost, url, bytes.NewReader(PrepareBody(body)))
+	prepared := PrepareBody(body)
+	// 排障捕获（env 门控，默认关闭）：上游 11128 灰度校验无法用探针复现（见 AGENTS.md
+	// R49），下次复现必须拿到**实际出站字节**做逐段二分，而不是继续猜假设。
+	// OMNIGATE_CAPTURE_CHAT=<目录> 时把净化后的完整出站 body 落盘为 chat-<纳秒>.json。
+	if dir := os.Getenv("OMNIGATE_CAPTURE_CHAT"); dir != "" {
+		if err := os.MkdirAll(dir, 0o755); err == nil {
+			name := fmt.Sprintf("chat-%d-%d.json", time.Now().UnixNano(), len(prepared))
+			_ = os.WriteFile(filepath.Join(dir, name), prepared, 0o644) // 捕获失败不影响请求
+		}
+	}
+	req, err := http.NewRequest(http.MethodPost, url, bytes.NewReader(prepared))
 	if err != nil {
 		return nil, 0, nil, err
 	}
