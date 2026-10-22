@@ -16,6 +16,7 @@ import (
 	"time"
 
 	"omnigate/internal/auth"
+	"omnigate/internal/capture"
 	"omnigate/internal/provider"
 )
 
@@ -201,11 +202,29 @@ func (c *Client) ChatStream(a *auth.Auth, body []byte) (rc io.ReadCloser, status
 	// 用无总超时的 client：长思考请求不受整请求上限约束（见 Client.StreamHTTP）。
 	resp, err := c.streamClient().Do(req)
 	if err != nil {
+		// R54 异常取证：传输层失败也留证（截断/握手失败常是风控前置信号）。
+		capture.Save(capture.Record{
+			Channel: "loomy",
+			UID:     a.UID,
+			Model:   capture.ModelFromBody(projected),
+			Err:     err.Error(),
+			Request: projected,
+		})
 		return nil, 0, nil, err
 	}
 	if resp.StatusCode != http.StatusOK {
 		raw, _ := io.ReadAll(io.LimitReader(resp.Body, 64<<10))
 		_ = resp.Body.Close()
+		// R54 异常取证：真实失败时的「出站字节 + 上游回包」是唯一能定位的依据。
+		capture.Save(capture.Record{
+			Channel:  "loomy",
+			UID:      a.UID,
+			Model:    capture.ModelFromBody(projected),
+			Status:   resp.StatusCode,
+			Classify: fmt.Sprint(Classify(resp.StatusCode, string(raw))),
+			Request:  projected,
+			Response: raw,
+		})
 		return nil, resp.StatusCode, raw, nil
 	}
 	// 空闲看门狗兜底：连续 idleTimeout 读不到字节即判上游卡死并关掉 body。

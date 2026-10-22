@@ -1,7 +1,8 @@
-// headers_test.go R49 回归：CN 会话头三件套完整性 + 出站捕获钩子。
+// headers_test.go R49 回归：CN 会话头三件套完整性 + R54 异常取证行为。
 package upstream
 
 import (
+	"encoding/json"
 	"io"
 	"net/http"
 	"os"
@@ -10,6 +11,7 @@ import (
 	"testing"
 
 	"omnigate/internal/auth"
+	"omnigate/internal/capture"
 )
 
 // TestChatHeadersConversationFamily：对话头必须带齐 X-Conversation-ID /
@@ -24,7 +26,7 @@ func TestChatHeadersConversationFamily(t *testing.T) {
 	ChatHeaders(req, &auth.Auth{AccessToken: "at", UID: "u1", Domain: "www.codebuddy.cn"})
 	for _, k := range []string{"X-Conversation-ID", "X-Conversation-Request-ID", "X-Conversation-Message-ID"} {
 		if req.Header.Get(k) == "" {
-			t.Errorf("%s 缺失或为空：上游渠道校验会回 400 code=11128（R44/R49）", k)
+			t.Errorf("%s 缺失或为空：上游渠道校验会回 400 code=11-128（R44/R49）", k)
 		}
 	}
 	if req.Header.Get("X-Refresh-Token") != "" {
@@ -35,12 +37,23 @@ func TestChatHeadersConversationFamily(t *testing.T) {
 	}
 }
 
-// TestChatStreamCapturesOutgoingBody：OMNIGATE_CAPTURE_CHAT 指向目录时，
-// ChatStream 必须把**净化后的完整出站 body** 落盘（与上游实际收到字节一致），
-// 供 11128 复现后逐段二分；env 未设置时必须零写盘。删掉捕获块，第一个断言失败。
-func TestChatStreamCapturesOutgoingBody(t *testing.T) {
+// TestChatStreamCapturesOnlyOnError 是 R54 的核心语义回归：
+//
+//	正常请求 -> 零写盘（不允许像 R49 那样全量落盘，会堆满磁盘）
+//	上游 4xx/5xx -> 必落盘，且同时含出站字节与上游回包原文
+//
+// 把 capture.Save 的调用删掉，第二个断言必失败；把 enabled() 改成恒 true
+// 且不判异常（即退回 R49 全量捕获），第一个断言必失败。
+func TestChatStreamCapturesOnlyOnError(t *testing.T) {
 	dir := t.TempDir()
-	c := testClient(func(r *http.Request) (*http.Response, error) {
+	t.Setenv(capture.EnvDir, dir)
+	t.Setenv(capture.EnvOff, "")
+	capture.ResetDirCache()
+
+	body := []byte(`{"model":"deepseek-v4.1-flash","messages":[{"role":"user","content":"hi"}]}`)
+
+	// --- 正常 200：零写盘 ---
+	okClient := testClient(func(r *http.Request) (*http.Response, error) {
 		io.Copy(io.Discard, r.Body)
 		return &http.Response{
 			StatusCode: 200,
@@ -48,42 +61,53 @@ func TestChatStreamCapturesOutgoingBody(t *testing.T) {
 			Body:       io.NopCloser(strings.NewReader("data: [DONE]\n\n")),
 		}, nil
 	})
-	a := &auth.Auth{AccessToken: "at", UID: "u1"}
-
-	// env 关：不产生任何捕获文件
-	entries, err := os.ReadDir(dir)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if len(entries) != 0 {
-		t.Fatalf("未设置 env 却已有文件: %v", entries)
-	}
-	body := []byte(`{"model":"deepseek-v4.1-flash","messages":[{"role":"user","content":"hi"}]}`)
-	rc, status, _, err := c.ChatStream(a, body)
+	rc, status, _, err := okClient.ChatStream(&auth.Auth{AccessToken: "at", UID: "u1"}, body)
 	if err != nil || status != 200 {
-		t.Fatalf("chat: status=%d err=%v", status, err)
+		t.Fatalf("正常请求失败: status=%d err=%v", status, err)
 	}
 	rc.Close()
-	if entries, _ = os.ReadDir(dir); len(entries) != 0 {
-		t.Fatalf("env 未设置时不得写盘，却有 %d 个文件", len(entries))
+	if ents, _ := os.ReadDir(dir); len(ents) != 0 {
+		t.Fatalf("正常请求不得写盘，却有 %d 个文件（退化成 R49 全量捕获）", len(ents))
 	}
 
-	// env 开：落盘且内容为出站字节（含 PrepareBody 的 stream 强制改写）
-	t.Setenv("OMNIGATE_CAPTURE_CHAT", dir)
-	rc, status, _, err = c.ChatStream(a, body)
-	if err != nil || status != 200 {
-		t.Fatalf("chat2: status=%d err=%v", status, err)
+	// --- 上游 400 11-128：必须落盘 ---
+	const upBody = `{"code":"11-128","msg":"Illegal API invocation from an unapproved channel"}`
+	badClient := testClient(func(r *http.Request) (*http.Response, error) {
+		io.Copy(io.Discard, r.Body)
+		return &http.Response{
+			StatusCode: 400,
+			Header:     http.Header{"Content-Type": []string{"application/json"}},
+			Body:       io.NopCloser(strings.NewReader(upBody)),
+		}, nil
+	})
+	_, status, _, err = badClient.ChatStream(&auth.Auth{AccessToken: "at", UID: "u1"}, body)
+	if err != nil || status != 400 {
+		t.Fatalf("异常请求状态不对: status=%d err=%v", status, err)
 	}
-	rc.Close()
-	files, _ := filepath.Glob(filepath.Join(dir, "chat-*.json"))
+	files, _ := filepath.Glob(filepath.Join(dir, "err-*.json"))
 	if len(files) != 1 {
-		t.Fatalf("应恰有 1 个捕获文件，实际 %d", len(files))
+		t.Fatalf("上游 400 应恰有 1 个异常捕获文件，实际 %d（取证未接入）", len(files))
 	}
 	raw, err := os.ReadFile(files[0])
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !strings.Contains(string(raw), `"stream":true`) {
-		t.Errorf("捕获内容不是出站字节（缺 stream 强制改写）: %s", raw)
+	var rec map[string]any
+	if err := json.Unmarshal(raw, &rec); err != nil {
+		t.Fatalf("捕获文件不是合法 JSON: %v", err)
+	}
+	if rec["channel"] != "workbuddy" {
+		t.Errorf("channel=%v，期望 workbuddy", rec["channel"])
+	}
+	if rec["uid"] != "u1" {
+		t.Errorf("uid=%v，期望 u1（缺了无法定位账号）", rec["uid"])
+	}
+	req, _ := rec["request"].(string)
+	if !strings.Contains(req, `"stream":true`) {
+		t.Errorf("捕获的请求体不是出站字节（缺 PrepareBody 的 stream 强制改写）: %s", req)
+	}
+	resp, _ := rec["response"].(string)
+	if !strings.Contains(resp, "11-128") {
+		t.Errorf("捕获内容缺上游回包原文: %s", resp)
 	}
 }

@@ -20,6 +20,7 @@ import (
 	"time"
 
 	"omnigate/internal/auth"
+	"omnigate/internal/capture"
 	"omnigate/internal/idle"
 	"omnigate/internal/provider"
 )
@@ -339,6 +340,14 @@ func (c *Client) ChatStream(a *auth.Auth, body []byte) (rc io.ReadCloser, status
 	if err != nil {
 		cancel()
 		log.Printf("qodercom chat_stream uid=%s model=%s: transport error: %v", a.UID, modelKey, err)
+		// R54 异常取证：传输层失败也留证（截断/握手失败常是风控前置信号）。
+		capture.Save(capture.Record{
+			Channel: "qodercom",
+			UID:     a.UID,
+			Model:   modelKey,
+			Err:     err.Error(),
+			Request: []byte(encoded),
+		})
 		return nil, 0, nil, err
 	}
 	if resp.StatusCode >= 400 {
@@ -347,6 +356,16 @@ func (c *Client) ChatStream(a *auth.Auth, body []byte) (rc io.ReadCloser, status
 		resp.Body.Close()
 		log.Printf("qodercom chat_stream uid=%s model=%s: upstream %d body=%s",
 			a.UID, modelKey, resp.StatusCode, truncate(string(raw), 200))
+		// R54 异常取证：真实失败时的「出站字节 + 上游回包」是唯一能定位的依据。
+		capture.Save(capture.Record{
+			Channel:  "qodercom",
+			UID:      a.UID,
+			Model:    modelKey,
+			Status:   resp.StatusCode,
+			Classify: fmt.Sprint(Classify(resp.StatusCode, string(raw))),
+			Request:  []byte(encoded),
+			Response: raw,
+		})
 		return nil, resp.StatusCode, raw, nil
 	}
 	// 成功分支：cancel 所有权交给 idle.Monitor（其 Close 会 cancel；静默超时也会 cancel）。

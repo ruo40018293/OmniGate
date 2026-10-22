@@ -11,12 +11,11 @@ import (
 	"log"
 	"net"
 	"net/http"
-	"os"
-	"path/filepath"
 	"strings"
 	"time"
 
 	"omnigate/internal/auth"
+	"omnigate/internal/capture"
 	"omnigate/internal/idle"
 	"omnigate/internal/provider"
 )
@@ -333,15 +332,9 @@ func (c *Client) RefreshToken(a *auth.Auth) error {
 func (c *Client) ChatStream(a *auth.Auth, body []byte) (rc io.ReadCloser, status int, respBody []byte, err error) {
 	url := c.chatBase(a) + "/v2/chat/completions"
 	prepared := PrepareBody(body)
-	// 排障捕获（env 门控，默认关闭）：上游 11128 灰度校验无法用探针复现（见 AGENTS.md
-	// R49），下次复现必须拿到**实际出站字节**做逐段二分，而不是继续猜假设。
-	// OMNIGATE_CAPTURE_CHAT=<目录> 时把净化后的完整出站 body 落盘为 chat-<纳秒>.json。
-	if dir := os.Getenv("OMNIGATE_CAPTURE_CHAT"); dir != "" {
-		if err := os.MkdirAll(dir, 0o755); err == nil {
-			name := fmt.Sprintf("chat-%d-%d.json", time.Now().UnixNano(), len(prepared))
-			_ = os.WriteFile(filepath.Join(dir, name), prepared, 0o644) // 捕获失败不影响请求
-		}
-	}
+	// R54：R49 时代的「全量捕获正常请求」钩子已废弃——它只在显式设 env 时生效，
+	// 现实里没人常设；且全量落盘成本高，事实上无法常开。改为 internal/capture
+	// 包里的**异常触发**取证：只在失败时写盘，可永久常开。
 	req, err := http.NewRequest(http.MethodPost, url, bytes.NewReader(prepared))
 	if err != nil {
 		return nil, 0, nil, err
@@ -356,6 +349,14 @@ func (c *Client) ChatStream(a *auth.Auth, body []byte) (rc io.ReadCloser, status
 	if err != nil {
 		cancel()
 		log.Printf("chat_stream uid=%s: transport error: %v", a.UID, err)
+		// R54 异常取证：传输层失败也留证（截断/握手失败常是风控前置信号）。
+		capture.Save(capture.Record{
+			Channel: "workbuddy",
+			UID:     a.UID,
+			Model:   capture.ModelFromBody(prepared),
+			Err:     err.Error(),
+			Request: prepared,
+		})
 		return nil, 0, nil, err
 	}
 	if resp.StatusCode >= 400 {
@@ -365,6 +366,17 @@ func (c *Client) ChatStream(a *auth.Auth, body []byte) (rc io.ReadCloser, status
 		kind := Classify(resp.StatusCode, string(raw))
 		log.Printf("chat_stream uid=%s: upstream %d %s body=%s",
 			a.UID, resp.StatusCode, kind, truncate(string(raw), 200))
+		// R54 异常取证：11-128（内容拦截）与 11140（账号风控）都无法用探针复现，
+		// 只有真实失败时的「出站字节 + 上游回包」能用来定位。
+		capture.Save(capture.Record{
+			Channel:  "workbuddy",
+			UID:      a.UID,
+			Model:    capture.ModelFromBody(prepared),
+			Status:   resp.StatusCode,
+			Classify: fmt.Sprint(kind),
+			Request:  prepared,
+			Response: raw,
+		})
 		return nil, resp.StatusCode, raw, nil
 	}
 	// 成功分支：cancel 所有权交给 idle.Monitor（其 Close 会 cancel；静默超时也会 cancel）。

@@ -16,6 +16,7 @@ import (
 	"time"
 
 	"omnigate/internal/auth"
+	"omnigate/internal/capture"
 	"omnigate/internal/idle"
 	"omnigate/internal/provider"
 )
@@ -309,14 +310,34 @@ func (c *Client) chatStreamOnce(a *auth.Auth, prepared []byte) (rc io.ReadCloser
 	if err != nil {
 		cancel()
 		log.Printf("workbuddyai chat_stream uid=%s: transport error: %v", a.UID, err)
+		// R54 异常取证：传输层失败同样留证（截断/握手失败常是风控前置信号）。
+		capture.Save(capture.Record{
+			Channel: "workbuddyai",
+			UID:     a.UID,
+			Model:   capture.ModelFromBody(prepared),
+			Err:     err.Error(),
+			Request: prepared,
+		})
 		return nil, 0, nil, err
 	}
 	if resp.StatusCode >= 400 {
 		cancel()
 		raw, _ := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
 		resp.Body.Close()
+		kind := Classify(resp.StatusCode, string(raw))
 		log.Printf("workbuddyai chat_stream uid=%s: upstream %d %s body=%s",
-			a.UID, resp.StatusCode, Classify(resp.StatusCode, string(raw)), truncate(string(raw), 200))
+			a.UID, resp.StatusCode, kind, truncate(string(raw), 200))
+		// R54 异常取证：账号级风控（11140 / 403 request illegal）与内容拦截
+		// （11-128）都不可用探针复现，只能在真实失败时留住"出站字节 + 上游回包"。
+		capture.Save(capture.Record{
+			Channel:  "workbuddyai",
+			UID:      a.UID,
+			Model:    capture.ModelFromBody(prepared),
+			Status:   resp.StatusCode,
+			Classify: fmt.Sprint(kind),
+			Request:  prepared,
+			Response: raw,
+		})
 		return nil, resp.StatusCode, raw, nil
 	}
 	// 成功分支：cancel 所有权交给 idle.Monitor（其 Close 会 cancel；静默超时也会 cancel）。

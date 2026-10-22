@@ -12,6 +12,7 @@ import (
 	"strings"
 
 	"omnigate/internal/auth"
+	"omnigate/internal/capture"
 	"omnigate/internal/idle"
 )
 
@@ -265,12 +266,30 @@ func (c *Client) ChatStream(a *auth.Auth, body []byte) (io.ReadCloser, int, []by
 	resp, err := hc.Do(httpReq)
 	if err != nil {
 		cancel()
+		// R54 异常取证：传输层失败也留证（截断/握手失败常是风控前置信号）。
+		capture.Save(capture.Record{
+			Channel: "glm",
+			UID:     a.UID,
+			Model:   req.Model,
+			Err:     err.Error(),
+			Request: payload,
+		})
 		return nil, 0, nil, err
 	}
 	if resp.StatusCode >= 400 {
 		cancel()
 		raw, _ := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
 		resp.Body.Close()
+		// R54 异常取证：真实失败时的「出站字节 + 上游回包」是唯一能定位的依据。
+		capture.Save(capture.Record{
+			Channel:  "glm",
+			UID:      a.UID,
+			Model:    req.Model,
+			Status:   resp.StatusCode,
+			Classify: fmt.Sprint(resp.StatusCode),
+			Request:  payload,
+			Response: raw,
+		})
 		return nil, resp.StatusCode, raw, nil
 	}
 	// 上游可能以 HTTP 200 返回 JSON 错误（非 SSE）
