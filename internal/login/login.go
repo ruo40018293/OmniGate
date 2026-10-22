@@ -21,9 +21,12 @@ import (
 
 // 上游常量（国内版 / 国际版）。
 const (
-	UpstreamBaseCN      = "https://copilot.tencent.com"
-	UpstreamBaseGlobal  = "https://www.workbuddy.ai"
-	clientUA            = "CLI/2.63.2 CodeBuddy/2.63.2"
+	UpstreamBaseCN     = "https://copilot.tencent.com"
+	UpstreamBaseGlobal = "https://www.workbuddy.ai"
+	// 客户端身份链（R51）：登录与聊天必须同属一个客户端身份，取值见
+	// internal/upstream/headers.go 的 R51 注释（官方 5.8.4 客户端静态解包）。
+	// 一致性由 internal/upstream/identity_parity_test.go 的跨包护栏守住。
+	clientUA            = "WorkBuddy/5.8.4 WorkBuddy/5.8.4 CLI/2.161.0"
 	originRefererCN     = "https://www.codebuddy.cn"
 	originRefererGlobal = "https://www.workbuddy.ai"
 )

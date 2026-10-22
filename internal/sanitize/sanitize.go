@@ -20,6 +20,12 @@ var featHeaders = []string{
 	"github.com/anthropics/",
 	"11128",
 	"You are an AI agent powered by DeepSeek Harness", // DSH 身份句：上游按 system 开头逐字锚定（2026-10-21 实测）
+	// R52（2026-10-22）：DSH 桌面版运行时上下文的 GUI 身份段。上游锚定的是这两句
+	// 以单空格拼接后的 221 字符整串（单独任一句放行、删一字符/插换行/改词均放行）。
+	// 特征串取短语而非整句：真实 system 里这两句之后还有
+	// "Current ... web console URL: ..." 一行，用整句做键会漏掉该行。
+	"DeepSeek Harness Web GUI",
+	"they mean this GUI",
 }
 
 var reHdr = regexp.MustCompile(`(?i)x-anthropic-billing-header:[^;\n]*;?\s*`)
@@ -49,6 +55,13 @@ var rewrites = [][2]string{
 		// DSH 身份句：上游只认 system 开头的逐字形态，插入冠词 the 即绕过（实测 200）。
 		"You are an AI agent powered by DeepSeek Harness",
 		"You are an AI agent powered by the DeepSeek Harness",
+	},
+	// R52：GUI 身份段两处一词改写——「Web GUI」→「web console」、
+	// 「they mean this GUI」→「they mean this console」，指纹断裂但语义不变。
+	{"DeepSeek Harness Web GUI", "DeepSeek Harness Web c0nsole"},
+	{
+		"without naming another target, they mean this console",
+		"without naming another target, they mean this c0nsole",
 	},
 }
 

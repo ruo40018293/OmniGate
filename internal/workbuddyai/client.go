@@ -113,12 +113,17 @@ func chatHeaders(req *http.Request, a *auth.Auth) {
 	req.Header.Set("X-Root-Request-ID", mid)
 }
 
+// injectAttributionWBAI 归属头。取值口径见 constants.go 的 R51 注释：
+// X-IDE-Version 取官方 appVersion，X-Product 取 product.json 的 deploymentType。
+// X-Private-Data / X-Agent-Intent 是官方 applyGatewayHeaders 的普通对话缺省值。
 func injectAttributionWBAI(req *http.Request) {
 	req.Header.Set("X-Agent-Purpose", "conversation")
 	req.Header.Set("X-IDE-Name", "WorkBuddy")
 	req.Header.Set("X-IDE-Type", "WorkBuddy")
-	req.Header.Set("X-IDE-Version", "5.5.4")
-	req.Header.Set("X-Product", "WorkBuddy")
+	req.Header.Set("X-IDE-Version", clientVer)
+	req.Header.Set("X-Product", clientProd)
+	req.Header.Set("X-Private-Data", "true")
+	req.Header.Set("X-Agent-Intent", "craft")
 }
 
 func newMessageIDWBAI() string {

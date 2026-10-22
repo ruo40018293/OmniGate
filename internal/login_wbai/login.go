@@ -26,6 +26,11 @@ import (
 // ErrPending 登录尚未完成（浏览器还没登录完）。
 var ErrPending = errors.New("login pending")
 
+// clientUA 客户端身份链（R51）：登录与聊天必须同属一个客户端身份。
+// 取值见 internal/upstream/headers.go 的 R51 注释（官方 5.8.4 静态解包），
+// 一致性由 internal/upstream/identity_parity_test.go 的跨包护栏守住。
+const clientUA = "WorkBuddy/5.8.4 WorkBuddy/5.8.4 CLI/2.161.0"
+
 // Result 登录成功后拿到的凭证与账号信息。
 type Result struct {
 	AccessToken  string
@@ -80,7 +85,8 @@ func ResolveAuthURL(_ *http.Client, rawURL string) (string, error) {
 			return "", err
 		}
 		req.Header.Set("Accept", "text/html,application/xhtml+xml,*/*")
-		req.Header.Set("User-Agent", "CLI/2.63.2 CodeBuddy/2.63.2")
+		// R51：与 chat 侧同一身份链（官方 5.8.4）。
+		req.Header.Set("User-Agent", clientUA)
 		resp, err := noFollow.Do(req)
 		if err != nil {
 			return "", err

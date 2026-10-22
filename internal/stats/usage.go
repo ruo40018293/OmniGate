@@ -236,11 +236,13 @@ func (s *Stats) allocateTraeCreditsLocked(models []ModelStat) {
 
 // windowLocked 返回历史 map（不含今日）中窗口=前 N-1 天的 tokens 和。
 // YYYY-MM-DD 字典序即时序，可直接字符串比较。
+// 窗口上界必须显式排除「今天之后」的日期：旧版只判 k >= start，跨日残留的
+// 未来键（或多机时钟回拨写入的键）会被算进任意长窗口，使 30 日 ≠ 7 日。
 func (s *Stats) windowLocked(now time.Time, days int) int64 {
 	start := now.AddDate(0, 0, -(days - 1)).Format("2006-01-02")
 	var sum int64
 	for k, v := range s.tokenDays {
-		if k >= start {
+		if k >= start && k <= s.today {
 			sum += v
 		}
 	}

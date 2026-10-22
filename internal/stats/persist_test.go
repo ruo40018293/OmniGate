@@ -14,11 +14,14 @@ import (
 // 保留 token_days/req_days 历史；flush 一次后即转为新格式。
 func TestLoadLegacyStatsJSON(t *testing.T) {
 	dir := t.TempDir()
-	legacy := `{
-  "token_days": {"2026-09-20": 12345},
-  "req_days": {"2026-09-20": 7},
+	// 历史日必须落在 30 日窗口内：写死日期会随真实日期推移掉出窗口，
+	// 测试就从「兼容旧格式」退化成「断言一个陈年日期不在窗口里」（2026-10-22 踩坑）。
+	hist := time.Now().AddDate(0, 0, -1).Format("2006-01-02")
+	legacy := fmt.Sprintf(`{
+  "token_days": {%q: 12345},
+  "req_days": {%q: 7},
   "accts": {"370999939580348": "2026-09-21T22:06:12+08:00"}
-}`
+}`, hist, hist)
 	if err := os.WriteFile(filepath.Join(dir, "stats.json"), []byte(legacy), 0o644); err != nil {
 		t.Fatal(err)
 	}
@@ -51,10 +54,10 @@ func TestLoadBOMTolerance(t *testing.T) {
 	today := time.Now().Format("2006-01-02")
 	now := time.Now().Format(time.RFC3339)
 	body := fmt.Sprintf(`{
-  "token_days": {"2026-09-20": 100},
+  "token_days": {%q: 100},
   "req_days": {},
   "accts": {"a1": {"day": %q, "burn_since": %q, "credit_out": 42}}
-}`, today, now)
+}`, time.Now().AddDate(0, 0, -1).Format("2006-01-02"), today, now)
 	raw := append([]byte("\xef\xbb\xbf"), []byte(body)...)
 	if err := os.WriteFile(filepath.Join(dir, "stats.json"), raw, 0o644); err != nil {
 		t.Fatal(err)

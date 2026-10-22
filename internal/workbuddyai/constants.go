@@ -14,7 +14,16 @@ import "omnigate/internal/provider"
 const (
 	WBAIHost = "https://www.workbuddy.ai"
 
-	clientUA   = "CLI/2.63.2 CodeBuddy/2.63.2"
+	// 客户端身份链（R51，2026-10-22）：取值来自本机官方 5.8.4 客户端静态解包
+	// （app.asar 的 buildVlmGatewayHeaders + cli/dist/codebuddy-lite-wb.mjs 的
+	// buildUserAgent），与 internal/upstream 同口径。两区共用一个桌面安装包，
+	// 只有区域开关不同，故版本号一致。
+	// 渠道包之间不共享代码是既有纪律（R44/R58），这里刻意各存一份，
+	// 一致性由 internal/upstream/identity_parity_test.go 的跨包护栏守住。
+	clientUA   = "WorkBuddy/5.8.4 WorkBuddy/5.8.4 CLI/2.161.0"
+	clientVer  = "5.8.4" // X-IDE-Version ← 官方 appVersion
+	clientProd = "SaaS"  // X-Product ← 官方 product.json deploymentType
+
 	originRef  = WBAIHost
 	wbaiDomain = "www.workbuddy.ai"
 
