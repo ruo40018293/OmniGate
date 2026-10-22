@@ -230,6 +230,26 @@ const css = readFileSync(new URL("../cmd/omnigate/web/style.css", import.meta.ur
 check("style.css 含运行统计样式段（#mtabStats .st-sum 等）", /#mtabStats \.st-sum/.test(css) && /#mtabStats \.st-plat-row/.test(css));
 check("更新角标失败警示样式存在（#stUpdated.st-stale）", /#stUpdated\.st-stale/.test(css));
 
+// 平台表防回归（2026-10-22）：grid 轨道数必须 == 每行直接单元格数。
+// 事故：上游 deac5bf 给 app.js 加了「今日作废」列（10→11 格）但没同步
+// style.css 的 grid-template-columns（仍是 10 轨）→ 第 11 格「7日内到期」
+// 折行进隐式行第 1 列（28px 宽）被裁切，用户看到表格错位。
+{
+  const cellRe = /<span class="st-plat-|stPlatNum\(|stPlatTok\(/g;
+  const grab = (re) => { const m = raw.match(re); return m ? (m[1].match(cellRe) || []).length : -1; };
+  const headCells = grab(/st-plat-head">([\s\S]*?)`<\/div>`;/);
+  const dataCells = grab(/`<div class="st-plat-row">` \+([\s\S]*?)`<\/div>`;/);
+  const sumCells = grab(/st-plat-sum-row">([\s\S]*?)`<\/div>`;/);
+  const tracks = [...css.matchAll(/\.st-plat-row\s*\{[^}]*?grid-template-columns:\s*([^;}]+)/g)]
+    .map((m) => m[1].trim().split(/\s+/).length);
+  check(
+    `平台表每行格数(${headCells}/${dataCells}/${sumCells}) == 桌面+窄屏轨道数(${tracks.join("/")})`,
+    headCells > 0 && headCells === dataCells && headCells === sumCells &&
+      tracks.length === 2 && tracks.every((t) => t === headCells),
+    `列数与轨道数不一致会折行错位（历史事故见上方注释）`
+  );
+}
+
 // ---- 输出 ----
 let failed = 0;
 for (const [name, pass, extra] of results) {

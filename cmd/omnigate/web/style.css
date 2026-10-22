@@ -710,11 +710,15 @@ code.about-repo:active { transform: translateY(1px); }
 
 /* 平台表：grid 固定列宽 + 满高右边框做竖线。
    中列按内容量收窄（固定 px）、末列弹性吸收剩余并左对齐——避免「数字浮在空白里」。
-   不要用 grid 的 auto 列：各列按各行内容独立解析，跨行会错位。 */
+   不要用 grid 的 auto 列：各列按各行内容独立解析，跨行会错位。
+   ⚠️ 轨道数必须 == renderPlatformTable 的每行单元格数（当前 11：#/平台/账号/当前积分/
+   今日收入/今日消耗/今日作废/今日Token/今日到期/明日到期/7日内到期）。deac5bf 加「今日作废」
+   列时只改了 app.js 没改这里，11 格落 10 轨，第 11 格折行掉进 28px 的 # 列——「7日内到期」显示不全。
+   加列/删列必须同步下方窄屏 media query 里的那一行。 */
 #mtabStats .st-plat { margin-top: 8px; }
 #mtabStats .st-plat-row {
   display: grid;
-  grid-template-columns: 28px 150px 52px 100px 80px 80px 112px 84px 84px 1fr;
+  grid-template-columns: 28px 150px 52px 100px 80px 80px 80px 112px 84px 84px 1fr;
   font-size: 12px;
   white-space: nowrap;
   border-bottom: 1px solid var(--border-soft);
@@ -963,7 +967,7 @@ code.about-repo:active { transform: translateY(1px); }
 #mtabStats .st-ab-sum.st-ab-err { color: #a16207; background: #fef9c3; border-color: #fde68a; }
 
 @media (max-width: 640px) {
-  #mtabStats .st-plat-row { grid-template-columns: 24px 96px 40px 76px 60px 60px 84px 64px 64px 1fr; font-size: 11px; }
+  #mtabStats .st-plat-row { grid-template-columns: 24px 96px 40px 76px 60px 60px 60px 84px 64px 64px 1fr; font-size: 11px; }
   #mtabStats .st-ex-row { grid-template-columns: 24px 88px 120px 76px 68px 1fr; font-size: 11px; }
   #mtabStats .st-ab-row { grid-template-columns: 24px 64px 88px 110px 1fr 76px 64px; font-size: 11px; }
 }
