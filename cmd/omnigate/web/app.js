@@ -2000,6 +2000,8 @@ function afterStateReady() {
   // （不依赖当前 tab——里程碑 toast 要在任何 tab 下及时弹出；tab 切入时另有即时拉取）
   loadStats();
   setInterval(loadStats, STATS_POLL_MS);
+  // 实时请求（R56）：默认 tab 是账号管理，先不轮询；切到运行统计时 startLivePoll。
+  // 但若用户刷新页面时正停在统计 tab，bindMainTabs 已按 active 状态启动，这里不重复。
   loadAppLog();
   setInterval(loadAppLog, APPLOG_POLL_MS);
   // 「调用中」徽标：2s 一跳。
@@ -2199,6 +2201,9 @@ function bindMainTabs() {
       }
       if (b.dataset.mtab === "stats") {
         loadStats(); // 切到运行统计 tab 时拉最新（后台 30s 轮询兜底）
+        startLivePoll(); // 实时请求 2s 轮询，仅在本 tab 可见时运行（省 CPU/网络）
+      } else {
+        stopLivePoll(); // 离开 tab 立即停：排队状态只在用户看的时候才有意义
       }
     };
   });
@@ -2491,16 +2496,85 @@ function renderModels(models) {
 
 // 请求日志：降序渲染（最新在最上）；tok/s 仅流式有值，0/空给「—」
 function renderLogs(rows) {
-  let h = `<tr><th>#</th><th>时间</th><th>模型</th><th>模式</th><th>状态</th><th>TTFB</th><th>tok</th><th>tok/s</th><th>total</th><th>积分</th></tr>`;
+  let h = `<tr><th>#</th><th>时间</th><th>模型</th><th>模式</th><th>状态</th><th>TTFB</th><th>tok</th><th>tok/s</th><th>total</th><th>积分</th><th>失败原因</th></tr>`;
   for (let i = rows.length - 1; i >= 0; i--) {
     const r = rows[i];
     const status = r.status < 400 ? String(r.status) : `<span class="st-bad">${r.status}</span>`;
     const tps = r.tok_per_sec > 0 ? fmtPct(r.tok_per_sec) : "—";
-    h += `<tr><td>${fmtCredits(r.seq)}</td><td class="st-mono">${esc(r.time)}</td><td class="st-mono">${esc(r.model)}</td>` +
+    // 失败原因（R56）：上游 HTTP 已 200 但内容是错误码时，状态列看不出问题，
+    // 这一列就是唯一的区分点，必须常显不能折叠。
+    const err = r.err ? `<span class="st-bad" title="${esc(r.err)}">${esc(r.err)}</span>` : "";
+    h += `<tr${r.err ? ' class="st-row-bad"' : ""}><td>${fmtCredits(r.seq)}</td><td class="st-mono">${esc(r.time)}</td><td class="st-mono">${esc(r.model)}</td>` +
       `<td>${esc(r.mode)}</td><td>${status}</td><td>${fmtCredits(r.ttfb_ms)}ms</td><td>${fmtCredits(r.tok)}</td><td>${tps}</td>` +
-      `<td>${r.total_sec ? r.total_sec.toFixed(1) + "s" : "—"}</td><td>${r.credit > 0 ? fmtCreditS(r.credit) : "—"}</td></tr>`;
+      `<td>${r.total_sec ? r.total_sec.toFixed(1) + "s" : "—"}</td><td>${r.credit > 0 ? fmtCreditS(r.credit) : "—"}</td>` +
+      `<td class="st-live-err">${err}</td></tr>`;
   }
   $("stLogs").innerHTML = rows.length ? h : `<tr><td class="st-empty">暂无请求</td></tr>`;
+}
+
+// ---------------------------------------------------------------------------
+// 进行中的请求（R56）：/api/live 快照。
+//
+// 为什么需要：排队保活期间网关不向客户端发字节，客户端界面只有计时器，
+// 用户体感是「卡住了」。这里把「谁在等、等什么、等了多久、上游说前方多少人」
+// 变成一屏可见，不必去翻 app.log（用户原话：我看运行日志啥都没看出问题）。
+// ---------------------------------------------------------------------------
+const LIVE_POLL_MS = 2000;
+let liveTimer = null;
+let liveWarned = false;
+
+const LIVE_PHASE_META = {
+  queued:    { tag: "排队中", cls: "st-live-queued" },
+  retrying:  { tag: "重投中", cls: "st-live-retry" },
+  streaming: { tag: "出流中", cls: "st-live-stream" },
+  done:      { tag: "已完成", cls: "" },
+};
+
+function fmtElapsed(started) {
+  const t = Date.parse(started);
+  if (!t) return "—";
+  const s = Math.max(0, Math.round((Date.now() - t) / 1000));
+  if (s < 60) return s + "s";
+  return Math.floor(s / 60) + "m" + String(s % 60).padStart(2, "0") + "s";
+}
+
+async function refreshLive() {
+  try {
+    const d = await api("/api/live");
+    renderLive(d.entries || []);
+    liveWarned = false;
+  } catch (e) {
+    // 失败保旧：不清空表格（用户正在看的就是等待状态）
+    if (!liveWarned) { liveWarned = true; console.warn("实时请求加载失败：", e); }
+  }
+}
+
+function renderLive(rows) {
+  const box = $("stLive");
+  if (!box) return;
+  let h = `<tr><th>开始</th><th>已等</th><th>渠道</th><th>模型</th><th>阶段</th><th>前方</th><th>预计</th><th>第几跳</th><th>最近进展</th></tr>`;
+  for (let i = rows.length - 1; i >= 0; i--) {
+    const r = rows[i];
+    const meta = LIVE_PHASE_META[r.phase] || { tag: r.phase || "—", cls: "" };
+    const notes = r.notes || [];
+    const last = notes.length ? notes[notes.length - 1].text : "";
+    const pos = r.queue_pos > 0 ? fmtCredits(r.queue_pos) : "—";
+    const wait = r.queue_wait > 0 ? r.queue_wait + "s" : "—";
+    h += `<tr class="${meta.cls}"><td class="st-mono">${esc((r.started || "").slice(11, 19))}</td>` +
+      `<td>${fmtElapsed(r.started)}</td><td>${esc(r.channel)}</td><td class="st-mono">${esc(r.model)}</td>` +
+      `<td><span class="st-live-tag">${esc(meta.tag)}</span></td><td>${pos}</td><td>${wait}</td>` +
+      `<td>${r.attempts || 1}</td><td class="st-live-note" title="${esc(last)}">${esc(last)}</td></tr>`;
+  }
+  box.innerHTML = rows.length ? h : `<tr><td class="st-empty" colspan="9">当前没有进行中的请求</td></tr>`;
+}
+
+function startLivePoll() {
+  if (liveTimer) return;
+  refreshLive();
+  liveTimer = setInterval(refreshLive, LIVE_POLL_MS);
+}
+function stopLivePoll() {
+  if (liveTimer) { clearInterval(liveTimer); liveTimer = null; }
 }
 
 // 异常账号（三级：disabled 已停用 / cool 整号冷却 / err 错误累计；无异常整块隐藏）

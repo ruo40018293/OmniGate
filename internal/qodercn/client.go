@@ -60,6 +60,13 @@ type Client struct {
 	queueUntil map[string]time.Time
 	queueInfo  map[string]*QueueError
 
+	// progMu 保护「等待期进度上报」登记表（R56）。
+	// 键 = 请求 body 的 sha1 前缀（同一请求跨跳不变），值 = handler 传入的回调。
+	// 用 body 作键而不是全局字段，是因为一个 Client 会并发服务多个请求，
+	// 全局 sink 会把 A 请求的排队信息挂到 B 请求的面板行上。
+	progMu   sync.RWMutex
+	progSink map[string]func(provider.Progress)
+
 	// R55 排队保活重投：单次请求内观察到排队时，在预算内暂停后重投整个上游请求，
 	// 客户端不用「重新发一轮=重新排队」。0 = 用默认值（5min / 跟随上游 retry_after）。
 	// queueHoldPause 仅测试注入（缩短重投间隔）；queueHoldBudget 置 time.Nanosecond
@@ -345,6 +352,8 @@ func (c *Client) ChatStream(a *auth.Auth, body []byte) (rc io.ReadCloser, status
 		}
 		log.Printf("qodercn hold-resend uid=%s model=%s: 熔断剩余 %v 在预算内，转保活重投节奏（上次：%s）",
 			a.UID, clientName, remain.Round(time.Second), q.Error())
+		c.progressOf(body, "queued", q.QueueCount, q.WaitSeconds,
+			fmt.Sprintf("上游排队中（前方 %d 个，预计 %ds），进入保活重投", q.QueueCount, q.WaitSeconds))
 	}
 
 	// 思考开关：reasoning_effort 或 thinking:{type:"enabled"} → 启用推理
@@ -369,8 +378,10 @@ func (c *Client) ChatStream(a *auth.Auth, body []byte) (rc io.ReadCloser, status
 	// R55 保活重投循环：观察到任一形态的排队（HTTP 429 快速拒绝 / 200 流内排队帧 /
 	// 无字节挂起）时，预算内暂停后在**同一个客户端请求内**重投整个上游请求；
 	// encoded/modelKey/熔断键跨跳不变，预算耗尽各路径回落 R46 语义。
+	attempt := 0 // 第几跳（R56 进度文案用；仅计数，不参与判定）
 holdLoop:
 	for {
+		attempt++
 		req, err := http.NewRequest(http.MethodPost, url, strings.NewReader(encoded))
 		if err != nil {
 			return nil, 0, nil, err
@@ -419,6 +430,9 @@ holdLoop:
 			if q := parseQueueBody(raw); q != nil {
 				c.rememberQueue(clientName, q)
 				if pause, ok := c.holdRemaining(holdStart, q); ok {
+					c.progressOf(body, "queued", q.QueueCount, q.WaitSeconds,
+						fmt.Sprintf("上游快速拒绝（前方 %d 个，等待 %ds），%v 后第 %d 跳重投",
+							q.QueueCount, q.WaitSeconds, pause.Round(time.Second), attempt))
 					log.Printf("qodercn hold-resend uid=%s model=%s: 上游 %d 排队快速拒绝（前方 %d 个，等待 %ds），%v 后重投（已用 %v / 预算 %v）",
 						a.UID, clientName, resp.StatusCode, q.QueueCount, q.WaitSeconds, pause,
 						time.Since(holdStart).Round(time.Second), c.holdBudget())
@@ -455,6 +469,9 @@ holdLoop:
 				q := &QueueError{ModelKey: modelKey, Hang: true}
 				c.rememberQueueFor(clientName, q, queueHangWindow)
 				if pause, ok := c.holdRemaining(holdStart, q); ok {
+					c.progressOf(body, "retrying", 0, 0,
+						fmt.Sprintf("首帧 %v 无字节（上游挂起），%v 后第 %d 跳重投",
+							time.Since(holdStart).Round(time.Second), pause.Round(time.Second), attempt))
 					log.Printf("qodercn hold-resend uid=%s model=%s: 首帧 %v 无字节（挂起形态），%v 后重投（已用 %v / 预算 %v）",
 						a.UID, clientName, c.FirstByteTimeout, pause,
 						time.Since(holdStart).Round(time.Second), c.holdBudget())
@@ -491,6 +508,9 @@ holdLoop:
 				q := &QueueError{ModelKey: modelKey, Hang: true}
 				c.rememberQueueFor(clientName, q, queueHangWindow)
 				if pause, ok := c.holdRemaining(holdStart, q); ok {
+					c.progressOf(body, "retrying", 0, 0,
+						fmt.Sprintf("流内静默 %v（上游只发保活碎片），%v 后第 %d 跳重投",
+							queueScanStall.Round(time.Second), pause.Round(time.Second), attempt))
 					log.Printf("qodercn hold-resend uid=%s model=%s: 流内静默 %v（只有保活碎片），%v 后重投（已用 %v / 预算 %v）",
 						a.UID, clientName, queueScanStall, pause,
 						time.Since(holdStart).Round(time.Second), c.holdBudget())
@@ -506,6 +526,9 @@ holdLoop:
 				if pause, ok := c.holdRemaining(holdStart, q); ok {
 					cancel()
 					resp.Body.Close()
+					c.progressOf(body, "queued", q.QueueCount, q.WaitSeconds,
+						fmt.Sprintf("流内排队帧（前方 %d 个，等待 %ds），%v 后第 %d 跳重投",
+							q.QueueCount, q.WaitSeconds, pause.Round(time.Second), attempt))
 					log.Printf("qodercn hold-resend uid=%s model=%s: 流内排队帧（前方 %d 个，等待 %ds），%v 后重投（已用 %v / 预算 %v）",
 						a.UID, clientName, q.QueueCount, q.WaitSeconds, pause,
 						time.Since(holdStart).Round(time.Second), c.holdBudget())
@@ -513,8 +536,32 @@ holdLoop:
 					continue holdLoop
 				}
 				break scanLoop // 预算耗尽：原样放行，下游按 R46 出 error 帧
-			} else if content || sl.err != nil || len(acc) > 1<<20 {
+			} else if content || len(acc) > 1<<20 {
 				break scanLoop
+			} else if sl.err != nil {
+				// R55b（2026-10-23 生产实锤）：读错误/EOF 出现在**任何内容帧之前**时，
+				// 这是「上游挂了整整 180s 只回保活碎片、然后直接断开」——绝不能当成功
+				// 交给下游（那会让客户端收到 212 字节的空流，DSH 显示 stream truncated）。
+				// 现场：14:57:31 / 15:02:13 / 15:05:30 三次都是 bytes=212~213、dur=3m0.x。
+				// 按 hang 处理：预算内重投，耗尽才回 429。
+				cancel()
+				resp.Body.Close()
+				q := &QueueError{ModelKey: modelKey, Hang: true}
+				c.rememberQueueFor(clientName, q, queueHangWindow)
+				if pause, ok := c.holdRemaining(holdStart, q); ok {
+					c.progressOf(body, "retrying", 0, 0,
+						fmt.Sprintf("上游零内容即断开（只读到 %d 字节保活碎片），%v 后第 %d 跳重投",
+							len(acc), pause.Round(time.Second), attempt))
+					log.Printf("qodercn hold-resend uid=%s model=%s: 上游零内容即断开（已读 %d 字节保活碎片，%v），%v 后重投（已用 %v / 预算 %v）",
+						a.UID, clientName, len(acc), sl.err, pause,
+						time.Since(holdStart).Round(time.Second), c.holdBudget())
+					time.Sleep(pause)
+					continue holdLoop
+				}
+				c.progressOf(body, "retrying", 0, 0,
+					fmt.Sprintf("等待预算 %v 已耗尽，返回 429 让客户端决定换模型", c.holdBudget().Round(time.Second)))
+				log.Printf("qodercn chat_stream uid=%s model=%s: 上游零内容即断开且预算耗尽，按排队熔断 %v", a.UID, clientName, queueHangWindow)
+				return nil, http.StatusTooManyRequests, queuedBody(clientName, q, int(queueHangWindow.Seconds())), nil
 			}
 		}
 		// 成功分支：cancel 所有权交给 idle.Monitor（其 Close 会 cancel；静默超时也会 cancel）。
@@ -643,7 +690,16 @@ func (c *Client) Classify(status int, body string) provider.ErrKind { return Cla
 // Stream 实现 provider.Upstream（嵌套 SSE → 标准 OpenAI SSE 透传）。
 // model 为客户端请求的模型名，直接注入每个 chunk（上游恒为 "auto"）。
 func (c *Client) Stream(w http.ResponseWriter, r io.Reader, model string) (map[string]any, error) {
-	usage, err := StreamCapture(w, r, model, nil)
+	return c.StreamContent(w, r, model, nil)
+}
+
+// StreamContent 实现可选的「首个内容帧」通知能力（R56b，见 internal/server 的接口断言）。
+//
+// 为什么单独一个方法而不是改 Stream 签名：provider.Upstream 是全部 11 个渠道共用的
+// 窄接口，为了一处观测需求改动它会让所有渠道跟着改；用能力断言按需启用，缺省渠道
+// 行为完全不变。
+func (c *Client) StreamContent(w http.ResponseWriter, r io.Reader, model string, once func()) (map[string]any, error) {
+	usage, err := StreamCaptureWithContent(w, r, model, nil, once)
 	// 流内观察到排队：记下熔断窗口，后续请求快速失败（客户端可立即换模型）。
 	var q *QueueError
 	if errors.As(err, &q) {

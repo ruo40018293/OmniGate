@@ -28,6 +28,10 @@ type ReqRow struct {
 	TokPerSec float64 `json:"tok_per_sec"`
 	TotalSec  float64 `json:"total_sec"`
 	Credit    float64 `json:"credit"` // 本次精确积分（有 usage 帧积分的渠道），0 = 无
+	// Err 失败/异常原因的人类可读一句话（R56 新增，为空表示成功）。
+	// 口径：只写「读者需要知道发生了什么」的那一句，含上游原文关键片段；
+	// 面板请求记录直接展示该列，避免用户只能去翻 app.log。
+	Err string `json:"err,omitempty"`
 }
 
 // ModelStat 今日按模型消耗（Credit 0 由前端区分显示）。

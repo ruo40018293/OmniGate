@@ -830,6 +830,22 @@ code.about-repo:active { transform: translateY(1px); }
 #mtabStats .st-empty { color: var(--text-3); text-align: center; padding: 10px 0; }
 #mtabStats .st-bad { color: var(--danger); font-weight: 600; }
 
+/* 进行中的请求（R56）：排队/重投期间必须一眼看出「在等」而不是「卡死」。
+   行的左侧色条比纯文字更醒目——用户扫一眼就知道有没有卡住的请求。 */
+#mtabStats .st-live td { vertical-align: middle; }
+#mtabStats .st-live tr.st-live-queued td:first-child { box-shadow: inset 3px 0 0 var(--warn, #d97706); }
+#mtabStats .st-live tr.st-live-retry td:first-child { box-shadow: inset 3px 0 0 var(--danger); }
+#mtabStats .st-live tr.st-live-stream td:first-child { box-shadow: inset 3px 0 0 var(--ch-wb, #0d9488); }
+#mtabStats .st-live-tag { display: inline-block; padding: 1px 6px; border-radius: 4px; font-size: 12px; background: var(--surface-2); }
+#mtabStats .st-live-queued .st-live-tag { color: var(--warn, #b45309); background: rgba(217, 119, 6, .12); }
+#mtabStats .st-live-retry .st-live-tag { color: var(--danger); background: rgba(220, 38, 38, .1); }
+#mtabStats .st-live-stream .st-live-tag { color: var(--ch-wb, #0d9488); background: rgba(13, 148, 136, .1); }
+/* 「最近进展」列：单行省略，hover 看全（长文案不撑破表格） */
+#mtabStats .st-live-note { max-width: 260px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--text-2); }
+/* 请求日志的失败原因列：失败行整行淡红底，避免用户在 15 行里逐格找 */
+#mtabStats .st-logs tr.st-row-bad td { background: rgba(220, 38, 38, .05); }
+#mtabStats .st-live-err { max-width: 240px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+
 /* 模型消耗表：table-layout:fixed 防内容撑列；模型列定宽、末列弹性左对齐 */
 #mtabStats table.st-models { table-layout: fixed; }
 #mtabStats table.st-models th:nth-child(1) { width: 36px; }

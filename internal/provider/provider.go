@@ -196,6 +196,29 @@ type Upstream interface {
 	Aggregate(r io.Reader, model string) (map[string]any, error)
 }
 
+// ProgressSink 是**可选**能力：渠道若能在「上游还没吐内容」的等待期上报进度
+// （排队前方人数、第几跳重投、零内容断开等），实现 SetProgressSink 即可；
+// handler 用匿名接口断言探测，不实现则完全零影响（无需改这十几个渠道的现有实现）。
+//
+// 存在理由（R56）：qodercn 排队时上游只回保活碎片、约 180s 后零内容断开，网关在
+// 内层保活重投期间不向客户端发任何字节，客户端界面只剩一个计时器；用户体感是
+// 「卡住了，只能挨个重启再试」。把等待期状态暴露出来是最小代价的解法。
+//
+// 并发语义（重要）：同一个渠道 Client 会被多个请求**并发**使用，所以回调必须按
+// 请求隔离（用 body 作键），不能是单一全局字段——否则 A 请求的排队信息会挂到
+// B 请求的面板行上。返回的 cancel 用于请求结束时注销，避免登记表无限增长。
+type ProgressSink interface {
+	SetProgressSink(body []byte, fn func(Progress)) (cancel func())
+}
+
+// Progress 一次等待期进度事件。
+type Progress struct {
+	Phase  string // "queued" / "retrying" / "streaming"
+	Pos    int    // 上游给出的队列前方人数（未知为 0）
+	Wait   int    // 上游给出的预计等待秒数（未知为 0）
+	Detail string // 人类可读一句话（进面板事件列表）
+}
+
 // StreamErrorClassifier 由「流内业务错误可分类」的渠道实现（当前 traework 的
 // SOLOStreamError）。handler 用 errors.As 取值，据此决定账号惩罚——
 // 使 server 层不必 import 具体渠道包。

@@ -82,7 +82,7 @@ const window = { addEventListener: () => {}, location: { search: "" } };
 // 源码改写：注入 state + 导出函数
 const patched =
   raw.replace(/let state = null;/, "let state = " + JSON.stringify(FAKE_STATE) + ";") +
-  "\n; globalThis.__T = { renderAccounts, renderSummary, loadStats, renderStats, renderPlatformTable, renderRotation, renderExpiry, renderModels, renderLogs, renderAbnormal, renderAppLog, handleToasts };";
+  "\n; globalThis.__T = { renderAccounts, renderSummary, loadStats, renderStats, renderPlatformTable, renderRotation, renderExpiry, renderModels, renderLogs, renderAbnormal, renderAppLog, renderLive, renderPlatformTable, handleToasts };";
 
 new Function("document", "window", "localStorage", "fetch", "location", "navigator", patched)(
   document,
@@ -191,6 +191,40 @@ const stLogs = document.getElementById("stLogs").innerHTML;
 check("请求日志降序（最新 seq 在前）", stLogs.indexOf("<td>2</td>") < stLogs.indexOf("<td>1</td>"));
 check("≥400 状态标红（st-bad）", stLogs.includes("st-bad"));
 check("非流式 tok/s 显示「—」", stLogs.includes("—"));
+
+// ---- 场景 4b：失败原因列（R56） ----
+// 事故：上游 HTTP 200 但流内是错误时，状态列看不出问题，用户只能去翻 app.log。
+// 这里锁住「有 err 就显示、且整行标记」，防止以后改表头把这一列弄丢。
+T.renderLogs([
+  { seq: 3, time: "10-06 12:02:00", model: "qodercn/z", mode: "流", status: 200, ttfb_ms: 100, tok: 0, tok_per_sec: 0, total_sec: 3.1, credit: 0, err: "流已中断：upstream stream truncated" },
+  { seq: 4, time: "10-06 12:03:00", model: "workbuddy/a", mode: "流", status: 200, ttfb_ms: 90, tok: 12, tok_per_sec: 5, total_sec: 2, credit: 0.1 },
+]);
+const stLogsErr = document.getElementById("stLogs").innerHTML;
+check("请求日志表头含「失败原因」列", stLogsErr.includes("失败原因"));
+check("失败行显示错误文案", stLogsErr.includes("upstream stream truncated"));
+check("失败行整行标记（st-row-bad）", stLogsErr.includes("st-row-bad"));
+check("成功行不带错误文案", (stLogsErr.match(/st-live-err/g) || []).length >= 2);
+
+// ---- 场景 4c：进行中的请求（R56 /api/live） ----
+// 锁住三件事：阶段中文、排队人数/预计等待、事件时间线最新一条。
+T.renderLive([
+  { id: "1", started: new Date(Date.now() - 65000).toISOString(), channel: "qodercn", model: "qodercn/deepseek-flash (0.00x)",
+    phase: "queued", attempts: 3, queue_pos: 5630, queue_wait: 295,
+    notes: [{ at: "", text: "上游快速拒绝（前方 5630 个，等待 295s），30s 后第 3 跳重投" }] },
+  { id: "2", started: new Date(Date.now() - 5000).toISOString(), channel: "traework", model: "traework/solo",
+    phase: "streaming", attempts: 1, notes: [] },
+]);
+const stLive = document.getElementById("stLive").innerHTML;
+check("进行中请求显示阶段中文（排队中）", stLive.includes("排队中"));
+check("进行中请求显示出流中阶段", stLive.includes("出流中"));
+check("排队人数与预计等待可见", stLive.includes("5,630") && stLive.includes("295s"));
+check("已等时长按秒/分显示", /\d+m\d\ds|\d+s/.test(stLive));
+check("最近进展取事件列表最后一条", stLive.includes("第 3 跳重投"));
+check("排队行带左侧色条类", stLive.includes("st-live-queued"));
+
+// 空态：必须明说「没有请求在飞」，而不是留一片空白让用户以为坏了
+T.renderLive([]);
+check("无在飞请求时给明确空态", document.getElementById("stLive").innerHTML.includes("当前没有进行中的请求"));
 
 // ---- 场景 5：运行日志（级别配色 / 时间前缀剥离） ----
 const FAKE_APPLOG = [

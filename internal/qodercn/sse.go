@@ -9,8 +9,11 @@ import (
 	"errors"
 	"fmt"
 	"io"
+
 	"net/http"
+	"omnigate/internal/capture"
 	"strings"
+	"sync"
 	"time"
 )
 
@@ -260,7 +263,7 @@ func sortInts(a []int) {
 // 收尾规则（issue #42）：正常收尾（含上游未发 [DONE] 的兜底）补 data: [DONE]；
 // 可证实的截断（传输层错误 / 停在半个帧上）改发一帧 OpenAI 规范 error 且**不补**
 // [DONE]，让客户端明确感知失败，而不是收到半截 tool_call 参数。
-func streamAsOpenAI(w io.Writer, r io.Reader, model string, flush func()) (map[string]any, error) {
+func streamAsOpenAI(w io.Writer, r io.Reader, model string, flush func(), onContent func()) (map[string]any, error) {
 	var usage map[string]any
 	truncated := false
 	err := parseNestedSSE(r, func(chunk map[string]any) error {
@@ -290,6 +293,9 @@ func streamAsOpenAI(w io.Writer, r io.Reader, model string, flush func()) (map[s
 		}
 		if flush != nil {
 			flush()
+		}
+		if onContent != nil {
+			onContent()
 		}
 		return nil
 	}, &truncated)
@@ -324,21 +330,56 @@ func Stream(w http.ResponseWriter, r io.Reader, model string) (map[string]any, e
 }
 
 // StreamCapture 同 Stream，额外把末帧 usage 回调给 onUsage（非 nil 时）。
+// ContentSink 让上层在「上游第一个**真实内容**字节到达」时收到通知（可 nil）。
+//
+// R56b：受理帧一发出，TTFB 就不再代表「用户看到第一个字的时间」。把「首个内容」
+// 单独通知出去，面板才能显示真实的「等首字」时长，而不是被连接建立时间掩盖。
+type ContentSink func()
+
 func StreamCapture(w http.ResponseWriter, r io.Reader, model string, onUsage func(map[string]any)) (map[string]any, error) {
+	return StreamCaptureWithContent(w, r, model, onUsage, nil)
+}
+
+// StreamCaptureWithContent 同 StreamCapture，额外在首个内容帧下传时回调 once。
+func StreamCaptureWithContent(w http.ResponseWriter, r io.Reader, model string, onUsage func(map[string]any), once ContentSink) (map[string]any, error) {
 	h := w.Header()
 	h.Set("Content-Type", "text/event-stream")
 	h.Set("Cache-Control", "no-cache")
 	h.Set("Connection", "keep-alive")
 	h.Set("X-Accel-Buffering", "no")
+	// R56b 一轮修正：受理帧由上层 acceptWriter 统一发（见 internal/server/handler.go），
+	// 这里**不再重复发**。19:53 实测：两层都发会导致客户端收到两帧，
+	// 而且 handler 侧先写会把响应头定成 text/plain，SSE 解析失败。
 	fl, _ := w.(http.Flusher)
 	flush := func() {
 		if fl != nil {
 			fl.Flush()
 		}
 	}
-	usage, err := streamAsOpenAI(w, r, model, flush)
+	// 活动探针：客户端还连着吗？已断开就没必要继续陪上游等（浪费连接与配额）。
+	// 只记事实，不改流语义。
+	watch := newActivityWatch(w, flush)
+	defer watch.Close()
+	// 首个**内容**帧通知（受理帧/注释帧不触发，见 live.MarkContent 的语义边界）。
+	var contentOnce sync.Once
+	var onContent func()
+	if once != nil {
+		onContent = func() { contentOnce.Do(once) }
+	}
+	usage, err := streamAsOpenAI(w, r, model, flush, onContent)
 	if err == nil && onUsage != nil && usage != nil {
 		onUsage(usage)
+	}
+	if err != nil {
+		// R56b：**只在失败时**留一份系统级取证 —— 沉默期的观测点只在这类请求里
+		// 才缺，正常请求不需要多写一个文件。
+		capture.SaveSystem("stream-fail", map[string]any{
+			"channel":   "qodercn",
+			"model":     model,
+			"error":     err.Error(),
+			"watch":     watch.report(),
+			"usage_got": usage != nil,
+		})
 	}
 	return usage, err
 }

@@ -177,6 +177,46 @@ func Save(rec Record) string {
 	return full
 }
 
+// SaveSystem 落一份「系统级」（渠道无关）证据：上游只发保活碎片、零内容断开，
+// 或客户端中途取消 —— 这类失败在渠道层看不出是「排队」还是「网络」，必须把
+// **当时那一刻的真实连接行为**留下来，事后才可能是可分析的。
+//
+// 与 Save 的区别：Save 是渠道异常（带模型/状态/上游原文）；这里是网关侧观测到的
+// 连接现象（读了多久、读到什么碎片、客户端是否还在），用于判定「沉默 180s」
+// 到底是上游挂起、还是网关自己卡住。
+//
+// 同样**永不 panic、永不返回错误影响主流程**。
+func SaveSystem(name string, meta map[string]any) string {
+	if !enabled() || name == "" {
+		return ""
+	}
+	dir := Dir()
+	if dir == "" {
+		return ""
+	}
+	pruneIfNeeded(dir)
+	now := time.Now()
+	full := filepath.Join(dir, fmt.Sprintf("sys-%s-%s.json",
+		now.Format("20060102-150405.000"), sanitizeName(name)))
+	payload := map[string]any{
+		"ts":   now.Format(time.RFC3339Nano),
+		"kind": "system",
+		"note": "系统级取证：非对话内容，用于排查网关侧行为",
+	}
+	for k, v := range meta {
+		payload[k] = v
+	}
+	buf, err := json.MarshalIndent(payload, "", "  ")
+	if err != nil {
+		return ""
+	}
+	if err := os.WriteFile(full, buf, 0o644); err != nil {
+		return ""
+	}
+	atomic.AddInt64(&savedCount, 1)
+	return full
+}
+
 var savedCount int64
 
 // SavedCount 已落盘的异常记录数（面板/测试用）。

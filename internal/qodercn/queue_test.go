@@ -116,7 +116,7 @@ func TestStreamQueueFrameBothEnvelopes(t *testing.T) {
 	for name, line := range cases {
 		t.Run(name, func(t *testing.T) {
 			var buf bytes.Buffer
-			usage, err := streamAsOpenAI(&buf, strings.NewReader(line), "deepseek-flash", nil)
+			usage, err := streamAsOpenAI(&buf, strings.NewReader(line), "deepseek-flash", nil, nil)
 			if err == nil {
 				t.Fatalf("排队帧未识别：err=nil，输出=%s", buf.String())
 			}
@@ -146,7 +146,7 @@ func TestStreamQueueFrameBothEnvelopes(t *testing.T) {
 func TestStreamFlatNoiseNotTreatedAsError(t *testing.T) {
 	var buf bytes.Buffer
 	frames := "data:" + string(mustJSON(map[string]any{"body": `{"choices":[{"delta":{"content":"hi"}}]}`})) + "\n\n"
-	if _, err := streamAsOpenAI(&buf, strings.NewReader(frames), "deepseek-flash", nil); err != nil {
+	if _, err := streamAsOpenAI(&buf, strings.NewReader(frames), "deepseek-flash", nil, nil); err != nil {
 		t.Fatalf("正常嵌套帧被判错：%v", err)
 	}
 	if strings.Contains(buf.String(), "model_queued") {
@@ -466,6 +466,89 @@ func TestChatStreamHoldBudgetExhaust(t *testing.T) {
 	}
 	if q, remain := c.queueBlocked("deepseek-flash"); q == nil || remain <= 0 {
 		t.Fatal("排队期间必须写熔断，保护并发请求不陪等")
+	}
+}
+
+// TestChatStreamHoldRetriesOnEmptyTruncatedStream R55b（2026-10-23 生产实锤）：
+// 上游 200 后只回保活碎片、零内容、约 180s 直接断开（现场 bytes=212~213 / dur=3m0.x）。
+// 这种「零内容即断开」绝不能当成功交给下游 —— 那会让客户端收到空流并显示
+// stream truncated；必须按 hang 走保活重投。
+func TestChatStreamHoldRetriesOnEmptyTruncatedStream(t *testing.T) {
+	var calls int32
+	content := map[string]any{"choices": []any{map[string]any{"index": 0, "delta": map[string]any{"content": "recovered"}}}}
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		n := atomic.AddInt32(&calls, 1)
+		w.Header().Set("Content-Type", "text/event-stream")
+		w.WriteHeader(http.StatusOK)
+		if n == 1 {
+			// 零内容：只发 SSE 注释保活行，然后直接断开（模拟上游掐断）。
+			io.WriteString(w, ": keep-alive\n\n")
+			w.(http.Flusher).Flush()
+			return
+		}
+		io.WriteString(w, envelopeLine(t, content))
+		w.(http.Flusher).Flush()
+	}))
+	defer srv.Close()
+
+	c := NewWithBase(srv.URL, srv.URL)
+	c.queueHoldBudget = 3 * time.Second
+	c.queueHoldPause = 10 * time.Millisecond
+
+	rc, status, body, err := c.ChatStream(fakeAuth(), []byte(`{"model":"deepseek-flash","messages":[]}`))
+	if err != nil {
+		t.Fatalf("err = %v", err)
+	}
+	if rc == nil || status != http.StatusOK {
+		if rc != nil {
+			rc.Close()
+		}
+		t.Fatalf("零内容断开应重投而非当成功：status=%d body=%.200s", status, body)
+	}
+	defer rc.Close()
+	out, _ := io.ReadAll(rc)
+	if !bytes.Contains(out, []byte("recovered")) {
+		t.Fatalf("缺二跳内容帧：%q", out)
+	}
+	if n := atomic.LoadInt32(&calls); n != 2 {
+		t.Fatalf("应恰好 2 跳（首跳空流 → 重投成功），got %d", n)
+	}
+}
+
+// TestChatStreamEmptyTruncatedBudgetExhausted429 同形态但预算极小：
+// 重投耗尽后必须回 429 model_queued（可行动的「换模型」信号），
+// 而不是把空流当 200 骗下游。
+func TestChatStreamEmptyTruncatedBudgetExhausted429(t *testing.T) {
+	var calls int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		atomic.AddInt32(&calls, 1)
+		w.Header().Set("Content-Type", "text/event-stream")
+		w.WriteHeader(http.StatusOK)
+		io.WriteString(w, ": keep-alive\n\n")
+		w.(http.Flusher).Flush()
+	}))
+	defer srv.Close()
+
+	c := NewWithBase(srv.URL, srv.URL)
+	c.queueHoldBudget = 100 * time.Millisecond
+	c.queueHoldPause = 10 * time.Millisecond
+
+	rc, status, body, err := c.ChatStream(fakeAuth(), []byte(`{"model":"deepseek-flash","messages":[]}`))
+	if err != nil {
+		t.Fatalf("err = %v", err)
+	}
+	if rc != nil {
+		rc.Close()
+		t.Fatalf("预算耗尽不该返回流：status=%d", status)
+	}
+	if status != http.StatusTooManyRequests {
+		t.Fatalf("预算耗尽应回 429，got %d body=%.200s", status, body)
+	}
+	if !bytes.Contains(body, []byte("model_queued")) {
+		t.Fatalf("429 body 应带 model_queued 供客户端识别：%.300s", body)
+	}
+	if n := atomic.LoadInt32(&calls); n < 2 {
+		t.Fatalf("应至少重投一次，got %d", n)
 	}
 }
 

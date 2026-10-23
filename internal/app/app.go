@@ -22,6 +22,7 @@ import (
 	"omnigate/internal/auth"
 	"omnigate/internal/config"
 	"omnigate/internal/ledger"
+	"omnigate/internal/live"
 	"omnigate/internal/login"
 	"omnigate/internal/login_glm"
 	loginqoder "omnigate/internal/login_qoder"
@@ -2618,6 +2619,23 @@ func (a *App) HandleAPI(mux *http.ServeMux) {
 			return
 		}
 		writeJSON(w, http.StatusOK, a.stats.Snapshot(time.Now()))
+	})
+	// 在飞请求实时状态（R56）：面板轮询此端点即可看到「当前哪些请求在排队/
+	// 第几跳重投/已等多久/上游说前方多少人」。存在理由见 internal/live 包注释。
+	// 说明：这里给的是**快照**，不参与任何调度判定；为空表示当前没有请求在飞。
+	mux.HandleFunc("GET /api/live", func(w http.ResponseWriter, r *http.Request) {
+		if a.handler == nil {
+			writeJSON(w, http.StatusOK, map[string]any{"entries": []any{}})
+			return
+		}
+		rows := a.handler.Live()
+		if rows == nil {
+			rows = []live.Entry{}
+		}
+		writeJSON(w, http.StatusOK, map[string]any{
+			"entries": rows,
+			"now":     time.Now().Format("15:04:05"),
+		})
 	})
 	// 请求日志（最近 N 条，默认 15；rows 形状对齐 sidecar /capi/logs）
 	mux.HandleFunc("GET /api/stats/logs", func(w http.ResponseWriter, r *http.Request) {

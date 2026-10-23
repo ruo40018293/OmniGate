@@ -17,6 +17,7 @@ import (
 	"omnigate/internal/auth"
 	"omnigate/internal/httpauth"
 	"omnigate/internal/ledger"
+	"omnigate/internal/live"
 	"omnigate/internal/pool"
 	"omnigate/internal/provider"
 	"omnigate/internal/session"
@@ -132,6 +133,11 @@ type Handler struct {
 	ledger *ledger.Ledger     // 记账器（cfg.Ledger 透传，nil = 不记账）
 	stats  *statsEngine.Stats // 运行统计引擎（cfg.Stats 透传，nil = 不插桩）
 
+	// live 在飞请求实时状态（R56）：保活重投期间客户端界面上只有计时器，
+	// 用户看不到任何进度；这里把「排队第几跳、已等多久、上游说前方多少人」
+	// 变成面板可轮询的状态，而不是等结束才在 app.log 留一行。nil = 不登记。
+	live *live.Tracker
+
 	apiMu    sync.RWMutex // 保护 cfg.APIKey（面板可运行时修改）
 	stickyMu sync.RWMutex
 
@@ -173,6 +179,10 @@ func NewHandler(cfg Config) *Handler {
 		cfg.RefreshSkew = 10 * time.Minute
 	}
 	h := &Handler{cfg: cfg, mux: http.NewServeMux(), sticky: make(map[string]*stickyEntry), ledger: cfg.Ledger, stats: cfg.Stats}
+	// R56 在飞请求实时表：每个请求登记一行，面板 /api/live 轮询展示。
+	// 由 handler 自己持有（而不是 app 注入）：生命周期与 handler 一致，
+	// 且测试里 NewHandler 即可得到可用的实时表。
+	h.live = live.New()
 	if cfg.SessionEnabled {
 		h.sessions = session.New(session.Config{
 			TTL:        cfg.SessionTTL,
@@ -659,6 +669,14 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 	}
 	sw := &statWriter{ResponseWriter: w, start: time.Now()}
 	w = sw // 此后所有写出（流式/非流式/透传错误）统一经 sw 计时
+
+	// R56 在飞请求登记：从这里开始到本轮结束，面板能实时看到「当前在排队/第几跳」。
+	// 结束在 defer 里注销（与统计收口同一生命周期）。
+	liveID := h.live.Begin(rt.Kind.String(), clientModel, peek.Stream)
+	if h.live != nil {
+		defer h.live.End(liveID)
+	}
+
 	if h.stats != nil {
 		defer func() {
 			now := time.Now()
@@ -670,6 +688,32 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 			}
 			h.stats.AddRequestRow(statRow)
 		}()
+	}
+
+	// R56：把「等待期进度」接到面板。只有实现 provider.ProgressReporter 的渠道才生效
+	// （目前 qodercn 的排队保活重投是唯一会长时间不吐字节的路径），其余渠道零影响。
+	// 用「注册 body→回调」的方式而不是全局 sink：同一渠道 Client 并发服务多个请求，
+	// 全局回调会把 A 请求的排队信息挂到 B 请求的面板行上。
+	if h.live != nil {
+		if reg, ok := rt.Upstream.(interface {
+			SetProgressSink(body []byte, fn func(provider.Progress)) (cancel func())
+		}); ok {
+			lv := h.live
+			lid := liveID
+			cancel := reg.SetProgressSink(body, func(p provider.Progress) {
+				phase := p.Phase
+				if phase == "" {
+					phase = live.PhaseQueued
+				}
+				lv.SetPhase(lid, phase, p.Pos, p.Wait)
+				if p.Detail != "" {
+					lv.Note(lid, p.Detail)
+				}
+			})
+			if cancel != nil {
+				defer cancel()
+			}
+		}
 	}
 
 	tried := map[string]bool{}
@@ -746,6 +790,7 @@ rotateLoop:
 				log.Printf("upstream transport error platform=%s uid=%s（单账号渠道不计错）err=%v",
 					rt.Kind, acct.UID, terr)
 				statRow.Status = http.StatusBadGateway
+				statRow.Err = "上游传输错误：" + oneLine(terr.Error())
 				writeOpenAIError(w, http.StatusBadGateway, "upstream_error", terr.Error())
 				return
 			}
@@ -762,6 +807,7 @@ rotateLoop:
 			if rt.SingleAccount {
 				log.Printf("upstream error platform=%s uid=%s status=%d kind=%s（单账号渠道不罚账号，原文透传）",
 					rt.Kind, acct.UID, status, kind)
+				statRow.Err = upstreamErrText(kind.String(), status, respBody)
 				transparentError(w, status, respBody)
 				return
 			}
@@ -787,6 +833,7 @@ rotateLoop:
 			case provider.ErrContentBlocked, provider.ErrPromptTooLong, provider.ErrPassthrough:
 				// 内容拦截/上下文超限/请求级拒绝：不冷却不熔断不计错，直接透传原文回客户端。
 				// 这些是请求内容或请求形态问题，与账号健康无关，轮转白费时间且浪费好号配额。
+				statRow.Err = upstreamErrText(kind.String(), status, respBody)
 				transparentError(w, status, respBody)
 				return
 			case provider.ErrWafBlock, provider.ErrAccountFault, provider.ErrModelBlocked:
@@ -804,6 +851,7 @@ rotateLoop:
 					break rotateLoop
 				}
 				if kind != provider.ErrAccountFault {
+					statRow.Err = upstreamErrText(kind.String(), status, respBody)
 					transparentError(w, status, respBody)
 					return
 				}
@@ -846,7 +894,38 @@ rotateLoop:
 		// 真实结果才是权威。绑定后多轮对话会收敛到「对该会话持续成功」的号。
 		h.sessionBind(rt, sessKey, acct)
 		if peek.Stream {
-			usage, serr := rt.Upstream.Stream(w, rc, clientModel)
+			// R56：保活重投期间（尤其 qodercn 排队）客户端界面上只有一个计时器。
+			// provider.Upstream 的签名不带回调，所以这里以响应头 + 入口帧把「这一轮
+			// 确实在等、上游说了什么」先告诉客户端，避免界面完全静默；
+			// 更细的每跳进度由面板 /api/live 实时呈现。
+			if h.live != nil {
+				h.live.SetPhase(liveID, live.PhaseStreaming, 0, 0)
+			}
+			// R56b：受理帧用包装 ResponseWriter 发，而不是裸写 w。
+			//
+			// 一轮修正的教训（2026-10-23 19:53 实测）：直接 `io.WriteString(w, ...)`
+			// 会在渠道内 Stream 设置 Content-Type **之前**写出字节，响应头被永久定成
+			// text/plain —— SSE 客户端拒绝解析，且与渠道内部那帧重复成两帧。
+			// 包装器在**第一次写**时先补齐 SSE 响应头再写受理帧，顺序正确、只发一次，
+			// 11 个渠道一并覆盖，不必逐个改动。
+			sw2 := newAcceptWriter(w)
+			w = sw2
+			// R56b：内容到达时刻单独回填面板（受理帧不算内容）。
+			markContent := func() {
+				if h.live != nil {
+					h.live.MarkContent(liveID)
+				}
+			}
+			var usage map[string]any
+			var serr error
+			if cs, ok := rt.Upstream.(interface {
+				StreamContent(w http.ResponseWriter, r io.Reader, model string, once func()) (map[string]any, error)
+			}); ok {
+				usage, serr = cs.StreamContent(sw2, rc, clientModel, markContent)
+			} else {
+				usage, serr = rt.Upstream.Stream(sw2, rc, clientModel)
+				markContent() // 无内容通知能力的渠道：退化为「流起来即有内容」
+			}
 			// 记 token 流水（成功请求口径；usage 缺失记 0 token 仅计请求数）。
 			// 记账失败不干扰主流程——锦上添花功能。
 			if h.ledger != nil {
@@ -871,6 +950,10 @@ rotateLoop:
 			if serr != nil {
 				// 上游中断/空流已尽力透传，错误仅在日志可见
 				log.Printf("stream relay end platform=%s uid=%s err=%v", rt.Kind, acct.UID, serr)
+				// R56：把失败原因同时写进本请求的统计行（面板「请求记录」直接展示）。
+				// 口径：上游 HTTP 已 200，所以 Status 保持 200，异常只在 Err 里体现——
+				// 让用户能在一屏内区分「成功」「200 但内容是错误」「429 排队」。
+				statRow.Err = streamErrText(serr)
 				// 流内业务错误（traework SOLO 的 event:error，如 3004 限流）：
 				// HTTP 200 与响应头早已发出，无法在同一请求内换号重试；唯一补救是把
 				// 中招账号冷却掉——下次请求挑号会自动换到别的账号（粘性路由见
@@ -920,6 +1003,7 @@ rotateLoop:
 		resp, err := rt.Upstream.Aggregate(rc, clientModel)
 		if err != nil {
 			statRow.Status = http.StatusBadGateway
+			statRow.Err = "上游聚合失败：" + oneLine(err.Error())
 			writeOpenAIError(w, http.StatusBadGateway, "upstream_parse", err.Error())
 			return
 		}
@@ -950,6 +1034,7 @@ rotateLoop:
 	// 候选耗尽但轮换中有上游错误：优先透传最后一个上游原始响应（保持上游语义，
 	// 如 429+6004 重置时间；本次请求确实逐号尝试过，包装成 503 反而丢信息）。
 	if lastStatus > 0 && lastBody != nil {
+		statRow.Err = upstreamErrText("upstream", lastStatus, lastBody)
 		transparentError(w, lastStatus, lastBody)
 		return
 	}
@@ -1383,6 +1468,125 @@ func softRateResetTs(body string) (time.Time, bool) {
 }
 
 // truncateBody 错误日志/聚合 lastErr 用的响应体摘要。
+// Live 返回在飞请求实时快照（供面板 /api/live 轮询）。handler 为 nil 时返回空。
+func (h *Handler) Live() []live.Entry {
+	if h == nil || h.live == nil {
+		return nil
+	}
+	return h.live.Snapshot()
+}
+
+// oneLine 把多行错误压成一行（面板表格单元格里不换行更易读）。
+func oneLine(s string) string {
+	s = strings.ReplaceAll(s, "\r\n", " ")
+	s = strings.ReplaceAll(s, "\n", " ")
+	s = strings.ReplaceAll(s, "\t", " ")
+	return strings.TrimSpace(s)
+}
+
+// upstreamErrText 生成面板「请求记录」里的失败原因一句话（R56）。
+//
+// 为什么不能只靠 app.log：用户视角是「网关在跑、请求没反应、日志看不出问题」。
+// 面板请求记录必须自己说清楚「哪个类别、上游给了什么状态、上游原文关键片段」，
+// 否则用户只能挨个重启再试。
+func upstreamErrText(kind string, status int, body []byte) string {
+	detail := oneLine(string(body))
+	const maxDetail = 160
+	if len(detail) > maxDetail {
+		detail = detail[:maxDetail] + "…"
+	}
+	if detail == "" {
+		return fmt.Sprintf("%s（HTTP %d）", kind, status)
+	}
+	return fmt.Sprintf("%s（HTTP %d）：%s", kind, status, detail)
+}
+
+// streamErrText 生成流式请求失败/异常原因（HTTP 已 200，异常只能写在流里）。
+func streamErrText(err error) string {
+	if err == nil {
+		return ""
+	}
+	return "流已中断：" + oneLine(err.Error())
+}
+
+// writeAcceptedFrame 在流式响应开始时写一帧 SSE 注释，立刻 flush。
+//
+// 为什么是注释帧而不是 data 帧：注释行按 SSE 规范必须被客户端忽略，不会混进
+// OpenAI 的 chunk 序列；但对 HTTP 层它是一次真实写入 + flush，客户端界面能立刻
+// 看到「连接活着」。所有渠道共用，保证行为一致。
+func writeAcceptedFrame(w http.ResponseWriter) {
+	if w == nil {
+		return
+	}
+	if _, err := io.WriteString(w, ": omnigate request accepted\n\n"); err != nil {
+		return
+	}
+	if fl, ok := w.(http.Flusher); ok {
+		fl.Flush()
+	}
+}
+
+// acceptWriter 在第一次写入前补齐 SSE 响应头并先发一帧「已受理」注释。
+//
+// 解决两个真实问题（2026-10-23 19:53 实测）：
+//   1. 直接裸写 w 会在渠道内 Stream 设置 Content-Type **之前**写出字节，响应头被
+//      永久定成 text/plain，SSE 客户端拒绝解析；
+//   2. 只有 qodercn 内部发了受理帧，其余 10 个渠道等待期仍然全静默。
+//
+// 顺序：先 Set 好 SSE 响应头 → 写受理注释帧 → flush → 再交给渠道自己的流实现。
+// 渠道后续重复 Set 同样的值无副作用；即便它 Set 别的值也改不了已发出的头（这正是
+// 我们要的顺序保证）。
+type acceptWriter struct {
+	http.ResponseWriter
+	sent    bool
+	flusher http.Flusher
+}
+
+func newAcceptWriter(w http.ResponseWriter) *acceptWriter {
+	aw := &acceptWriter{ResponseWriter: w}
+	if fl, ok := w.(http.Flusher); ok {
+		aw.flusher = fl
+	}
+	return aw
+}
+
+func (a *acceptWriter) Flush() {
+	a.ensure()
+	if a.flusher != nil {
+		a.flusher.Flush()
+	}
+}
+
+// ensure 幂等：只在第一次写之前发一次受理帧。
+func (a *acceptWriter) ensure() {
+	if a.sent {
+		return
+	}
+	a.sent = true
+	h := a.ResponseWriter.Header()
+	// 只在渠道还没设过时才补，避免覆盖渠道自己的取值（例如某些渠道用 application/json
+	// 发错误体时不该被强行改成 event-stream）。
+	if h.Get("Content-Type") == "" {
+		h.Set("Content-Type", "text/event-stream")
+		h.Set("Cache-Control", "no-cache")
+		h.Set("Connection", "keep-alive")
+		h.Set("X-Accel-Buffering", "no")
+	}
+	if _, err := io.WriteString(a.ResponseWriter, ": omnigate request accepted\n\n"); err == nil && a.flusher != nil {
+		a.flusher.Flush()
+	}
+}
+
+func (a *acceptWriter) WriteHeader(code int) {
+	a.ensure()
+	a.ResponseWriter.WriteHeader(code)
+}
+
+func (a *acceptWriter) Write(p []byte) (int, error) {
+	a.ensure()
+	return a.ResponseWriter.Write(p)
+}
+
 func truncateBody(body []byte) string {
 	const max = 200
 	s := string(body)
