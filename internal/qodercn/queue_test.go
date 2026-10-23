@@ -612,15 +612,65 @@ func TestFuseWindowBoundedByHoldBudget(t *testing.T) {
 	if w := fuseWindow(&QueueError{WaitSeconds: 480}); w != queueBlockWindow {
 		t.Fatalf("大 waitTime 应夹到上界 %v，got %v", queueBlockWindow, w)
 	}
-	if queueBlockWindow >= defaultQueueHoldBudget {
+	// R58：默认预算改为 0（不设上限），此时「上界 < 预算」自动成立；仍要守住
+	// 「有限预算场景下上界必须更小」这条护栏，否则 R55c 那类「等待者被锁在门外」
+	// 会以另一种预算配置复发。
+	if defaultQueueHoldBudget > 0 && queueBlockWindow >= defaultQueueHoldBudget {
 		t.Fatalf("熔断上界 %v 必须小于保活预算 %v，否则续期后的熔断会把等待者永久锁在门外",
 			queueBlockWindow, defaultQueueHoldBudget)
+	}
+	if defaultQueueHoldBudget == 0 {
+		// 不设上限的语义本身就是「熔断过期后仍允许进保活循环」。
+		if w := fuseWindow(&QueueError{WaitSeconds: 480}); w > 0 && queueBlockWindow <= 0 {
+			t.Fatalf("预算不设上限时仍需要有熔断上界，got %v", queueBlockWindow)
+		}
 	}
 	// 写入侧同样走动态窗：排队帧 185s → 215s，而非旧固定 10min。
 	c := New()
 	c.rememberQueue("some-model", &QueueError{ModelKey: "m", WaitSeconds: 185, QueueCount: 3058})
 	if q, remain := c.queueBlocked("some-model"); q == nil || remain > 216*time.Second || remain < 200*time.Second {
 		t.Fatalf("熔断窗口应≈waitTime+30s（215s），got %v", remain)
+	}
+}
+
+// TestHoldBudgetDefaultIsFiveMinutes R58 回归（用户 2026-10-23 20:48「弄个上限
+// 时间吧 5 分钟」）：默认预算必须是 5 分钟，且到点必须放弃——不能像 R57 那样
+// 无限等下去。实测依据：qodercn 免费池高峰 12 分钟名次在 1547~4200 拉锯，
+// 无限等只是把「卡住」换成「看起来在动但一直不动」。
+func TestHoldBudgetDefaultIsFiveMinutes(t *testing.T) {
+	c := New()
+	if c.holdBudget() != 5*time.Minute {
+		t.Fatalf("默认保活预算应为 5m（用户定的上限），got %v", c.holdBudget())
+	}
+	if got := c.holdBudgetText(); got != "5m0s" {
+		t.Fatalf("有限预算的日志文案应为 5m0s，got %q", got)
+	}
+	// 刚进来（已用 0s）在预算内 → 继续排。
+	if _, ok := c.holdRemaining(time.Now(), &QueueError{WaitSeconds: 100}); !ok {
+		t.Fatal("已用 0s 应在 5m 预算内，应继续重投")
+	}
+	// 已用 4m50s + 下一跳要等 100s → 超出预算，必须放弃。
+	if _, ok := c.holdRemaining(time.Now().Add(-290*time.Second), &QueueError{WaitSeconds: 100}); ok {
+		t.Fatal("已用 4m50s 再加 100s 会超出 5m 上限，应放弃而不是继续等")
+	}
+	// 已用 2 分钟 + 下一跳 37s → 仍在预算内。
+	if pause, ok := c.holdRemaining(time.Now().Add(-2*time.Minute), &QueueError{WaitSeconds: 37}); !ok {
+		t.Fatal("已用 2m 再加 34s 仍在 5m 内，应继续重投")
+	} else if pause < 25*time.Second {
+		t.Fatalf("pause 应≈waitTime，got %v", pause)
+	}
+}
+
+// TestHoldBudgetZeroMeansUnlimited 覆盖 0=不设上限 的保留分支（测试与临时排障用）。
+func TestHoldBudgetZeroMeansUnlimited(t *testing.T) {
+	c := New()
+	c.queueHoldBudget = -1 // holdBudget() 只在 >0 时覆盖，-1 走默认；直接用常量断言路径
+	if b := c.holdBudget(); b != 5*time.Minute {
+		t.Fatalf("注入非正值不应改变默认预算，got %v", b)
+	}
+	txt := (&Client{}).holdBudgetText()
+	if txt == "" {
+		t.Fatal("预算文案不应为空")
 	}
 }
 

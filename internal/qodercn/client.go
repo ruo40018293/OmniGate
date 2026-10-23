@@ -444,7 +444,7 @@ holdLoop:
 							q.QueueCount, q.WaitSeconds, pause.Round(time.Second), attempt))
 					log.Printf("qodercn hold-resend uid=%s model=%s: 上游 %d 排队快速拒绝（前方 %d 个，等待 %ds），%v 后重投（已用 %v / 预算 %v）",
 						a.UID, clientName, resp.StatusCode, q.QueueCount, q.WaitSeconds, pause,
-						time.Since(holdStart).Round(time.Second), c.holdBudget())
+						time.Since(holdStart).Round(time.Second), c.holdBudgetText())
 					time.Sleep(pause)
 					continue holdLoop
 				}
@@ -483,7 +483,7 @@ holdLoop:
 							time.Since(holdStart).Round(time.Second), pause.Round(time.Second), attempt))
 					log.Printf("qodercn hold-resend uid=%s model=%s: 首帧 %v 无字节（挂起形态），%v 后重投（已用 %v / 预算 %v）",
 						a.UID, clientName, c.FirstByteTimeout, pause,
-						time.Since(holdStart).Round(time.Second), c.holdBudget())
+						time.Since(holdStart).Round(time.Second), c.holdBudgetText())
 					time.Sleep(pause)
 					continue holdLoop
 				}
@@ -522,7 +522,7 @@ holdLoop:
 							queueScanStall.Round(time.Second), pause.Round(time.Second), attempt))
 					log.Printf("qodercn hold-resend uid=%s model=%s: 流内静默 %v（只有保活碎片），%v 后重投（已用 %v / 预算 %v）",
 						a.UID, clientName, queueScanStall, pause,
-						time.Since(holdStart).Round(time.Second), c.holdBudget())
+						time.Since(holdStart).Round(time.Second), c.holdBudgetText())
 					time.Sleep(pause)
 					continue holdLoop
 				}
@@ -540,7 +540,7 @@ holdLoop:
 							q.QueueCount, q.WaitSeconds, pause.Round(time.Second), attempt))
 					log.Printf("qodercn hold-resend uid=%s model=%s: 流内排队帧（前方 %d 个，等待 %ds），%v 后重投（已用 %v / 预算 %v）",
 						a.UID, clientName, q.QueueCount, q.WaitSeconds, pause,
-						time.Since(holdStart).Round(time.Second), c.holdBudget())
+						time.Since(holdStart).Round(time.Second), c.holdBudgetText())
 					time.Sleep(pause)
 					continue holdLoop
 				}
@@ -563,12 +563,12 @@ holdLoop:
 							len(acc), pause.Round(time.Second), attempt))
 					log.Printf("qodercn hold-resend uid=%s model=%s: 上游零内容即断开（已读 %d 字节保活碎片，%v），%v 后重投（已用 %v / 预算 %v）",
 						a.UID, clientName, len(acc), sl.err, pause,
-						time.Since(holdStart).Round(time.Second), c.holdBudget())
+						time.Since(holdStart).Round(time.Second), c.holdBudgetText())
 					time.Sleep(pause)
 					continue holdLoop
 				}
 				c.progressOf(body, "retrying", 0, 0,
-					fmt.Sprintf("等待预算 %v 已耗尽，返回 429 让客户端决定换模型", c.holdBudget().Round(time.Second)))
+					fmt.Sprintf("等待预算 %s 已耗尽，返回 429 让客户端决定换模型", c.holdBudgetText()))
 				log.Printf("qodercn chat_stream uid=%s model=%s: 上游零内容即断开且预算耗尽，按排队熔断 %v", a.UID, clientName, queueHangWindow)
 				return nil, http.StatusTooManyRequests, queuedBody(clientName, q, int(queueHangWindow.Seconds())), nil
 			}

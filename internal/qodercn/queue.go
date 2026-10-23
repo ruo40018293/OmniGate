@@ -164,7 +164,11 @@ func firstInt(re *regexp.Regexp, s string) int {
 //
 // R57 提到 8 分钟：预算涨到 10min 后，4min 上界会让「等了 4 分钟才来的新请求」
 // 在熔断已过期的情况下重复踩坑；8min 仍留 2min 让新请求进保活循环。
-const queueBlockWindow = 8 * time.Minute
+// queueBlockWindow 熔断窗上界。R57 定 8min（跟随当时 10min 预算），R58 预算回落到
+// 5min 后同步收到 4min：**上界必须严格小于保活预算**，否则被保活循环每跳续期的
+// 固定窗会把等待者永久锁在门外（R55c 的事故形态，TestFuseWindowBoundedByHoldBudget
+// 守这条护栏）。4min 仍覆盖上游常态 waitTime（34~120s）三跳以上的实际窗口。
+const queueBlockWindow = 4 * time.Minute
 
 // queueHangWindow 首帧看门狗触发时的熔断窗口（短）：
 // 上游挂起可能只是一次抖动（同一模型刚才是 0.3s 出首帧），罚太久会误伤；
@@ -305,14 +309,21 @@ func (c *Client) defaultHangSeconds() int {
 // 前提（抓包与 parseNestedSSE 注释证实）：上游不会先吐内容帧再吐排队帧，
 // 排队判定发生在任何内容之前，所以丢弃已读字节重投是安全的。
 const (
-	// defaultQueueHoldBudget 单请求最大保活时长。
+	// defaultQueueHoldBudget 单请求最大保活时长 = 5 分钟（R58）。
 	//
-	// R57 从 5 分钟提到 10 分钟。理由来自生产数据（2026-10-23 20:05-20:08 五跳）：
-	// 上游给的 waitTime 长期在 36s~480s 抖动，名次「降一次、回队尾」锯齿前进。
-	// 预算太短意味着**在名次快降到 0 时放弃**——用户看到的正是「快到了又重新开始」。
-	// 10 分钟覆盖 480s 高峰窗口再加两跳余量；仍远低于 R47 那次 13 分钟无响应的
-	// 事故量级，且等待期现在有受理帧 + 20s 活动探针 + 面板实时进度，不再「静默卡住」。
-	defaultQueueHoldBudget = 10 * time.Minute
+	// 历史：R55 定 5min → R57 提到 10min → R57 同晚改成 0（不限）→ 当晚回落到 5min。
+	// 用户 2026-10-23 20:24 曾说「不断他一直排到好就行」，但 20:29-20:44 实测证明
+	// 那条路走不通：qodercn 免费池高峰时队列持续增长，12 分钟里名次在
+	// 3532→1350→4042→2935→4200 之间拉锯、一次都没降到 1200 以下，重投 14 次也
+	// 排不上。无限等只是把「卡住」换成「看起来在动但一直不动」，还白占一条上游
+	// 连接和一份并发。用户最终选择「弄个上限时间吧 5 分钟」。
+	//
+	// 5min 的依据：上游给的 waitTime 常态 34~120s，5 分钟够走 3~6 跳；超过 5 分钟
+	// 还在排队说明处在队列增长期，这时候继续等的边际收益是负的——不如把 429 和
+	// 准确 retry_after 交回客户端，让用户自己决定换模型还是等。
+	//
+	// 0 = 不设上限仍被 holdRemaining 支持（测试与临时排障用），但默认不启用。
+	defaultQueueHoldBudget = 5 * time.Minute
 	// defaultQueueHoldPause 排队帧没给 waitTime 也没有 retryAfterSeconds 时的重投间隔。
 	// 注意：有 waitTime 时不走这里，走 holdPauseFor 按上游时间等（R57）。
 	defaultQueueHoldPause = 30 * time.Second
@@ -328,6 +339,14 @@ func (c *Client) holdBudget() time.Duration {
 		return c.queueHoldBudget
 	}
 	return defaultQueueHoldBudget
+}
+
+// holdBudgetText 把预算渲染成日志文案（0 表示不设上限，仅测试/排障路径）。
+func (c *Client) holdBudgetText() string {
+	if b := c.holdBudget(); b > 0 {
+		return b.Round(time.Second).String()
+	}
+	return "不限（直到排上或客户端断开）"
 }
 
 // holdPause 重投间隔：注入值优先（测试）；否则用上游 retryAfterSeconds
@@ -393,9 +412,14 @@ func (c *Client) holdPauseFor(q *QueueError) time.Duration {
 }
 
 // holdRemaining 判断从 start 起再暂停 pause 是否仍在预算内（R57 用 holdPauseFor）。
+// 预算为 0 表示不设上限（仅测试/排障），永远返回 ok。
 func (c *Client) holdRemaining(start time.Time, q *QueueError) (time.Duration, bool) {
 	pause := c.holdPauseFor(q)
-	if time.Since(start)+pause > c.holdBudget() {
+	budget := c.holdBudget()
+	if budget <= 0 {
+		return pause, true // 预算为 0：不设上限
+	}
+	if time.Since(start)+pause > budget {
 		return 0, false
 	}
 	return pause, true
