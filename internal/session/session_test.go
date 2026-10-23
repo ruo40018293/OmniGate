@@ -173,13 +173,51 @@ func TestGCLifecycle(t *testing.T) {
 	r.StartGC()
 	r.StartGC() // 幂等：不应起第二个 goroutine
 	time.Sleep(10 * time.Millisecond)
+
+	// R57-A：先证明 GC 真的在工作。GCInterval=1ms，上面 10ms 内必然触发过；
+	// 显式塞一条过期项并等它被清掉，后面的「不再清理」断言才有意义
+	// （否则一个从未工作的 goroutine 也能让这个测试永远绿）。
+	r.entries["warm"] = entry{uid: "a", lastActive: time.Now().Add(-time.Hour)}
+	deadline := time.Now().Add(300 * time.Millisecond)
+	for {
+		r.mu.RLock()
+		_, alive := r.entries["warm"]
+		r.mu.RUnlock()
+		if !alive {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("GC 从未清理过过期项（goroutine 没在工作）")
+		}
+		time.Sleep(2 * time.Millisecond)
+	}
+
 	r.StopGC()
 	r.StopGC() // 幂等
-	// 停掉后不再清理：塞一条过期项，等两个周期应仍在
+	// 停掉后不再清理：塞一条过期项，等两个周期应仍在。
+	// 必须与 StopGC「同步」才成立 —— 若 StopGC 只发信号就返回，那一轮还在飞的
+	// gcOnce 会把它删掉（2026-10-23 实测三次两红）。
 	r.entries["z"] = entry{uid: "a", lastActive: time.Now().Add(-time.Hour)}
 	time.Sleep(20 * time.Millisecond)
 	if _, ok := r.entries["z"]; !ok {
 		t.Error("StopGC 后不应再清理（说明 goroutine 没退出）")
+	}
+}
+
+// TestStopGCIsSynchronous R57-A：StopGC 返回时 goroutine 必须已经退出。
+// 判据：返回后立刻写入的过期项不被清理。单跑一次很难撞上窗口（实测 8 次 0 红），
+// 所以放大到 200 轮 + 1ms GC 周期把竞争压到极限。
+func TestStopGCIsSynchronous(t *testing.T) {
+	for round := 0; round < 200; round++ {
+		r := New(Config{GCInterval: time.Millisecond, Available: fixedAvailable("a")})
+		r.StartGC()
+		time.Sleep(time.Millisecond) // 让 goroutine 至少进过一次 select
+		r.StopGC()
+		r.entries["x"] = entry{uid: "a", lastActive: time.Now().Add(-time.Hour)}
+		time.Sleep(3 * time.Millisecond)
+		if _, ok := r.entries["x"]; !ok {
+			t.Fatalf("第 %d 轮：StopGC 返回后仍有 gcOnce 在飞，删掉了刚写入的过期项", round)
+		}
 	}
 }
 

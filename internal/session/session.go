@@ -63,6 +63,10 @@ type Router struct {
 	entries map[string]entry
 	cfg     Config
 	stop    chan struct{}
+	// stopDone 在 GC goroutine 退出时关闭；StopGC 等它，保证关停是同步的。
+	// 只有 close(stop) 的话，正卡在 gcOnce 里的那一轮可能还没跑完就返回 ——
+	// 关停后立刻写入的过期项会被它顺手删掉（TestGCLifecycle 曾 ~1/3 概率红）。
+	stopDone chan struct{}
 }
 
 // New 构建路由器。TTL/GCInterval 非正取默认（30m / 5m）；Available nil 视为空池。
@@ -90,10 +94,13 @@ func (r *Router) StartGC() {
 		return
 	}
 	stop := make(chan struct{})
+	done := make(chan struct{})
 	r.stop = stop
+	r.stopDone = done
 	r.mu.Unlock()
 
 	go func() {
+		defer close(done)
 		t := time.NewTicker(r.cfg.GCInterval)
 		defer t.Stop()
 		for {
@@ -108,12 +115,26 @@ func (r *Router) StartGC() {
 }
 
 // StopGC 停止后台 GC（幂等）。
+//
+// 关停必须**同步**：close(stop) 只是发信号，goroutine 可能正卡在 gcOnce 里持着
+// 写锁。若 StopGC 立刻返回，调用方随后写入的过期项会被那一轮还在飞的 gcOnce
+// 顺手删掉 —— TestGCLifecycle 在 2026-10-23 实测三次两红，根因正是这个窗口
+// （测试注释里记的「stop channel 竞态」是 2026-08 修掉的旧 bug，不覆盖本症状）。
+// 现在靠 stopDone 等 goroutine 真正退出。注意：不能在持锁时等，否则 gcOnce
+// 永远拿不到锁。
 func (r *Router) StopGC() {
 	r.mu.Lock()
-	defer r.mu.Unlock()
-	if r.stop != nil {
-		close(r.stop)
-		r.stop = nil
+	if r.stop == nil {
+		r.mu.Unlock()
+		return
+	}
+	close(r.stop)
+	done := r.stopDone
+	r.stop = nil
+	r.stopDone = nil
+	r.mu.Unlock()
+	if done != nil {
+		<-done
 	}
 }
 

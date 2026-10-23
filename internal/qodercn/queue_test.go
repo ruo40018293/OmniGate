@@ -599,11 +599,15 @@ func TestChatStreamHoldOnHTTP429(t *testing.T) {
 // 熔断窗口必须动态且**严格小于保活预算** —— 10min 固定窗被保活循环每跳续期后，
 // 剩余永远 ~578s > 预算 300s，DSH 的等待请求被永久锁在门外 10ms 硬拒。
 func TestFuseWindowBoundedByHoldBudget(t *testing.T) {
-	if w := fuseWindow(&QueueError{WaitSeconds: 36}); w != time.Minute+360*time.Second/10 {
-		t.Fatalf("waitTime=36 应为 96s，got %v", w)
+	// R57：余量从 +60s 收到 +30s（waitTime 是上游权威估计，多给的余量只会延长封锁）。
+	if w := fuseWindow(&QueueError{WaitSeconds: 36}); w != (36+30)*time.Second {
+		t.Fatalf("waitTime=36 应为 66s，got %v", w)
 	}
-	if w := fuseWindow(&QueueError{WaitSeconds: 10}); w != queueHangWindow {
-		t.Fatalf("小 waitTime 应夹到下界 %v，got %v", queueHangWindow, w)
+	if w := fuseWindow(&QueueError{WaitSeconds: 0}); w != queueBlockWindow {
+		t.Fatalf("无 waitTime 应取上界 %v，got %v", queueBlockWindow, w)
+	}
+	if w := fuseWindow(&QueueError{WaitSeconds: 1}); w != 31*time.Second {
+		t.Fatalf("waitTime=1s 应给 31s（waitTime+30s），got %v", w)
 	}
 	if w := fuseWindow(&QueueError{WaitSeconds: 480}); w != queueBlockWindow {
 		t.Fatalf("大 waitTime 应夹到上界 %v，got %v", queueBlockWindow, w)
@@ -612,11 +616,38 @@ func TestFuseWindowBoundedByHoldBudget(t *testing.T) {
 		t.Fatalf("熔断上界 %v 必须小于保活预算 %v，否则续期后的熔断会把等待者永久锁在门外",
 			queueBlockWindow, defaultQueueHoldBudget)
 	}
-	// 写入侧同样走动态窗：排队帧 185s → 245s，而非旧固定 10min。
+	// 写入侧同样走动态窗：排队帧 185s → 215s，而非旧固定 10min。
 	c := New()
 	c.rememberQueue("some-model", &QueueError{ModelKey: "m", WaitSeconds: 185, QueueCount: 3058})
-	if q, remain := c.queueBlocked("some-model"); q == nil || remain > 246*time.Second || remain < 200*time.Second {
-		t.Fatalf("熔断窗口应≈waitTime+60s（245s），got %v", remain)
+	if q, remain := c.queueBlocked("some-model"); q == nil || remain > 216*time.Second || remain < 200*time.Second {
+		t.Fatalf("熔断窗口应≈waitTime+30s（215s），got %v", remain)
+	}
+}
+
+// TestHoldPauseFollowsUpstreamWaitTime R57 核心回归（用户 2026-10-23 20:08 反馈）：
+// 重投节奏必须按上游 waitTime 走，不能固定 30s —— 固定间隔等于每 30s 放弃一次
+// 已经排到的位次，名次永远追不回来（实测 4339→2138→4390→2348→4730 锯齿）。
+func TestHoldPauseFollowsUpstreamWaitTime(t *testing.T) {
+	c := New()
+	// 等待 119s：应在接近 119s 时才重投（提前 ≤8s 留余量，而不是 30s 就走）。
+	if d := c.holdPauseFor(&QueueError{WaitSeconds: 119}); d < 105*time.Second || d > 119*time.Second {
+		t.Fatalf("waitTime=119s 时重投间隔应≈119s（提前≤8s），got %v", d)
+	}
+	if d := c.holdPauseFor(&QueueError{WaitSeconds: 37}); d < 28*time.Second || d > 37*time.Second {
+		t.Fatalf("waitTime=37s 时重投间隔应≈37s，got %v", d)
+	}
+	// 极短 waitTime 也要留出至少 2s，避免打上游打得太密。
+	if d := c.holdPauseFor(&QueueError{WaitSeconds: 1}); d < 2*time.Second {
+		t.Fatalf("waitTime=1s 应至少等 2s，got %v", d)
+	}
+	// 没有 waitTime（首帧挂起/静默回执）退回 retryAfterSeconds 节奏。
+	if d := c.holdPauseFor(&QueueError{RetryAfter: 30}); d != 30*time.Second {
+		t.Fatalf("无 waitTime 时应退回 retryAfter=30s，got %v", d)
+	}
+	// 测试注入值优先。
+	c.queueHoldPause = 10 * time.Millisecond
+	if d := c.holdPauseFor(&QueueError{WaitSeconds: 119}); d != 10*time.Millisecond {
+		t.Fatalf("注入值应优先生效，got %v", d)
 	}
 }
 

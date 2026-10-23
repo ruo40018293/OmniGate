@@ -157,16 +157,24 @@ func firstInt(re *regexp.Regexp, s string) int {
 // queueBlockWindow 排队熔断窗口：一旦观察到排队，这段时间内对该模型直接
 // 快速失败，避免每个请求都陪上游挂 180 秒。
 //
-// R55 改为 4 分钟（原 10 分钟）：上界必须小于保活预算 defaultQueueHoldBudget(5min)。
+// R55 改为 4 分钟（原 10 分钟）：上界必须小于保活预算 defaultQueueHoldBudget。
 // 生产实测（2026-10-22 20:00）：10min 固定窗被保活循环每跳续期，剩余永远 ~578s >
 // 预算，把「愿意等的请求」（DSH 轮次）永久锁在门外 10ms 硬拒 —— 熔断保护的是
 // 不等的客户端，不能反过来惩罚等的。窗口同时按排队帧 waitTime 动态化（fuseWindow）。
-const queueBlockWindow = 4 * time.Minute
+//
+// R57 提到 8 分钟：预算涨到 10min 后，4min 上界会让「等了 4 分钟才来的新请求」
+// 在熔断已过期的情况下重复踩坑；8min 仍留 2min 让新请求进保活循环。
+const queueBlockWindow = 8 * time.Minute
 
 // queueHangWindow 首帧看门狗触发时的熔断窗口（短）：
 // 上游挂起可能只是一次抖动（同一模型刚才是 0.3s 出首帧），罚太久会误伤；
 // 90 秒足够让并发的后续请求快速失败，又不至于把可用模型锁死。
 const queueHangWindow = 90 * time.Second
+
+// fuseMinWindow 熔断窗下界。queueHangWindow 只描述「首帧看门狗」这类无 waitTime 的
+// 场景；带 waitTime 的回执不该被这个下界抬到 90s（waitTime=36s 时抬到 90s 等于多封
+// 54s，用户的新请求明明上游说 36s 后就能排上）。R57 拆出独立下界 30s。
+const fuseMinWindow = 30 * time.Second
 
 // fuseKey 归一化熔断键（R55-a，根因修复）。
 //
@@ -192,14 +200,18 @@ func (c *Client) rememberQueue(model string, q *QueueError) {
 	c.rememberQueueFor(model, q, fuseWindow(q))
 }
 
-// fuseWindow 熔断动态窗口：waitTime+60s，夹在 [queueHangWindow(90s), queueBlockWindow(4min)]。
-// 队列浅时短窗早放行，队列深时长窗封顶；下界不小于看门狗窗、上界必小于保活预算，
-// 保证后续请求进得来（remain>budget 的快速拒绝分支因此只在预算被调小等异常场景触发）。
+// fuseWindow 熔断动态窗口：waitTime+30s，夹在 [fuseMinWindow(30s), queueBlockWindow(8min)]。
+//
+// 下界为什么不复用 queueHangWindow：那个 90s 是给「首帧看门狗触发、根本没有 waitTime」
+// 的回执用的宽边界；带 waitTime 的回执有上游权威估计，不该被抬到 90s。
+//
+// R57 余量从 +60s 收到 +30s：熔断窗决定「多久之内新请求直接拿 429 而不进队列」，
+// waitTime 已经是上游的估计，额外多给 60s 只会让新请求在队列松动时仍被挡在门外。
 func fuseWindow(q *QueueError) time.Duration {
 	if q != nil && q.WaitSeconds > 0 {
-		d := time.Duration(q.WaitSeconds+60) * time.Second
-		if d < queueHangWindow {
-			d = queueHangWindow
+		d := time.Duration(q.WaitSeconds+30) * time.Second
+		if d < fuseMinWindow {
+			d = fuseMinWindow
 		}
 		if d > queueBlockWindow {
 			d = queueBlockWindow
@@ -293,11 +305,16 @@ func (c *Client) defaultHangSeconds() int {
 // 前提（抓包与 parseNestedSSE 注释证实）：上游不会先吐内容帧再吐排队帧，
 // 排队判定发生在任何内容之前，所以丢弃已读字节重投是安全的。
 const (
-	// defaultQueueHoldBudget 单请求最大保活时长。取值依据：实测高峰期 waitTime
-	// 36s→480s 且递增，5 分钟能覆盖多数队列清空窗口，又不至于让客户端一请求
-	// 挂太久（R47 时代 13 分钟无响应的噩梦上限以下很远）。
-	defaultQueueHoldBudget = 5 * time.Minute
-	// defaultQueueHoldPause 排队帧没给 retryAfterSeconds 时的重投间隔。
+	// defaultQueueHoldBudget 单请求最大保活时长。
+	//
+	// R57 从 5 分钟提到 10 分钟。理由来自生产数据（2026-10-23 20:05-20:08 五跳）：
+	// 上游给的 waitTime 长期在 36s~480s 抖动，名次「降一次、回队尾」锯齿前进。
+	// 预算太短意味着**在名次快降到 0 时放弃**——用户看到的正是「快到了又重新开始」。
+	// 10 分钟覆盖 480s 高峰窗口再加两跳余量；仍远低于 R47 那次 13 分钟无响应的
+	// 事故量级，且等待期现在有受理帧 + 20s 活动探针 + 面板实时进度，不再「静默卡住」。
+	defaultQueueHoldBudget = 10 * time.Minute
+	// defaultQueueHoldPause 排队帧没给 waitTime 也没有 retryAfterSeconds 时的重投间隔。
+	// 注意：有 waitTime 时不走这里，走 holdPauseFor 按上游时间等（R57）。
 	defaultQueueHoldPause = 30 * time.Second
 	// queueScanStall 首帧扫描的帧间静默阈值：排队时上游先发保活字节、~180s 后
 	// 才吐 10605；保活字节可能迟迟不成「行」，超过本阈值无新完整行即按排队挂起
@@ -332,9 +349,52 @@ func (c *Client) holdPause(q *QueueError) time.Duration {
 	return defaultQueueHoldPause
 }
 
-// holdRemaining 判断从 start 起再暂停 pause 是否仍在预算内。
+// holdPauseFor R57 等待时长：按上游 tells 的 waitTime 决定，而不是固定 30s。
+//
+// 生产实测（2026-10-23 20:05-20:08，同一个请求五跳）：
+//
+//	20:05:58 前方 4339 等待 119s
+//	20:06:28 前方 2138 等待  59s   ← 名次在降
+//	20:06:58 前方 4390 等待 120s  ← 又回队尾
+//	20:07:29 前方 2348 等待  65s
+//	20:07:59 前方 4730 等待 129s
+//
+// 每次重投都是**新发一个上游请求**，上一个请求的排队位次随之作废（上游按请求
+// 排，不按账号留位）。所以固定间隔重投 = 每 30s 放弃一次已排到的位置，名次永远
+// 追不回来，用户看到的就是「快到了又从头排」。
+//
+// 现在的规则：等上游说的那个时间（waitTime），并在快到点时提前一点重投，
+// 避免上游自己 180s 掐断把位次一起带走。上限仍由 holdBudget 兜底。
+func (c *Client) holdPauseFor(q *QueueError) time.Duration {
+	if c != nil && c.queueHoldPause > 0 {
+		return c.queueHoldPause // 测试注入
+	}
+	if q == nil || q.WaitSeconds <= 0 {
+		return c.holdPause(q) // 没有 waitTime 的回执（含首帧挂起/静默）退回 retryAfter 节奏
+	}
+	pause := time.Duration(q.WaitSeconds) * time.Second
+	// 提前 8s（至少留 3s）重投：上游约 180s 会自己断，等到最后一刻才发现断流，
+	// 位次已经丢了；提前一点让我们主动发起下一个请求。
+	lead := pause / 20
+	if lead < 3*time.Second {
+		lead = 3 * time.Second
+	}
+	if lead > 8*time.Second {
+		lead = 8 * time.Second
+	}
+	pause -= lead
+	if pause < 2*time.Second {
+		pause = 2 * time.Second
+	}
+	if pause > 5*time.Minute {
+		pause = 5 * time.Minute
+	}
+	return pause
+}
+
+// holdRemaining 判断从 start 起再暂停 pause 是否仍在预算内（R57 用 holdPauseFor）。
 func (c *Client) holdRemaining(start time.Time, q *QueueError) (time.Duration, bool) {
-	pause := c.holdPause(q)
+	pause := c.holdPauseFor(q)
 	if time.Since(start)+pause > c.holdBudget() {
 		return 0, false
 	}

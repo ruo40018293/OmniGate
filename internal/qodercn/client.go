@@ -354,6 +354,15 @@ func (c *Client) ChatStream(a *auth.Auth, body []byte) (rc io.ReadCloser, status
 			a.UID, clientName, remain.Round(time.Second), q.Error())
 		c.progressOf(body, "queued", q.QueueCount, q.WaitSeconds,
 			fmt.Sprintf("上游排队中（前方 %d 个，预计 %ds），进入保活重投", q.QueueCount, q.WaitSeconds))
+		// R57：熔断里存的 waitTime 是「上次那一跳」的估计，此刻已过去一部分时间。
+		// 按剩余时间收紧一次节奏，避免新请求又从头等一整轮队列时长。
+		if q2, _ := c.queueBlocked(clientName); q2 != nil && q2.WaitSeconds > 0 {
+			if left := int(remain.Round(time.Second).Seconds()); left > 0 && left < q2.WaitSeconds {
+				qq := *q2
+				qq.WaitSeconds = left
+				q = &qq
+			}
+		}
 	}
 
 	// 思考开关：reasoning_effort 或 thinking:{type:"enabled"} → 启用推理

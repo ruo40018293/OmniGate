@@ -100,9 +100,9 @@ func (a *activityWatch) report() map[string]any {
 		return nil
 	}
 	return map[string]any{
-		"client_dead":     a.dead(),
-		"silent_for_ms":   a.SilentFor().Milliseconds(),
-		"probe_pings":     a.pings.Load(),
+		"client_dead":      a.dead(),
+		"silent_for_ms":    a.SilentFor().Milliseconds(),
+		"probe_pings":      a.pings.Load(),
 		"probe_interval_s": 20,
 	}
 }
