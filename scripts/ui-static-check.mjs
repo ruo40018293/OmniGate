@@ -284,6 +284,54 @@ check("更新角标失败警示样式存在（#stUpdated.st-stale）", /#stUpdat
   );
 }
 
+// 平台表防回归（2026-10-27，R60）：轨道「宽度」护栏——数量对不代表看得见。
+// 事故：R48 把轨道补到 11 个后，末列仍是裸 1fr；前 10 轨固定 px 之和 850 已吃满
+// 面板内容宽（约 864px），1fr 实得 20px，而「7日内到期」标题需 73px → 被裁成「7日内…」。
+// 实测（Chromium 真渲染）容器 864 时末列 clientWidth=20、scrollWidth=72。
+// 这里用静态数值复算，因为纯 CSS 断言跑不了布局：
+//   ① 每轨必须带 min 地板（裸 1fr/裸 auto 一律 FAIL）
+//   ② 末列地板 ≥ 80px（标题 73 + 数值 74，留余量）
+//   ③ 各轨 min 之和 ≤ 各自容器预算（桌面 864 / 窄屏 608），保证不裁字、不横滚
+{
+  const DECLS = [...css.matchAll(/\.st-plat-row\s*\{[^}]*?grid-template-columns:\s*([^;}]+)/g)]
+    .map((m) => m[1].trim().split(/\s+/));
+  const BUDGET = [
+    { width: 864, floor: 80 },  // 桌面：面板内容宽约 864px，末列地板 ≥80
+    { width: 608, floor: 74 },  // 640 视口减内边距；11px 字号下「7日内到期」约 71px
+  ];
+  const parse = (t) => {
+    const mm = /^minmax\(\s*(\d+)px\s*,\s*(.+?)\s*\)$/.exec(t);
+    if (mm) return { min: Number(mm[1]), max: mm[2].trim(), raw: t };
+    const px = /^(\d+)px$/.exec(t);
+    if (px) return { min: Number(px[1]), max: px[1], raw: t };
+    return { min: NaN, max: t, raw: t };
+  };
+  DECLS.forEach((tracks, i) => {
+    const parsed = tracks.map(parse);
+    const last = parsed[parsed.length - 1];
+    const bare = parsed.filter((t) => Number.isNaN(t.min)).map((t) => t.raw);
+    const sumMin = parsed.reduce((a, t) => a + (Number.isNaN(t.min) ? 0 : t.min), 0);
+    check(
+      `平台表轨道宽度${i === 0 ? "桌面" : "窄屏"}：每轨有 min 地板(${tracks.length} 轨)`,
+      bare.length === 0,
+      `裸 1fr/auto 轨道会在容器吃满时塌成几十像素 → ${bare.join(" ")}`
+    );
+    check(
+      `平台表末列${i === 0 ? "桌面" : "窄屏"}地板 ≥${BUDGET[i].floor}px（7日内到期 需 73px）`,
+      last && last.min >= BUDGET[i].floor,
+      `末列地板 ${last ? last.min : "?"}px 不足，标题会被裁`
+    );
+    const fits = sumMin <= BUDGET[i].width;
+    check(
+      `平台表各轨 min 之和(${sumMin}px) ${fits ? "≤" : ">"} 容器预算(${BUDGET[i].width}px)` +
+        (fits ? "" : ` → 依赖横向滚动，需 .st-plat overflow-x:auto`),
+      // 桌面必须一屏装下；窄屏装不下是预期（11 列 vs 640 视口），但必须有滚动兜底，不能裁字
+      fits || (i > 0 && /#mtabStats \.st-plat\s*\{[^}]*overflow-x:\s*auto/.test(css)),
+      `最小宽度和超出预算且无滚动兜底 → 末列被裁`
+    );
+  });
+}
+
 // ---- 输出 ----
 let failed = 0;
 for (const [name, pass, extra] of results) {

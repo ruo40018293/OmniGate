@@ -714,11 +714,16 @@ code.about-repo:active { transform: translateY(1px); }
    ⚠️ 轨道数必须 == renderPlatformTable 的每行单元格数（当前 11：#/平台/账号/当前积分/
    今日收入/今日消耗/今日作废/今日Token/今日到期/明日到期/7日内到期）。deac5bf 加「今日作废」
    列时只改了 app.js 没改这里，11 格落 10 轨，第 11 格折行掉进 28px 的 # 列——「7日内到期」显示不全。
-   加列/删列必须同步下方窄屏 media query 里的那一行。 */
-#mtabStats .st-plat { margin-top: 8px; }
+   加列/删列必须同步下方窄屏 media query 里的那一行。
+   ⚠️ 末列必须写 minmax(84px,1fr) 而不是裸 1fr（R60）：前 10 轨固定 px 之和 850 已把容器吃满
+   （面板内容宽约 864px）时，裸 1fr 只剩 20px，「7日内到期」标题需 73px 被 overflow:hidden 裁掉。
+   R48 只对齐了轨道「数量」，没管轨道「宽度」，所以仍显示不全。现每轨给 min 地板、末列地板 84px；
+   放不下时由 .st-plat 横向滚动兜底——宁可滚，不裁字。
+   注意：这里刻意不用 repeat()，轨道数由 ui-static-check.mjs 按空白切分逐个数。 */
+#mtabStats .st-plat { margin-top: 8px; overflow-x: auto; }
 #mtabStats .st-plat-row {
   display: grid;
-  grid-template-columns: 28px 150px 52px 100px 80px 80px 80px 112px 84px 84px 1fr;
+  grid-template-columns: 28px minmax(120px,130px) 46px minmax(74px,88px) minmax(70px,76px) minmax(70px,76px) minmax(70px,76px) minmax(100px,108px) minmax(70px,76px) minmax(70px,76px) minmax(84px,1fr);
   font-size: 12px;
   white-space: nowrap;
   border-bottom: 1px solid var(--border-soft);
@@ -983,7 +988,12 @@ code.about-repo:active { transform: translateY(1px); }
 #mtabStats .st-ab-sum.st-ab-err { color: #a16207; background: #fef9c3; border-color: #fde68a; }
 
 @media (max-width: 640px) {
-  #mtabStats .st-plat-row { grid-template-columns: 24px 96px 40px 76px 60px 60px 60px 84px 64px 64px 1fr; font-size: 11px; }
+  /* 窄屏：同样每轨给 min 地板，末列 minmax(76px,1fr) 不再裸 1fr（R60 同因）。
+     11 列在 640px 装不下 → min 之和 664px > 608px，由 .st-plat 的 overflow-x:auto 横向滚动兜底，
+     地板按 11px 字号的实际文字宽算（Token 列 96 / 到期列 64 / 末列 76），保证滚的时候字是完整的。 */
+  #mtabStats .st-plat-row { grid-template-columns: 24px minmax(74px,88px) 34px minmax(64px,72px) minmax(56px,58px) minmax(56px,58px) minmax(56px,58px) 96px 64px 64px minmax(76px,1fr); font-size: 11px; }
+  /* 24px 的 # 列装不下 20px 内边距 + 数字：窄屏收窄内边距，否则行号被裁（渲染实测 scrollWidth>clientWidth） */
+  #mtabStats .st-plat-row > span:first-child { padding-left: 6px; padding-right: 4px; }
   #mtabStats .st-ex-row { grid-template-columns: 24px 88px 120px 76px 68px 1fr; font-size: 11px; }
   #mtabStats .st-ab-row { grid-template-columns: 24px 64px 88px 110px 1fr 76px 64px; font-size: 11px; }
 }
