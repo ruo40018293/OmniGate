@@ -17,7 +17,9 @@ import (
 
 // persistJSON stats.json 落盘结构。
 type persistJSON struct {
-	TokenDays   map[string]int64                   `json:"token_days"`             // YYYY-MM-DD -> tokens（不含今日）
+	TokenDays map[string]int64 `json:"token_days"` // YYYY-MM-DD -> tokens（不含今日）
+	// R66：YYYY-MM-DD -> completion tokens（不含今日）。缺键（旧文件）⇒ 历史输出未知。
+	OutDays     map[string]int64                   `json:"out_days,omitempty"`
 	ReqDays     map[string]int64                   `json:"req_days"`               // YYYY-MM-DD -> reqs（不含今日）
 	Accts       map[string]acctPersist             `json:"accts"`                  // 当日差值基线
 	Events      map[string]int64                   `json:"events,omitempty"`       // 今日签到事件收入 uid|day -> 数额
@@ -29,8 +31,11 @@ type persistJSON struct {
 // 性能四项缺省为零值 → 均值退化为「无样本」，前端显示 "—"，重启后新一轮请求
 // 自然重新采样（丢弃历史样本比显示半截均值更诚实）。
 type modelPersist struct {
-	Reqs      int64   `json:"reqs"`
-	Tokens    int64   `json:"tokens"`
+	Reqs   int64 `json:"reqs"`
+	Tokens int64 `json:"tokens"`
+	// R66：tokens 的输入/输出拆分（缺省 0 = 旧文件，此时只显示合计，不编拆分）。
+	In        int64   `json:"in_tokens,omitempty"`
+	Out       int64   `json:"out_tokens,omitempty"`
 	Credit    float64 `json:"credit"`
 	TTFBSumMs int64   `json:"ttfb_sum_ms,omitempty"`
 	PerfCnt   int64   `json:"perf_cnt,omitempty"`
@@ -41,7 +46,7 @@ type modelPersist struct {
 // toEntry 落盘形态 → 内存形态。
 func (mp modelPersist) toEntry() *modelEntry {
 	return &modelEntry{
-		reqs: mp.Reqs, tokens: mp.Tokens, credit: mp.Credit,
+		reqs: mp.Reqs, tokens: mp.Tokens, in: mp.In, out: mp.Out, credit: mp.Credit,
 		ttfbSumMs: mp.TTFBSumMs, perfCnt: mp.PerfCnt,
 		genTokens: mp.GenTokens, genSec: mp.GenSec,
 	}
@@ -50,7 +55,7 @@ func (mp modelPersist) toEntry() *modelEntry {
 // fromEntry 内存形态 → 落盘形态。
 func fromEntry(e *modelEntry) modelPersist {
 	return modelPersist{
-		Reqs: e.reqs, Tokens: e.tokens, Credit: e.credit,
+		Reqs: e.reqs, Tokens: e.tokens, In: e.in, Out: e.out, Credit: e.credit,
 		TTFBSumMs: e.ttfbSumMs, PerfCnt: e.perfCnt,
 		GenTokens: e.genTokens, GenSec: e.genSec,
 	}
@@ -103,6 +108,9 @@ func (s *Stats) load() error {
 	for day, v := range p.TokenDays {
 		s.tokenDays[day] = v
 	}
+	for day, v := range p.OutDays {
+		s.outDays[day] = v
+	}
 	for day, v := range p.ReqDays {
 		s.reqDays[day] = v
 	}
@@ -133,6 +141,8 @@ func (s *Stats) load() error {
 		for name, mp := range p.TodayModels.Models {
 			s.models[name] = mp.toEntry()
 			s.tokensToday += mp.Tokens
+			// R66：今日输出量从 per-model 拆分求和重建（与 tokensToday 同源，不会漂）。
+			s.outTokensToday += mp.Out
 			s.reqsToday += mp.Reqs
 			s.creditOutExact += mp.Credit
 		}
@@ -144,7 +154,7 @@ func (s *Stats) load() error {
 // 失败时保留 dirty 标记（下轮重试）并经 logf 上报——静默清 dirty 会让
 // 停机前的最后一次 flush 也被跳过（Windows 上文件被占用时 rename 会失败）。
 func (s *Stats) flushLocked() {
-	p := persistJSON{TokenDays: s.tokenDays, ReqDays: s.reqDays, Accts: map[string]acctPersist{}, Events: s.events}
+	p := persistJSON{TokenDays: s.tokenDays, OutDays: s.outDays, ReqDays: s.reqDays, Accts: map[string]acctPersist{}, Events: s.events}
 	// 今日模型消耗（day 守卫随存随恢复）
 	if len(s.models) > 0 {
 		tm := make(map[string]modelPersist, len(s.models))

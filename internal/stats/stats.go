@@ -153,6 +153,19 @@ type TokenUsage struct {
 	ReqToday int64 `json:"req_today"`
 	ReqAll   int64 `json:"req_all"`
 	Days     int   `json:"days"` // 已记录天数（历史日数）
+
+	// R66：输入/输出拆分。Out = 上游 usage 的 completion tokens（模型真正产出的量），
+	// In = prompt tokens（每次重发上下文带来的输入量）。Today/Days7/Days30/All 仍是两者
+	// 之和——老字段口径不变，旧前端继续可用；新前端额外展示「其中输出」。
+	// 历史日没有 out_days 键时 Out7/Out30/OutAll 只统计可拆分的部分（不近似）。
+	OutToday int64 `json:"out_today"`
+	Out7     int64 `json:"out7"`
+	Out30    int64 `json:"out30"`
+	OutAll   int64 `json:"out_all"`
+	InToday  int64 `json:"in_today"`
+	In7      int64 `json:"in7"`
+	In30     int64 `json:"in30"`
+	InAll    int64 `json:"in_all"`
 }
 
 // Snapshot 引擎对外只读快照（GET /api/stats 的载荷；今日口径，跨天滚动清零）。
@@ -241,6 +254,8 @@ type Stats struct {
 	creditOutTotal int64
 	creditOutExact float64
 	tokensToday    int64
+	// R66：今日 completion tokens（tokensToday = prompt + completion，故 prompt 可反推）。
+	outTokensToday int64
 	reqsToday      int64
 
 	// 今日作废（ledger 周期喂入，纯内存不落盘：ledger 自身持久，重启后下一轮
@@ -248,8 +263,11 @@ type Stats struct {
 	expiredByGroup map[string]int64
 	expiredTotal   int64
 
-	tokenDays map[string]int64                  // YYYY-MM-DD -> tokens（不含今日）
-	reqDays   map[string]int64                  // YYYY-MM-DD -> reqs（不含今日）
+	tokenDays map[string]int64 // YYYY-MM-DD -> tokens（不含今日）
+	reqDays   map[string]int64 // YYYY-MM-DD -> reqs（不含今日）
+	// R66：YYYY-MM-DD -> completion tokens（不含今日）。旧 stats.json 无此键 ⇒ 历史日
+	// 的「输出」未知，只影响拆分列，不影响 Tokens 总量口径。
+	outDays   map[string]int64
 	modelDays map[string]map[string]*modelEntry // 历史日 -> 模型 -> 消耗（跨天归档）
 
 	models    map[string]*modelEntry
@@ -284,6 +302,7 @@ func New(dataDir string, logf func(format string, args ...any)) (*Stats, error) 
 		events:         map[string]int64{},
 		expiredByGroup: map[string]int64{},
 		tokenDays:      map[string]int64{},
+		outDays:        map[string]int64{},
 		reqDays:        map[string]int64{},
 		modelDays:      map[string]map[string]*modelEntry{},
 		models:         map[string]*modelEntry{},
@@ -310,6 +329,9 @@ func (s *Stats) rollDayLocked(now time.Time) {
 	if s.tokensToday > 0 {
 		s.tokenDays[s.today] += s.tokensToday
 	}
+	if s.outTokensToday > 0 {
+		s.outDays[s.today] += s.outTokensToday
+	}
 	if s.reqsToday > 0 {
 		s.reqDays[s.today] += s.reqsToday
 	}
@@ -324,6 +346,7 @@ func (s *Stats) rollDayLocked(now time.Time) {
 	s.creditInTotal, s.creditOutTotal = 0, 0
 	s.creditOutExact = 0
 	s.tokensToday, s.reqsToday = 0, 0
+	s.outTokensToday = 0
 	s.expiredByGroup = map[string]int64{}
 	s.expiredTotal = 0
 	s.models = map[string]*modelEntry{}
@@ -814,6 +837,21 @@ func (s *Stats) Snapshot(now time.Time) Snapshot {
 			tu.All += v
 		}
 	}
+	// R66：输出量窗口（只统计留了 out_days 的天；旧数据缺键则不给假数）。
+	tu.OutToday = s.outTokensToday
+	tu.Out7 = s.windowOutLocked(now, 7) + s.outTokensToday
+	tu.Out30 = s.windowOutLocked(now, 30) + s.outTokensToday
+	tu.OutAll = tu.Out30
+	for day, v := range s.outDays {
+		if day < now.AddDate(0, 0, -29).Format("2006-01-02") {
+			tu.OutAll += v
+		}
+	}
+	// 输入 = 总量 − 输出（completion 恒计入总量，理论不为负；脏数据钳 0）。
+	tu.InToday = clampNonNeg(tu.Today - tu.OutToday)
+	tu.In7 = clampNonNeg(tu.Days7 - tu.Out7)
+	tu.In30 = clampNonNeg(tu.Days30 - tu.Out30)
+	tu.InAll = clampNonNeg(tu.All - tu.OutAll)
 
 	models := s.modelStatsLocked()
 	platforms := s.platformRowsLocked(now)

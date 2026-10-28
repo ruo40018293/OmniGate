@@ -47,9 +47,13 @@ type ReqRow struct {
 //
 // 无样本时 AvgTTFBMs/AvgTokPerSec 为 0，前端显示 "—"（不解为 0 耗时/0 速度）。
 type ModelStat struct {
-	Model        string  `json:"model"`
-	Reqs         int64   `json:"reqs"`
-	Tokens       int64   `json:"tokens"`
+	Model  string `json:"model"`
+	Reqs   int64  `json:"reqs"`
+	Tokens int64  `json:"tokens"`
+	// R66：Tokens 的拆分。In=prompt（每次重发上下文带来的输入量，长会话里通常远大于
+	// 输出），Out=completion（模型真正产出的量）。两者之和 == Tokens。
+	In           int64   `json:"in_tokens"`
+	Out          int64   `json:"out_tokens"`
 	Credit       float64 `json:"credit"`
 	AvgTTFBMs    int64   `json:"avg_ttfb_ms"`
 	AvgTokPerSec float64 `json:"avg_tok_per_sec"`
@@ -65,6 +69,9 @@ type ModelStat struct {
 type modelEntry struct {
 	reqs   int64
 	tokens int64
+	// R66：tokens = in + out。in 为 prompt 累计，out 为 completion 累计。
+	in     int64
+	out    int64
 	credit float64
 
 	ttfbSumMs int64
@@ -96,6 +103,9 @@ func (s *Stats) AddUsage(model string, prompt, completion int64, credit float64,
 	}
 
 	s.tokensToday += prompt + completion
+	// R66：输出量单独累计——「模型产出了多少字」与「上下文重发了多少」是两件事，
+	// 面板要能分别看（否则长会话看起来像模型很费 token，其实是历史重发）。
+	s.outTokensToday += completion
 	s.reqsToday++
 	s.creditOutExact += credit
 	if model == "" {
@@ -108,6 +118,8 @@ func (s *Stats) AddUsage(model string, prompt, completion int64, credit float64,
 	}
 	m.reqs++
 	m.tokens += prompt + completion
+	m.in += prompt
+	m.out += completion
 	m.credit += credit
 	m.ttfbSumMs += ttfbMs
 	m.perfCnt++
@@ -158,7 +170,7 @@ func channelOfModel(model string) (string, bool) {
 func (s *Stats) modelStatsLocked() []ModelStat {
 	models := make([]ModelStat, 0, len(s.models))
 	for name, m := range s.models {
-		st := ModelStat{Model: name, Reqs: m.reqs, Tokens: m.tokens, Credit: m.credit}
+		st := ModelStat{Model: name, Reqs: m.reqs, Tokens: m.tokens, In: m.in, Out: m.out, Credit: m.credit}
 		if m.perfCnt > 0 {
 			st.AvgTTFBMs = m.ttfbSumMs / m.perfCnt
 			st.PerfSamples = m.perfCnt
@@ -251,6 +263,28 @@ func (s *Stats) windowLocked(now time.Time, days int) int64 {
 		}
 	}
 	return sum
+}
+
+// windowOutLocked 历史 map（不含今日）中窗口=前 N-1 天的 completion tokens 和（R66）。
+// 与 windowLocked 同口径同边界：只算 [start, today]，未来键不计。
+// 旧数据没有 out_days 键 ⇒ 历史日的输出量未知，忽略（不拿总量近似，避免给出假精度）。
+func (s *Stats) windowOutLocked(now time.Time, days int) int64 {
+	start := now.AddDate(0, 0, -(days - 1)).Format("2006-01-02")
+	var sum int64
+	for k, v := range s.outDays {
+		if k >= start && k <= s.today {
+			sum += v
+		}
+	}
+	return sum
+}
+
+// clampNonNeg 负数钳 0（拆分口径的兜底：脏数据/回滚版本的旧快照可能让差值变负）。
+func clampNonNeg(v int64) int64 {
+	if v < 0 {
+		return 0
+	}
+	return v
 }
 
 // reqSumLocked 历史（不含今日）请求总数（全量累计）。

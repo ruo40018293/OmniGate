@@ -2354,9 +2354,10 @@ function stSumItem(label, val, cls, sub) {
     `<span class="st-sum-val ${cls || ""}">${val}</span>` +
     (sub ? `<span class="st-sum-sub">${sub}</span>` : "") + `</span>`;
 }
-// Token 多天行条目
-function stTkItem(label, val) {
-  return `<span class="st-tk-item">${label} <span class="st-tk-val">${val}</span></span>`;
+// Token 多天行条目（tip 非空时挂 title 悬停说明，R66）
+function stTkItem(label, val, tip) {
+  const t = tip ? ` title="${esc(tip)}"` : "";
+  return `<span class="st-tk-item"${t}>${label} <span class="st-tk-val">${val}</span></span>`;
 }
 
 function renderStats(s) {
@@ -2376,8 +2377,13 @@ function renderStats(s) {
   $("stMilestone").textContent = s.milestone_count > 0 ? `里程碑 ${s.milestone_count}×100分` : "";
   renderPlatformTable(s);
   // Token 多天行（今日情况标题右侧）
+  // R66：多一个「其中输出」——输出=模型真正产出的字，输入=每轮重发的上下文。
+  // 长会话里输入远大于输出，只看合计会误判成「模型很费 token」。
   $("stToken").innerHTML =
     stTkItem("Token 今日", fmtTokensFull(tu.today)) +
+    stTkItem("其中输出", fmtTokensFull(tu.out_today),
+      `输出（模型产出）今日 ${fmtTokensFull(tu.out_today)} · 7日 ${fmtTokensFull(tu.out7)} · 30日 ${fmtTokensFull(tu.out30)}；` +
+      `输入（上下文重发）今日 ${fmtTokensFull(tu.in_today)} · 7日 ${fmtTokensFull(tu.in7)}`) +
     stTkItem("7日", fmtTokensFull(tu.days7)) +
     stTkItem("30日", fmtTokensFull(tu.days30)) +
     stTkItem("请求 今日", fmtCredits(tu.req_today) + " / " + fmtCredits(tu.req_all)) +
@@ -2508,7 +2514,13 @@ function renderExpiry(ex) {
 
 // 模型消耗（今日，按积分降序）：Trae 系积分加「≈」（分摊估算），平均速度=成功请求实测均值
 function renderModels(models) {
-  let mh = `<tr><th>#</th><th>模型</th><th>次数</th><th>Token</th><th>积分</th>` +
+  // R66：Token 拆成「输入/输出/合计」三列——只看合计无法判断是「模型吐得多」还是
+  // 「上下文重发得多」（后者是长会话的常态，与模型本身无关）。
+  // 旧快照没有拆分时 in/out 均为 0，此列显示 "—"，不拿合计凑数。
+  let mh = `<tr><th>#</th><th>模型</th><th>次数</th>` +
+    `<th title="输入 = 每次请求重发的上下文（prompt tokens）">输入</th>` +
+    `<th title="输出 = 模型真正产出的内容（completion tokens）">输出</th>` +
+    `<th>合计</th><th>积分</th>` +
     `<th title="成功请求实测均值：tok/s = 生成 token ÷ 生成耗时（按时长加权）；TTFB = 首字节耗时算术平均">平均速度</th></tr>`;
   models.forEach((m, j) => {
     const isTrae = isTraeChannel(m.model);
@@ -2530,12 +2542,19 @@ function renderModels(models) {
     const perfCell = parts.length
       ? `<span title="样本 ${fmtCredits(m.perf_samples)} 次成功请求">${parts.join(" · ")}</span>`
       : "—";
+    const inTok = Number(m.in_tokens) || 0;
+    const outTok = Number(m.out_tokens) || 0;
+    const splitReady = inTok > 0 || outTok > 0;
+    const inCell = splitReady ? fmtTokensFull(inTok) : "—";
+    const outCell = splitReady ? fmtTokensFull(outTok) : "—";
     mh += `<tr><td class="st-idx">${j + 1}</td>` +
       `<td class="st-mono" title="${esc(m.model)}">${esc(m.model)}</td>` +
-      `<td>${fmtCredits(m.reqs)}</td><td>${fmtTokensFull(m.tokens)}</td><td>${creditCell}</td>` +
+      `<td>${fmtCredits(m.reqs)}</td>` +
+      `<td>${inCell}</td><td>${outCell}</td>` +
+      `<td>${fmtTokensFull(m.tokens)}</td><td>${creditCell}</td>` +
       `<td class="st-mono">${perfCell}</td></tr>`;
   });
-  $("stModels").innerHTML = models.length ? mh : `<tr><td class="st-empty" colspan="6">今日暂无消耗</td></tr>`;
+  $("stModels").innerHTML = models.length ? mh : `<tr><td class="st-empty" colspan="8">今日暂无消耗</td></tr>`;
 }
 
 // 请求日志：降序渲染（最新在最上）；tok/s 仅流式有值，0/空给「—」
