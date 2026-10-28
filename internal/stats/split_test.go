@@ -90,6 +90,40 @@ func TestWindowOutExcludesFutureDays(t *testing.T) {
 	}
 }
 
+// 平台表（今日情况主视图）也必须能拿到输出量：按模型名前缀聚合，与 Tokens 同源闭合。
+func TestPlatformRowTokensOut(t *testing.T) {
+	s := newTestStats(t)
+	now := tNow(1, 10)
+	s.AddUsage("qodercn/deepseek-flash", 900, 100, 0, 0, 0, now)
+	s.AddUsage("qodercn/qwen3.8-flash", 400, 50, 0, 0, 0, now)
+	s.AddUsage("raccoon/sn-x", 300, 30, 0, 0, 0, now)
+
+	snap := s.Snapshot(now)
+	var qoder *PlatformRow
+	var sumTokens, sumOut int64
+	for i := range snap.Platforms {
+		r := &snap.Platforms[i]
+		sumTokens += r.Tokens
+		sumOut += r.TokensOut
+		if r.Group == "qodercn" {
+			qoder = r
+		}
+	}
+	if qoder == nil {
+		t.Fatalf("缺少 qodercn 平台行: %+v", snap.Platforms)
+	}
+	if qoder.Tokens != 1450 || qoder.TokensOut != 150 {
+		t.Fatalf("平台行输出错误: tokens=%d out=%d want 1450/150", qoder.Tokens, qoder.TokensOut)
+	}
+	// 各平台行之和必须等于全池口径（合计行取 s.tokens / out_today，前端两处互证）
+	if sumOut != snap.TokenUsage.OutToday {
+		t.Fatalf("平台行输出之和 %d != 全池输出 %d", sumOut, snap.TokenUsage.OutToday)
+	}
+	if sumTokens != snap.Tokens {
+		t.Fatalf("平台行合计 %d != 全池合计 %d", sumTokens, snap.Tokens)
+	}
+}
+
 func TestSplitPersistsAndReloads(t *testing.T) {
 	dir := t.TempDir()
 	// 必须用「真实的今天」：load 里 TodayModels 有 day 守卫（跨天残留整块丢弃），

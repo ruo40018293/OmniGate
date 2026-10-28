@@ -2354,9 +2354,17 @@ function stSumItem(label, val, cls, sub) {
     `<span class="st-sum-val ${cls || ""}">${val}</span>` +
     (sub ? `<span class="st-sum-sub">${sub}</span>` : "") + `</span>`;
 }
+// R66：「今日输出」的副标题 —— 输出占今日 Token 的比例。合计为 0 时留空，
+// 不写 "0.0%"（无样本时的百分比是噪音）。比例只做一位小数，避免给出假精度。
+function outPctSub(tu) {
+  const total = Number(tu.today) || 0;
+  const out = Number(tu.out_today) || 0;
+  if (total <= 0 || out <= 0) return "";
+  return `占 ${((out / total) * 100).toFixed(1)}% · 其余为输入`;
+}
+
 // Token 多天行条目（tip 非空时挂 title 悬停说明，R66）
-function stTkItem(label, val, tip) {
-  const t = tip ? ` title="${esc(tip)}"` : "";
+function stTkItem(label, val, tip) {  const t = tip ? ` title="${esc(tip)}"` : "";
   return `<span class="st-tk-item"${t}>${label} <span class="st-tk-val">${val}</span></span>`;
 }
 
@@ -2371,6 +2379,9 @@ function renderStats(s) {
       ? stSumItem("今日作废", fmtCredits(s.credit_expired), "risk", "积分包到期 · 非消耗")
       : "") +
     stSumItem("消耗 Token", fmtTokensFull(s.tokens), "warn") +
+    // R66：今日输出（模型真正产出的量）+ 占合计的比例。官方口径里「token 用量」
+    // 通常指输出（生成长度），而输入是每轮重发的上下文——两者必须并排看才有意义。
+    stSumItem("今日输出", fmtTokensFull(tu.out_today), "warn", outPctSub(tu)) +
     (Number(s.expire_today) > 0
       ? stSumItem("今日到期", fmtCredits(s.expire_today) + "分", "risk", "今晚作废尽快消耗")
       : "");
@@ -2409,7 +2420,7 @@ function renderPlatformTable(s) {
     `<span class="st-plat-in">今日收入</span>` +
     `<span class="st-plat-out" title="花费差值扣除积分包到期作废后的净消耗">今日消耗</span>` +
     `<span class="st-plat-expd" title="今日因积分包到期/回收而作废的额度（已从今日消耗中扣除）">今日作废</span>` +
-    `<span class="st-plat-tokens">今日消耗Token</span>` +
+    `<span class="st-plat-tokens" title="上行=今日 Token 合计；下行「出」= 其中输出（模型真正产出的量）">今日Token</span>` +
     `<span class="st-plat-exp">今日到期</span>` +
     `<span class="st-plat-exp">明日到期</span>` +
     `<span class="st-plat-exp">7日内到期</span>` +
@@ -2423,7 +2434,7 @@ function renderPlatformTable(s) {
       stPlatNum("st-plat-in", r.credit_in) +
       stPlatNum("st-plat-out", r.credit_used) +
       stPlatNum("st-plat-expd", r.credit_expired, "分") +
-      stPlatTok(r.tokens) +
+      stPlatTok(r.tokens, r.tokens_out) +
       stPlatNum("st-plat-exp", r.expire_today, "分") +
       stPlatNum("st-plat-exp", r.expire_tomorrow, "分") +
       stPlatNum("st-plat-exp", r.expire_7d, "分") +
@@ -2438,7 +2449,7 @@ function renderPlatformTable(s) {
     stPlatNum("st-plat-in", s.credit_in) +
     stPlatNum("st-plat-out", s.credit_used) +
     stPlatNum("st-plat-expd", s.credit_expired, "分") +
-    stPlatTok(s.tokens) +
+    stPlatTok(s.tokens, (s.token_usage || {}).out_today) +
     stPlatNum("st-plat-exp", s.expire_today, "分") +
     stPlatNum("st-plat-exp", s.expire_tomorrow, "分") +
     stPlatNum("st-plat-exp", s.expiring_7d, "分") +
@@ -2452,11 +2463,15 @@ function stPlatNum(cls, amount, suffix) {
   if (amount <= 0) return `<span class="${cls} st-plat-zero">—</span>`;
   return `<span class="${cls}">${fmtCredits(amount)}${suffix || ""}</span>`;
 }
-// Token 单元格：单位走 万/亿，0 同样置灰
-function stPlatTok(amount) {
+// Token 单元格：上行=今日合计（万/亿），下行=其中输出（R66）。
+// 0 值置灰——但合计为 0 而输出有值时仍展示输出，避免拆分层被合计的置灰逻辑吞掉。
+function stPlatTok(amount, out) {
   amount = Number(amount) || 0;
-  if (amount <= 0) return `<span class="st-plat-tokens st-plat-zero">—</span>`;
-  return `<span class="st-plat-tokens">${fmtTokensFull(amount)}</span>`;
+  out = Number(out) || 0;
+  if (amount <= 0 && out <= 0) return `<span class="st-plat-tokens st-plat-zero">—</span>`;
+  const main = amount > 0 ? fmtTokensFull(amount) : `<span class="st-plat-zero">—</span>`;
+  const sub = out > 0 ? `<i class="st-plat-toksub" title="输出（completion）= 模型真正产出的量">出 ${fmtTokensFull(out)}</i>` : "";
+  return `<span class="st-plat-tokens">${main}${sub}</span>`;
 }
 
 const ST_ROT_MARKS = ["①", "②", "③"];

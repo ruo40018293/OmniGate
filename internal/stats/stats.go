@@ -84,17 +84,20 @@ type Toast struct {
 // Expire7d/ExpireToday/ExpireTomorrow 叠加 7 日内/今日/明日到期额度
 // （数据源同「最近临期」：每账号最早到期日 + 该日各包剩余合计）。
 type PlatformRow struct {
-	Group          string `json:"group"`
-	Accounts       int    `json:"accounts"`
-	Credits        int64  `json:"credits"`
-	CreditIn       int64  `json:"credit_in"`
-	CreditOut      int64  `json:"credit_out"`
-	CreditExpired  int64  `json:"credit_expired"`
-	CreditUsed     int64  `json:"credit_used"`
-	Tokens         int64  `json:"tokens"`
-	Expire7d       int64  `json:"expire_7d"`
-	ExpireToday    int64  `json:"expire_today"`
-	ExpireTomorrow int64  `json:"expire_tomorrow"`
+	Group         string `json:"group"`
+	Accounts      int    `json:"accounts"`
+	Credits       int64  `json:"credits"`
+	CreditIn      int64  `json:"credit_in"`
+	CreditOut     int64  `json:"credit_out"`
+	CreditExpired int64  `json:"credit_expired"`
+	CreditUsed    int64  `json:"credit_used"`
+	Tokens        int64  `json:"tokens"`
+	// R66：今日 Token 的输出量拆分（completion）。输入 = Tokens − TokensOut。
+	// 按模型名前缀归渠道，与 Tokens 同源同口径，故两者必然闭合。
+	TokensOut      int64 `json:"tokens_out"`
+	Expire7d       int64 `json:"expire_7d"`
+	ExpireToday    int64 `json:"expire_today"`
+	ExpireTomorrow int64 `json:"expire_tomorrow"`
 }
 
 // ExpiryRow 最近临期行。BurnForecast = -1 表示观测不足，无法预估。
@@ -669,6 +672,8 @@ func (s *Stats) platformRowsLocked(now time.Time) []PlatformRow {
 	for name, m := range s.models {
 		if g, ok := channelOfModel(name); ok {
 			rowOf(g).Tokens += m.tokens
+			// R66：同一模型行的 out 是 tokens 的一部分，两者同源，不存在对不齐的可能
+			rowOf(g).TokensOut += m.out
 		}
 	}
 	// 今日作废（ledger 周期喂入的全池按渠道值，非账号维度，账号已删也归属渠道）

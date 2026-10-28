@@ -781,6 +781,18 @@ code.about-repo:active { transform: translateY(1px); }
 #mtabStats .st-plat-in { color: var(--ok); }
 #mtabStats .st-plat-out { color: var(--warn); }
 #mtabStats .st-plat-tokens { color: var(--text-2); }
+/* R66：Token 单元格第二行「出 xxx」= 其中输出（模型真正产出的量）。
+   刻意用块级子元素而不是新增网格轨道——轨道数有静态护栏（R48/R60），
+   加列必须同步桌面+窄屏两处轨道与护栏；这里用上下两行表达同一维度，
+   零轨道风险，也不会挤压已经贴到 864px 预算的其它列。
+   字号更小、颜色更淡：它是合计的注解，不是并列的第二个数字。 */
+#mtabStats .st-plat-toksub {
+  display: block;
+  font-size: 10px;
+  font-style: normal;
+  line-height: 1.25;
+  color: var(--text-3);
+}
 #mtabStats .st-plat-exp { color: var(--text-2); }
 #mtabStats .st-plat-expd { color: var(--text-2); }
 #mtabStats .st-plat-exp.st-risk { color: var(--danger); font-weight: 600; }
