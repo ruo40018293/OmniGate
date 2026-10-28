@@ -1155,13 +1155,56 @@ func usageTokens(u map[string]any) (pt, ct int64, src string) {
 }
 
 // numField 取 usage 里首个存在且可转数值的字段。
+//
+// R64：必须覆盖 Go 侧自建的整型。JSON 解码得到 float64，但渠道在进程内拼 usage 时
+// 用的是 int64（minimax 的 promptTokens/outTokens、monkeycode 的 inTokens/outTokens）——
+// 曾经只认 float64，导致这两个渠道的 token 静默记成 0：面板「消耗 token」偏低、
+// 流水 src=none、按模型消耗里它们只有次数没有 token。判据见 usage_tokens_test.go。
 func numField(u map[string]any, keys ...string) int64 {
 	for _, k := range keys {
-		if v, ok := u[k].(float64); ok {
-			return int64(v)
+		if n, ok := asInt64(u[k]); ok {
+			return n
 		}
 	}
 	return 0
+}
+
+// asInt64 把 usage 里的数值统一转 int64（覆盖 JSON 的 float64 与进程内自建的整型）。
+// json.Number 走 Int64()（JSON 里大整数可能被解成 Number）；解析失败按缺失处理，
+// 不猜、不四舍五入到 0 之外的假值。
+func asInt64(v any) (int64, bool) {
+	switch x := v.(type) {
+	case float64:
+		return int64(x), true
+	case float32:
+		return int64(x), true
+	case int:
+		return int64(x), true
+	case int8:
+		return int64(x), true
+	case int16:
+		return int64(x), true
+	case int32:
+		return int64(x), true
+	case int64:
+		return x, true
+	case uint:
+		return int64(x), true
+	case uint8:
+		return int64(x), true
+	case uint16:
+		return int64(x), true
+	case uint32:
+		return int64(x), true
+	case uint64:
+		return int64(x), true
+	case json.Number:
+		if n, err := x.Int64(); err == nil {
+			return n, true
+		}
+		return 0, false
+	}
+	return 0, false
 }
 
 // stripChannel 去掉模型名的 channel/ 前缀（"workbuddy/glm-5.2" → "glm-5.2"），
@@ -1175,9 +1218,21 @@ func stripChannel(model string) string {
 
 // usageCredit 从 usage 对象取上游下发的单次积分（WorkBuddy 系会回；
 // TraeWork 系 token_usage 帧无此字段 → 0，引擎侧按渠道余额差值分摊估算）。
+// R64：先按浮点原样取（积分带小数，如 22.91，不能截断），再兜底认整型——
+// 进程内自建 usage 渠道可能写 int64。
 func usageCredit(u map[string]any) float64 {
-	if v, ok := u["credit"].(float64); ok {
-		return v
+	switch x := u["credit"].(type) {
+	case float64:
+		return x
+	case float32:
+		return float64(x)
+	case json.Number:
+		if f, err := x.Float64(); err == nil {
+			return f
+		}
+	}
+	if n, ok := asInt64(u["credit"]); ok {
+		return float64(n)
 	}
 	return 0
 }
@@ -1529,9 +1584,9 @@ func writeAcceptedFrame(w http.ResponseWriter) {
 // acceptWriter 在第一次写入前补齐 SSE 响应头并先发一帧「已受理」注释。
 //
 // 解决两个真实问题（2026-10-23 19:53 实测）：
-//   1. 直接裸写 w 会在渠道内 Stream 设置 Content-Type **之前**写出字节，响应头被
-//      永久定成 text/plain，SSE 客户端拒绝解析；
-//   2. 只有 qodercn 内部发了受理帧，其余 10 个渠道等待期仍然全静默。
+//  1. 直接裸写 w 会在渠道内 Stream 设置 Content-Type **之前**写出字节，响应头被
+//     永久定成 text/plain，SSE 客户端拒绝解析；
+//  2. 只有 qodercn 内部发了受理帧，其余 10 个渠道等待期仍然全静默。
 //
 // 顺序：先 Set 好 SSE 响应头 → 写受理注释帧 → flush → 再交给渠道自己的流实现。
 // 渠道后续重复 Set 同样的值无副作用；即便它 Set 别的值也改不了已发出的头（这正是

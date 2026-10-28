@@ -312,6 +312,8 @@ var channelOrder = map[provider.Kind]int{
 	provider.WorkBuddy: 1, provider.WorkBuddyAI: 2,
 	provider.QoderCN: 3, provider.QoderCOM: 4, provider.TraeWork: 5, provider.QwenWork: 6,
 	provider.GLM: 7,
+	// R65：MiniMax / Cline 与既有渠道并列排在最前段（未知渠道按 100 排最后）。
+	provider.Minimax: 8, provider.Cline: 9,
 }
 
 // feeChannelOrder 「模型列表和费率」面板的渠道分组顺序。
@@ -322,6 +324,10 @@ var feeChannelOrder = []provider.Kind{
 	provider.MonkeyCode,
 	provider.Raccoon,
 	provider.Loomy,
+	// R65：新接渠道必须同时登记到 feeChannelOrder，否则 buildFeesChannels 直接
+	// 跳过该渠道（它按固定顺序遍历），面板「模型列表和费率」里整组不出现——
+	// 面板显示「没模型」，而 /v1/models 明明有。R63 接渠道时漏了这一步。
+	provider.Minimax, provider.Cline,
 }
 
 // channelRank 渠道排序键：未知渠道排最后。

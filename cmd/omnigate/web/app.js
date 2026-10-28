@@ -813,10 +813,14 @@ function renderFees(fees) {
     //   默认态  → 仅上游给了倍率的模型数
     // 早期版本搜索态仍显示默认态计数（搜出 2 行却标 20），看着像「模型清单不全」。
     const all = ch.models || [];
+    // R65：上游压根不提供倍率的渠道（MiniMax/Cline/GLM 等），整组模型都是 unknown。
+    // 这类渠道若仍按「只显示有倍率的行」筛选，默认态会一行不剩 → 面板看着像没模型。
+    // 因此整渠道无倍率时默认显示全部（倍率列标 unknown，见下方说明）。
+    const allUnpriced = all.length > 0 && !all.some((m) => m && m.priced);
     const searching = !!feeQuery();
     const n = searching
       ? all.filter((m) => m && feeMatch(ch.channel, m)).length
-      : all.filter((m) => m && (m.priced || showAllModels())).length;
+      : all.filter((m) => m && (m.priced || allUnpriced || showAllModels())).length;
     const on = ch.channel === active ? " active" : "";
     // 渠道积分余额角标：取自 state.accounts（与积分汇总条同源），
     // 让用户在选择渠道时即可看到「这个渠道还有多少积分可用」。
@@ -843,8 +847,9 @@ function renderFees(fees) {
     // （并明确标注 unknown），否则搜了等于没搜。此时按钮不参与筛选 ——
     // 搜索结果已是全部命中项，再叠加开关只会让用户以为按钮失灵。
     const searching = !!feeQuery();
+    const allUnpriced = all.length > 0 && !all.some((m) => m && m.priced);
     const models = searching ? all.filter((m) => m && feeMatch(ch.channel, m))
-                             : all.filter((m) => m && (m.priced || showAllModels()));
+                             : all.filter((m) => m && (m.priced || allUnpriced || showAllModels()));
     const unpriced = all.length - all.filter((m) => m && m.priced).length;
     const hidden = ch.channel !== active ? ' class="hidden"' : '';
     html += `<div class="fees-panel${hidden ? ' hidden' : ''}" data-feepanel="${esc(ch.channel)}">`;
@@ -860,7 +865,11 @@ function renderFees(fees) {
       html += `<tr><td>${modelIdCell(m1, ch.channel)}</td><td>${rateCell(m1)}</td><td>${modelIdCell(m2, ch.channel)}</td><td>${rateCell(m2)}</td></tr>`;
     }
     html += `</tbody></table>`;
-    if (!searching && unpriced > 0) {
+    if (!searching && allUnpriced) {
+      // R65：整渠道无倍率 —— 说清楚「不是没模型，是这家的上游不发倍率」，
+      // 并指出真实花费在哪看（流水/运行统计），别让用户以为面板坏了。
+      html += `<div class="note" style="margin-top:6px">该渠道上游不提供倍率接口，故全部模型显示 unknown；模型本身可正常调用，实际积分/费用消耗见「流水」与「运行统计」。</div>`;
+    } else if (!searching && unpriced > 0) {
       html += showAllModels()
         ? `<div class="note" style="margin-top:6px">上方标「上游未返回」的 ${unpriced} 个模型倍率缺失（多为内部/子代理模型），仍可正常调用，只是无法比价。</div>`
         : `<div class="note" style="margin-top:6px">本渠道另有 ${unpriced} 个模型上游未提供倍率（多为内部/子代理模型），已从本表隐藏；接口与客户端不受影响，仍可正常调用。点上方「显示隐藏模型」可展开。</div>`;
