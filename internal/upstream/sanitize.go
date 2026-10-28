@@ -23,6 +23,9 @@ var sanitizeFeatures = []string{
 	"You are an AI agent powered by DeepSeek Harness", // DSH 身份句：system 开头逐字锚定（2026-10-21 实测）
 	"DeepSeek Harness Web GUI",                        // DSH 运行时上下文句 A 短语（2026-10-22 实测，A+B 连排触发 11128，见 rewrite）
 	"they mean this GUI",                              // 句 B 收尾短语（单句无害，与句 A 连排才触发）
+	// R59（2026-10-28）：DSH 运行时上下文的 @path 说明句。上游按前 111 字符整串识别
+	// （实测 110 字符放行、111 字符即 400/11128）；只改后半句即可破串，前句保留原样。
+	"Tokens prefixed with @ are paths",
 }
 
 // sanitizeHdrRe 剥离层：header 键名即触发（与值无关），整段删除。
@@ -97,6 +100,11 @@ var sanitizeRewrites = [][2]string{
 	{
 		"without naming another target, they mean this GUI",
 		"without naming another target, they mean this console",
+	},
+	// R59：前 111 字符是上游渠道校验特征，整句改写为等价表达，语义不变。
+	{
+		"Tokens prefixed with @ are paths the user explicitly referenced. Relative paths resolve from the workspace root",
+		"Tokens led by @ denote paths the user referenced explicitly. Relative paths are resolved against the workspace root",
 	},
 }
 

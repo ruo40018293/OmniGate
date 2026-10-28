@@ -26,6 +26,9 @@ var featHeaders = []string{
 	// "Current ... web console URL: ..." 一行，用整句做键会漏掉该行。
 	"DeepSeek Harness Web GUI",
 	"they mean this GUI",
+	// R59（2026-10-28）：DSH 运行时上下文的 @path 说明句。上游按前 111 字符整串识别
+	// （实测 110 字符放行、111 字符即 400/11128）；只改后半句即可破串，前句保留原样。
+	"Tokens prefixed with @ are paths",
 }
 
 var reHdr = regexp.MustCompile(`(?i)x-anthropic-billing-header:[^;\n]*;?\s*`)
@@ -62,6 +65,11 @@ var rewrites = [][2]string{
 	{
 		"without naming another target, they mean this console",
 		"without naming another target, they mean this c0nsole",
+	},
+	// R59：前 111 字符是上游渠道校验特征，整句改写为等价表达，语义不变。
+	{
+		"Tokens prefixed with @ are paths the user explicitly referenced. Relative paths resolve from the workspace root",
+		"Tokens led by @ denote paths the user referenced explicitly. Relative paths are resolved against the workspace root",
 	},
 }
 

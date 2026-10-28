@@ -312,8 +312,8 @@ func TestPrepareBodySanitizesSystem(t *testing.T) {
 	}
 }
 
-// TestSanitizeLiteralByteExact 逐字节快照护栏：把 sanitizeFeatures 10 项 +
-// sanitizeRewrites 8 对 + 3 个正则的当前字节值硬编码断言。
+// TestSanitizeLiteralByteExact 逐字节快照护栏：把 sanitizeFeatures 11 项 +
+// sanitizeRewrites 9 对 + 3 个正则的当前字节值硬编码断言。
 // 这些字面量是实验逆向出的上游内容审核黑名单（无契约可引用），上游按逐字精确
 // 匹配拦截，一字之差即漏拦（400 code=11128）或误伤。任何未来改动（含看似无害的
 // 统一常量/抽配置）都会先红在本测试——必须走 analysis 报告 #6 的逐字节验证
@@ -331,6 +331,7 @@ func TestSanitizeLiteralByteExact(t *testing.T) {
 		"You are an AI agent powered by DeepSeek Harness",
 		"DeepSeek Harness Web GUI",
 		"they mean this GUI",
+		"Tokens prefixed with @ are paths",
 	}
 	if len(sanitizeFeatures) != len(features) {
 		t.Fatalf("sanitizeFeatures 项数=%d want %d（快照与实现不同步，见测试头注释的验证步骤）", len(sanitizeFeatures), len(features))
@@ -373,6 +374,10 @@ func TestSanitizeLiteralByteExact(t *testing.T) {
 		{
 			"without naming another target, they mean this GUI",
 			"without naming another target, they mean this console",
+		},
+		{
+			"Tokens prefixed with @ are paths the user explicitly referenced. Relative paths resolve from the workspace root",
+			"Tokens led by @ denote paths the user referenced explicitly. Relative paths are resolved against the workspace root",
 		},
 	}
 	if len(sanitizeRewrites) != len(rewrites) {
