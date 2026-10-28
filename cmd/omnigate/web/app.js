@@ -391,8 +391,8 @@ function renderTopbar() {
 }
 
 // 渠道显示名与 CSS 短类名（后端 group / 费率 channel 均为 provider.Kind）。
-const CH_LABEL = { workbuddy: "WorkBuddyCN", workbuddyai: "WorkBuddyAI", traework: "TraeWork", traecode: "TraeCode", qoder: "Qoder", qodercn: "QoderCN", qodercom: "QoderCOM", qwenwork: "千问办公", glm: "智谱清言", monkeycode: "MonkeyCode", raccoon: "小浣熊", loomy: "Loomy" };
-const CH_CLASS = { workbuddy: "wb", workbuddyai: "wbai", traework: "trae", traecode: "traecode", qoder: "qoder", qodercn: "qodercn", qodercom: "qodercom", qwenwork: "qwenwork", glm: "glm", monkeycode: "monkeycode", raccoon: "raccoon", loomy: "loomy" };
+const CH_LABEL = { workbuddy: "WorkBuddyCN", workbuddyai: "WorkBuddyAI", traework: "TraeWork", traecode: "TraeCode", qoder: "Qoder", qodercn: "QoderCN", qodercom: "QoderCOM", qwenwork: "千问办公", glm: "智谱清言", monkeycode: "MonkeyCode", raccoon: "小浣熊", loomy: "Loomy", minimax: "MiniMax", cline: "Cline" };
+const CH_CLASS = { workbuddy: "wb", workbuddyai: "wbai", traework: "trae", traecode: "traecode", qoder: "qoder", qodercn: "qodercn", qodercom: "qodercom", qwenwork: "qwenwork", glm: "glm", monkeycode: "monkeycode", raccoon: "raccoon", loomy: "loomy", minimax: "minimax", cline: "cline" };
 const chLabel = (k) => CH_LABEL[k] || "WorkBuddy";
 const chClass = (k) => CH_CLASS[k] || "wb";
 // 不支持显式签到（手动按钮）的渠道：
@@ -1282,6 +1282,8 @@ const NO_CHECKIN_LOGIN_HINT = {
   raccoon: "（凭据来自本机已登录的小浣熊客户端；access_token 约 2 小时，本工具会自动续期）",
   loomy: "（凭据来自本机已登录的 Loomy 客户端；上游无续期接口，约 14 天后需重新登录并再次导入）",
   glm: "（登录后请按下方指引复制 refresh_token 粘贴回来）",
+  minimax: "（设备码授权登录；每日 00:00 重置的免费积分，需要签到领取）",
+  cline: "（粘贴官方 sk_ API Key 即可；免费模型池按账号计额度）",
 };
 function promptLogin(channel) {
   pendingChannel = channel;
@@ -1484,6 +1486,33 @@ async function submitGLMToken() {
   }
 }
 
+// ---------- Cline 添加账号（粘贴官方 API Key） ----------
+function openClineAdd() {
+  $("clineErr").textContent = "";
+  $("clineKeyInput").value = "";
+  $("clineOverlay").classList.remove("hidden");
+  $("clineKeyInput").focus();
+}
+
+async function submitClineKey() {
+  const key = ($("clineKeyInput").value || "").trim();
+  if (!key) { $("clineErr").textContent = "请粘贴 API Key"; return; }
+  const btn = $("btnClineSubmit");
+  btn.disabled = true;
+  $("clineErr").textContent = "校验中…";
+  try {
+    const res = await api("/api/login/cline_key", { key });
+    $("clineOverlay").classList.add("hidden");
+    toast(res && res.warn ? `Cline 账号已添加；${res.warn}` : "Cline 账号已添加");
+    await loadState();
+    refreshFees();
+  } catch (e) {
+    $("clineErr").textContent = e.message || "验证失败";
+  } finally {
+    btn.disabled = false;
+  }
+}
+
 // ---------- 签到时间（设置弹层内编辑；单次变更立即保存） ----------
 function delTime(t) {
   const times = (state.checkin_times || []).filter((x) => x !== t);
@@ -1516,7 +1545,7 @@ async function toggleAutostart() {
 
 // ---------- 设置弹层（统一配置：监听/API-Key/签到/自启/模型路由/渠道代理） ----------
 // PROXY_CHANNELS 渠道上游代理列表（顺序与面板渠道序一致；旧 qoder 已下线不提供代理配置）。
-const PROXY_CHANNELS = ["workbuddy", "workbuddyai", "qodercn", "qodercom", "traework", "qwenwork", "glm", "monkeycode", "raccoon", "loomy"];
+const PROXY_CHANNELS = ["workbuddy", "workbuddyai", "qodercn", "qodercom", "traework", "qwenwork", "glm", "monkeycode", "raccoon", "loomy", "minimax", "cline"];
 const PROXY_HINT = { workbuddy: "WorkBuddyCN", workbuddyai: "WorkBuddyAI", traework: "TraeWork", qodercn: "QoderCN", qodercom: "QoderCOM", qwenwork: "千问办公", glm: "智谱清言" };
 
 // renderProxyList 按当前 state.proxies 渲染每渠道一个输入行。
@@ -1891,6 +1920,10 @@ function bind() {
   $("btnAddRaccoon").onclick = () => promptLogin("raccoon");
   $("btnAddLoomy").onclick = () => promptLogin("loomy");
   $("btnAddGLM").onclick = () => startGLMLogin();
+  $("btnAddMinimax").onclick = () => promptLogin("minimax");
+  $("btnAddCline").onclick = openClineAdd;
+  $("btnClineSubmit").onclick = submitClineKey;
+  $("btnClineCancel").onclick = () => $("clineOverlay").classList.add("hidden");
   $("btnGLMSubmit").onclick = submitGLMToken;
   $("btnGLMCancel").onclick = cancelGLMLogin;
   $("btnGLMToggleManual").onclick = () => $("glmManual").classList.toggle("hidden");

@@ -490,6 +490,14 @@ func StreamHint(w http.ResponseWriter, r io.Reader, hintFn func(string) string) 
 	return streamCore(w, r, hintFn, nil)
 }
 
+// StreamWith 是 StreamHint 与 StreamCapture 的并集：既按 hintFn 注入 gateway_hint，
+// 又把末帧 usage 回调给 onUsage。cline 渠道需要同时做这两件事（免费池的
+// `limit_rpd` / 「Daily limit reached」要换成可读 hint，同时要记 usage.cost），
+// 故与移植来源保持一致提供该入口。两者都传 nil 时与 Stream 逐字节等价。
+func StreamWith(w http.ResponseWriter, r io.Reader, hintFn func(string) string, onUsage func(map[string]any)) error {
+	return streamCore(w, r, hintFn, onUsage)
+}
+
 func streamCore(w http.ResponseWriter, r io.Reader, hintFn func(string) string, onUsage func(map[string]any)) error {
 	h := w.Header()
 	h.Set("Content-Type", "text/event-stream")

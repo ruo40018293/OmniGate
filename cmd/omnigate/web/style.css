@@ -33,6 +33,8 @@
   --ch-monkeycode: #a16207;
   --ch-raccoon: #8e6bf2;
   --ch-loomi: #475569;
+  --ch-minimax: #c2410c;
+  --ch-cline: #7c3aed;
 }
 
 * { box-sizing: border-box; margin: 0; padding: 0; }
@@ -566,6 +568,18 @@ code.about-repo:active { transform: translateY(1px); }
 .btn.primary.alt.loomy:hover { background: color-mix(in srgb, var(--ch-loomi), #000 12%); }
 .badge.loomy { background: var(--ch-loomi); }
 .fees .ch-header.loomy td { color: var(--ch-loomi); }
+
+/* minimax MiniMax Code：赭橙（与既有 12 类渠道色不撞） */
+.btn.primary.alt.minimax { background: var(--ch-minimax); border-color: var(--ch-minimax); }
+.btn.primary.alt.minimax:hover { background: color-mix(in srgb, var(--ch-minimax), #000 12%); }
+.badge.minimax { background: var(--ch-minimax); }
+.fees .ch-header.minimax td { color: var(--ch-minimax); }
+
+/* cline Cline：紫罗兰（raccoon 已是 #8e6bf2 亮紫，这里取深紫以免撞色） */
+.btn.primary.alt.cline { background: var(--ch-cline); border-color: var(--ch-cline); }
+.btn.primary.alt.cline:hover { background: color-mix(in srgb, var(--ch-cline), #000 12%); }
+.badge.cline { background: var(--ch-cline); }
+.fees .ch-header.cline td { color: var(--ch-cline); }
 
 /* credit-na 积分「不适用」文案（匿名通道无积分） */
 .credit-na { color: var(--muted, #94a3b8); font-style: italic; }

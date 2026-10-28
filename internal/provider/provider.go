@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"strings"
 	"time"
 
 	"omnigate/internal/auth"
@@ -34,6 +35,14 @@ const (
 	Loomy    Kind = "loomy"
 	TraeCode Kind = "traecode" // Trae 代码版：与 TraeWork 同一上游、共用账号，function=solo_agent
 	GLM      Kind = "glm"      // 智谱清言（chatglm.cn 网页版私有接口，凭据为 chatglm_refresh_token）
+	// Minimax MiniMax Code 中国版（agent.minimax.cn）：OAuth 设备码 + PKCE 登录，
+	// access_token 前缀 mmoat_（**不是 JWT**，过期只能由 expires_in 自算），
+	// 推理走 Anthropic Messages 形态，且有真·每日签到（signin/status + signin/claim）。
+	Minimax Kind = "minimax"
+	// Cline Cline 官方 API（api.cline.bot）：粘贴型渠道，凭据是官方文档化的
+	// sk_ + 64 hex（只在创建时显示一次，**不过期、不轮换** ⇒ 无 refresh、无保活、无签到）。
+	// 免费范围只认上游 recommended-models 的 free[]，不做任何本地假设。
+	Cline Kind = "cline"
 )
 
 func (k Kind) String() string { return string(k) }
@@ -128,12 +137,51 @@ type ModelInfo struct {
 	// false 表示是硬编码估算/占位（如渠道不返回该字段），
 	// 消费方（面板/API）不应把估值当作真实容量展示。
 	ContextFromAPI bool
+	// HandMeasured 标记 ContextWindow/能力字段是**本工具手工实测**得出的
+	// （非上游下发、也非拍脑袋估算）。首例：cline 的 measuredCaps ——
+	// 上游 recommended-models 完全不返回上下文/能力字段，只能逐个实测。
+	//
+	// 与 ContextFromAPI 的关系：两者互斥，同置时以 ContextFromAPI 为准。
+	// 为什么单独一个标志：口径不同 —— 实测值不是「上游声明」，面板展示时
+	// 必须能如实标注来源，否则就是把实测冒充成官方值。
+	HandMeasured bool
+	// ContextFromUser 标记上下文/能力字段是**用户在面板手填**的（自定义渠道专用）：
+	// 既不是上游声明，也不是本工具实测，但同样是「有人对它负责」的确定值。
+	ContextFromUser bool
 	// 以下能力字段均为「已确认为 true」才置 true；数据缺失时保持 false（未知）。
 	// 未知与「明确不支持」在语义上不同，但对消费方（/v1/models 声明、UI 图标）
 	// 的处理一致：不声明该能力。需要区分时由各渠道自行记录来源。
 	SupportsImages    bool // 支持图像输入（多模态视觉）
 	SupportsReasoning bool // 支持思考/推理模式
 	SupportsTools     bool // 支持函数/工具调用
+	// ReasoningEfforts 上游目录显式声明的思考档位表（典型 low/medium/high/xhigh/max）。
+	// nil = 上游未声明，消费方不得自行编造（对齐 ContextFromAPI 哲学）。
+	ReasoningEfforts []string
+	// DefaultReasoningEffort 上游声明的默认档位；空 = 未声明。
+	DefaultReasoningEffort string
+	// CanDisableThinking 该模型思考是否可关闭；nil = 上游未声明。
+	// 上游只对显式 true 语义不同（false 可能是「不可关闭」也可能是「未声明」），
+	// 因此保留原始三态。
+	CanDisableThinking *bool
+}
+
+// CleanEfforts 规范化思考档位表：去空白、去空串、去重（保序）。
+// 上游目录常带重复项或空串，直接透传会让 /v1/models 的 supported_parameters
+// 出现 "reasoning_effort" 之外的噪声，故统一清洗。全空时返回 nil（= 未声明）。
+func CleanEfforts(raw []string) []string {
+	out := make([]string, 0, len(raw))
+	seen := make(map[string]bool, len(raw))
+	for _, s := range raw {
+		if s = strings.TrimSpace(s); s == "" || seen[s] {
+			continue
+		}
+		seen[s] = true
+		out = append(out, s)
+	}
+	if len(out) == 0 {
+		return nil
+	}
+	return out
 }
 
 // InputModalities 按 OpenAI 生态惯例给出输入模态列表（OpenRouter/llama.cpp 的

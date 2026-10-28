@@ -36,11 +36,13 @@ import (
 
 	"omnigate/internal/app"
 	"omnigate/internal/auth"
+	"omnigate/internal/cline"
 	"omnigate/internal/config"
 	"omnigate/internal/gateway"
 	"omnigate/internal/glm"
 	"omnigate/internal/ledger"
 	"omnigate/internal/loomy"
+	"omnigate/internal/minimax"
 	"omnigate/internal/monkeycode"
 	"omnigate/internal/platform"
 	"omnigate/internal/pool"
@@ -247,8 +249,18 @@ func main() {
 	if err != nil {
 		fatal("读取 Loomy 账号目录失败：%v", err)
 	}
-	log.Printf("loaded accounts: workbuddy=%d %s, traework=%d, qoder=%d, qodercn=%d, qodercom=%d, workbuddyai=%d, qwenwork=%d, glm=%d, monkeycode=%d, raccoon=%d, loomy=%d from %s",
-		len(wbAuths), cfg.Region, len(trAuths), len(qdAuths), len(qcnAuths), len(qcmAuths), len(wbaAuths), len(qwAuths), len(glmAuths), len(mcAuths), len(rcAuths), len(lmAuths), cfg.AuthDir)
+	// MiniMax Code：OAuth 设备码登录写入 auths/（凭据是 refresh token）。
+	miAuths, err := auth.LoadMinimaxDir(cfg.AuthDir)
+	if err != nil {
+		fatal("读取 MiniMax 账号目录失败：%v", err)
+	}
+	// Cline：粘贴型渠道，凭据是官方 API key（auths/ 下以 sk_ 开头）。
+	clAuths, err := auth.LoadClineDir(cfg.AuthDir)
+	if err != nil {
+		fatal("读取 Cline 账号目录失败：%v", err)
+	}
+	log.Printf("loaded accounts: workbuddy=%d %s, traework=%d, qoder=%d, qodercn=%d, qodercom=%d, workbuddyai=%d, qwenwork=%d, glm=%d, monkeycode=%d, raccoon=%d, loomy=%d, minimax=%d, cline=%d from %s",
+		len(wbAuths), cfg.Region, len(trAuths), len(qdAuths), len(qcnAuths), len(qcmAuths), len(wbaAuths), len(qwAuths), len(glmAuths), len(mcAuths), len(rcAuths), len(lmAuths), len(miAuths), len(clAuths), cfg.AuthDir)
 
 	wbPool := pool.New(filepath.Join(stateDir, "state-workbuddy.json"))
 	for _, a := range wbAuths {
@@ -300,6 +312,14 @@ func main() {
 	for _, a := range lmAuths {
 		lmPool.Add(a)
 	}
+	miPool := pool.New(filepath.Join(stateDir, "state-minimax.json"))
+	for _, a := range miAuths {
+		miPool.Add(a)
+	}
+	clPool := pool.New(filepath.Join(stateDir, "state-cline.json"))
+	for _, a := range clAuths {
+		clPool.Add(a)
+	}
 	// 挑号策略（config.strategy）统一下发到所有渠道的池。
 	// 各渠道共用同一策略：策略是「怎么用账号」的全局偏好，不是渠道特性。
 	// normalize 已校验过合法性，这里 ParseStrategy 不会失败。
@@ -333,6 +353,10 @@ func main() {
 	rcUp.HTTP.Timeout = time.Duration(cfg.Upstream.TimeoutSeconds) * time.Second
 	lmUp := loomy.New()
 	lmUp.HTTP.Timeout = time.Duration(cfg.Upstream.TimeoutSeconds) * time.Second
+	miUp := minimax.New()
+	miUp.HTTP.Timeout = time.Duration(cfg.Upstream.TimeoutSeconds) * time.Second
+	clUp := cline.New()
+	clUp.HTTP.Timeout = time.Duration(cfg.Upstream.TimeoutSeconds) * time.Second
 	glmUp := glm.New()
 	// ⚠️ 只改 HTTP（非流式）的 Timeout。
 	// **不要**给 glmUp.StreamHTTP 设 Timeout —— 流式请求一旦有整体超时，
@@ -357,6 +381,8 @@ func main() {
 		provider.MonkeyCode.String():  {mcUp.HTTP, mcUp.StreamHTTP},
 		provider.Raccoon.String():     {rcUp.HTTP, rcUp.StreamHTTP},
 		provider.Loomy.String():       {lmUp.HTTP, lmUp.StreamHTTP},
+		provider.Minimax.String():     {miUp.HTTP, miUp.StreamHTTP},
+		provider.Cline.String():       {clUp.HTTP, clUp.StreamHTTP},
 		// glm 两个 client 都要传（SetTransportProxy 会**新建** Transport，
 		// 只套 HTTP 会让 StreamHTTP 仍走直连（代理对流式不生效）。
 		provider.GLM.String(): {glmUp.HTTP, glmUp.StreamHTTP},
@@ -449,6 +475,16 @@ func main() {
 	// 合成一个流程（glm.Client.Keepalive 先发最小对话再签到）。
 	// 用 DailyCheckin 通道驱动：CheckinMinutes 用全局签到时间，
 	// KeepaliveHours 也用同一时段（保活=签到，不必额外一次）。
+	// MiniMax Code：**有真签到**（signin/status + signin/claim，幂等判据是上游回执）。
+	// 积分每日 00:00（UTC+8）重置、当日不领会清零 ⇒ 签到时刻定在 00:05，
+	// 并给 55 分钟重试窗（服务端可能延迟建活动，与 qodercn 同一处理思路）。
+	miSch := scheduler.New(scheduler.Config{Pool: miPool, Upstream: miUp, Name: "minimax",
+		CheckinMinutes: []int{5}, CheckinRetryUntil: 60, KeepaliveHours: []int{2, 6, 10, 14, 18, 22},
+		ExpiringThreshold: expiringThreshold, Ledger: lg})
+	// Cline：无签到活动（上游只有免费模型池 + 按日/请求额度），
+	// 定时任务全部关闭（显式空切片），否则每天空跑一次并记录失败。
+	clSch := scheduler.New(scheduler.Config{Pool: clPool, Upstream: clUp, Name: "cline",
+		CheckinMinutes: []int{}, KeepaliveHours: []int{}, ExpiringThreshold: expiringThreshold, Ledger: lg})
 	glmSch := scheduler.New(scheduler.Config{Pool: glmPool, Upstream: glmUp, Name: "glm",
 		CheckinMinutes: checkinMinutes, KeepaliveHours: cfg.Schedule.KeepaliveHours,
 		ExpiringThreshold: expiringThreshold, Ledger: lg})
@@ -469,6 +505,8 @@ func main() {
 		provider.MonkeyCode: {Kind: provider.MonkeyCode, Pool: mcPool, Upstream: mcUp, StaticModels: monkeycode.StaticModels()},
 		provider.Raccoon:    {Kind: provider.Raccoon, Pool: rcPool, Upstream: rcUp, StaticModels: raccoon.StaticModels()},
 		provider.Loomy:      {Kind: provider.Loomy, Pool: lmPool, Upstream: lmUp, StaticModels: loomy.StaticModels()},
+		provider.Minimax:    {Kind: provider.Minimax, Pool: miPool, Upstream: miUp, StaticModels: minimax.StaticModels()},
+		provider.Cline:      {Kind: provider.Cline, Pool: clPool, Upstream: clUp, StaticModels: cline.StaticModels()},
 		provider.GLM:        {Kind: provider.GLM, Pool: glmPool, Upstream: glmUp, StaticModels: glm.StaticModels()},
 		// 注意：GLM **不**置 SingleAccount。
 		//
@@ -491,6 +529,8 @@ func main() {
 		provider.MonkeyCode:  {Kind: provider.MonkeyCode, Pool: mcPool, Upstream: mcUp, Scheduler: mcSch},
 		provider.Raccoon:     {Kind: provider.Raccoon, Pool: rcPool, Upstream: rcUp, Scheduler: rcSch},
 		provider.Loomy:       {Kind: provider.Loomy, Pool: lmPool, Upstream: lmUp, Scheduler: lmSch},
+		provider.Minimax:     {Kind: provider.Minimax, Pool: miPool, Upstream: miUp, Scheduler: miSch},
+		provider.Cline:       {Kind: provider.Cline, Pool: clPool, Upstream: clUp, Scheduler: clSch},
 		provider.GLM:         {Kind: provider.GLM, Pool: glmPool, Upstream: glmUp, Scheduler: glmSch},
 	}
 
@@ -640,6 +680,8 @@ func main() {
 	go mcSch.Run(sctx)
 	go rcSch.Run(sctx)
 	go lmSch.Run(sctx)
+	go miSch.Run(sctx)
+	go clSch.Run(sctx)
 	// ⚠️ 新增渠道时必须在这里补 Run()。
 	// 漏了**不会报错**——只表现为「该渠道的自动签到/保活从不运行」，
 	// 而手工触发（面板按钮 / RunCheckinNow）仍然可用，极难发现。
@@ -658,6 +700,8 @@ func main() {
 		provider.MonkeyCode,
 		provider.Raccoon,
 		provider.Loomy,
+		provider.Minimax,
+		provider.Cline,
 	}, app.CreditRefreshInterval)
 
 	// 启动即刷新「模型列表 + 费率」，之后每 30 分钟。

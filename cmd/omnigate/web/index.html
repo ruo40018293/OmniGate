@@ -56,9 +56,10 @@
         </div>
         <!-- 中间弹性空白由 flex:1 撑开 -->
         <div class="pa-spacer"></div>
-        <!-- 右组：渠道添加五列 grid，整体靠右；固定两行
+        <!-- 右组：渠道添加五列 grid，整体靠右；固定三行
              行1 = WorkBuddyCN | QoderCN | TraeWork | MonkeyCode | Loomy
-             行2 = WorkBuddyAI | QoderCOM | 千问办公 | 小浣熊 | 智谱清言 -->
+             行2 = WorkBuddyAI | QoderCOM | 千问办公 | 小浣熊 | 智谱清言
+             行3 = MiniMax | Cline（R63 新增） -->
         <!-- 旧 Qoder 渠道已下线（代码保留，仅删界面入口） -->
         <div class="pa-group pa-right">
           <button class="btn primary" id="btnAddWB" style="grid-column:1;grid-row:1">＋ WorkBuddyCN</button>
@@ -71,6 +72,8 @@
           <button class="btn primary alt qwenwork" id="btnAddQwen" style="grid-column:3;grid-row:2">＋ 千问办公</button>
           <button class="btn primary alt raccoon" id="btnAddRaccoon" style="grid-column:4;grid-row:2">＋ 小浣熊</button>
           <button class="btn primary alt glm" id="btnAddGLM" style="grid-column:5;grid-row:2" title="体验渠道：仅文本对话，不支持工具调用/多模态">＋ 智谱清言</button>
+          <button class="btn primary alt minimax" id="btnAddMinimax" style="grid-column:1;grid-row:3" title="设备码授权登录；每日 00:00 重置的免费积分，需签到领取">＋ MiniMax</button>
+          <button class="btn primary alt cline" id="btnAddCline" style="grid-column:2;grid-row:3" title="粘贴官方 sk_ API Key；免费模型池按账号计额度">＋ Cline</button>
         </div>
       </div>
     </div>
@@ -267,6 +270,31 @@
     </div>
     <div class="modal-actions">
       <button class="btn small" id="btnGLMCancel">关闭</button>
+    </div>
+  </div>
+</div>
+
+<!-- Cline 添加账号弹层（粘贴官方 API Key，无登录流程） -->
+<div class="overlay hidden" id="clineOverlay">
+  <div class="modal">
+    <div class="modal-title">添加 Cline 账号</div>
+    <div class="modal-body settings-body">
+      <ol class="glm-steps">
+        <li>打开 <a href="https://app.cline.bot" target="_blank" rel="noopener noreferrer">app.cline.bot</a> 并登录。</li>
+        <li>Account → <b>API Keys</b> → 新建一个 Key（形如 <code>sk_...</code>）。</li>
+        <li>复制后粘贴到下面，点「验证并添加」。</li>
+      </ol>
+      <input id="clineKeyInput" class="input grow" spellcheck="false"
+             placeholder="粘贴 Cline API Key（sk_ 开头）" autocomplete="off">
+      <div class="hint" style="margin-top:6px">
+        <button class="btn small primary" id="btnClineSubmit">验证并添加</button>
+      </div>
+      <div class="hint">校验只调 <code>GET /api/v1/api-keys</code>（零额度消耗、零副作用）。
+        Cline 的免费额度按<b>账号</b>计，同一账号建多个 Key <b>不会</b>扩大额度。</div>
+      <div class="hint" id="clineErr" style="color:var(--danger)"></div>
+    </div>
+    <div class="modal-actions">
+      <button class="btn small" id="btnClineCancel">关闭</button>
     </div>
   </div>
 </div>

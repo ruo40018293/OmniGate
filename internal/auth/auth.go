@@ -461,6 +461,44 @@ func LoadMonkeyCodeDir(dir string) ([]*Auth, error) {
 	return loadPrefixed(dir, "monkeycode")
 }
 
+// LoadMinimaxDir 扫描 MiniMax Code 渠道凭证（minimax-*.json）。
+//
+// 与 LoadQwenWorkDir 同口径：解析失败或不可读的文件静默跳过（启动日志由调用方统计），
+// Kind 固定为 "minimax"，FilePath 指向来源文件。
+//
+// 刻意**不**调 AdoptJWTExpiry：MiniMax 的 access token 不是 JWT（前缀 mmoat_、
+// 60 字符、0 个点；refresh_token 前缀 mmort_ 同样非 JWT），没有 exp 可读，
+// expiresAt 只能由登录/续期时的 now + expires_in（**单位秒**）写入。
+// 调它虽是无害空操作（解析不出 exp 即返回 0），但会误导后来者以为这里有 JWT 兜底。
+func LoadMinimaxDir(dir string) ([]*Auth, error) {
+	files, err := filepath.Glob(filepath.Join(dir, "minimax-*.json"))
+	if err != nil {
+		return nil, err
+	}
+	var out []*Auth
+	for _, f := range files {
+		raw, err := os.ReadFile(f)
+		if err != nil {
+			continue
+		}
+		a, err := Parse(raw)
+		if err != nil {
+			continue
+		}
+		a.Kind, a.FilePath = "minimax", f
+		out = append(out, a)
+	}
+	return out, nil
+}
+
+// LoadClineDir 扫描 Cline 渠道凭证（cline-*.json）。
+//
+// 「粘贴型」渠道：凭据是官方文档化的 sk_ + 64 hex API Key（只在创建时完整显示一次），
+// 存于 AccessToken；Key 不过期、不轮换 ⇒ 无 refresh/保活/签到，ExpiresAt 恒远期。
+func LoadClineDir(dir string) ([]*Auth, error) {
+	return loadPrefixed(dir, "cline")
+}
+
 // LoadRaccoonDir 扫描小浣熊凭证（raccoon-*.json）。
 //
 // 前缀不与 LoadQoderDir 的 `qoder*.json` 冲突（后者要求以 qoder 开头）。

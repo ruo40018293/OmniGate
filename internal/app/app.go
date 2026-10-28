@@ -24,7 +24,9 @@ import (
 	"omnigate/internal/ledger"
 	"omnigate/internal/live"
 	"omnigate/internal/login"
+	logincline "omnigate/internal/login_cline"
 	"omnigate/internal/login_glm"
+	loginminimax "omnigate/internal/login_minimax"
 	loginqoder "omnigate/internal/login_qoder"
 	loginqodercn "omnigate/internal/login_qodercn"
 	loginqodercom "omnigate/internal/login_qodercom"
@@ -347,7 +349,8 @@ func sortChannelsByOrder[T any](items []T, kindOf func(T) provider.Kind) {
 // 幂等且不额外消耗额度，手动按钮与定时任务都可用 —— 不再列入本名单。
 // Loomy 一期也不提供手动签到：上游未提供额度或签到端点。
 func noExplicitCheckin(k provider.Kind) bool {
-	return k == provider.WorkBuddyAI || k == provider.QwenWork || k == provider.MonkeyCode || k == provider.Loomy
+	return k == provider.WorkBuddyAI || k == provider.QwenWork || k == provider.MonkeyCode ||
+		k == provider.Loomy || k == provider.Cline
 }
 
 func (a *App) findRuntimeAuth(uid string) (*Runtime, *auth.Auth) {
@@ -514,7 +517,7 @@ func (a *App) StartLoginFor(kind string) (string, error) {
 		k = provider.WorkBuddy
 	}
 	switch k {
-	case provider.WorkBuddy, provider.WorkBuddyAI, provider.TraeWork, provider.Qoder, provider.QoderCN, provider.QoderCOM, provider.QwenWork:
+	case provider.WorkBuddy, provider.WorkBuddyAI, provider.TraeWork, provider.Qoder, provider.QoderCN, provider.QoderCOM, provider.QwenWork, provider.Minimax:
 		// 这些渠道已有登录编排
 	case provider.MonkeyCode:
 		// 导入型渠道：凭据来自本机已登录的官方客户端，上游没有可复现的 OAuth 流程。
@@ -530,6 +533,10 @@ func (a *App) StartLoginFor(kind string) (string, error) {
 		// 智谱清言无编程式登录：凭据只能由用户从浏览器 Cookie 里取出后粘贴。
 		// 故这里不发起轮询流程，只返回登录页地址；用户粘贴后走 SubmitGLMToken。
 		return loginglm.LoginURL, nil
+	case provider.Cline:
+		// Cline 无登录流程：凭据是官方 API Key（sk_ 开头）。
+		// 面板粘贴后走 SubmitClineKey（校验走零消耗的 GET /api/v1/api-keys）。
+		return "", fmt.Errorf("cline 渠道无需登录：请在面板粘贴官方 API Key（app.cline.bot → Account → API Keys）")
 	default:
 		return "", fmt.Errorf("unknown login provider %s", kind)
 	}
@@ -556,6 +563,8 @@ func (a *App) StartLoginFor(kind string) (string, error) {
 		a.loginClient = loginqwenwork.NewClient()
 	case provider.Raccoon:
 		a.loginClient = loginraccoon.NewClient()
+	case provider.Minimax:
+		a.loginClient = loginminimax.NewClient()
 	default:
 		a.loginClient = login.NewClient()
 	}
@@ -585,6 +594,10 @@ func (a *App) StartLoginFor(kind string) (string, error) {
 		} else {
 			authURL, err = loginraccoon.Start(a.loginClient, a.loginStateFP, a.stateDir(), exe)
 		}
+	case provider.Minimax:
+		// MiniMax Code：OAuth 设备码 + PKCE，全程不起本地端口。
+		// 返回 verification_uri_complete（已内嵌 user_code），面板直接 window.open 即可。
+		authURL, err = loginminimax.Start(a.loginClient, a.loginStateFP)
 	default:
 		ep := login.EndpointsForRegion(a.cfg.Region)
 		authURL, err = login.Start(a.loginClient, a.loginStateFP, ep)
@@ -735,6 +748,17 @@ func (a *App) pollLogin(ctx context.Context) {
 				log.Printf("raccoon login poll failed: %v", err)
 				a.setLoginError("登录失败：" + err.Error())
 				return
+			}
+			continue
+		}
+		if a.loginKind == provider.Minimax {
+			r, err := loginminimax.Poll(a.loginClient, a.loginStateFP)
+			if err == nil {
+				a.completeMinimaxLogin(r)
+				return
+			}
+			if !errors.Is(err, loginminimax.ErrPending) {
+				log.Printf("minimax login poll failed: %v", err)
 			}
 			continue
 		}
@@ -1257,9 +1281,68 @@ func (a *App) reloadAccounts() {
 			rt.Pool.SyncToDir(auths)
 		}
 	}
+	if rt := a.runtime(provider.Minimax); rt != nil && rt.Pool != nil {
+		auths, err := auth.LoadMinimaxDir(a.cfg.AuthDir)
+		if err != nil {
+			log.Printf("reload minimax accounts: %v", err)
+		} else {
+			rt.Pool.SyncToDir(auths)
+		}
+	}
+	if rt := a.runtime(provider.Cline); rt != nil && rt.Pool != nil {
+		auths, err := auth.LoadClineDir(a.cfg.AuthDir)
+		if err != nil {
+			log.Printf("reload cline accounts: %v", err)
+		} else {
+			rt.Pool.SyncToDir(auths)
+		}
+	}
 }
 
 // CheckinAccount 单个账号立即签到。
+// completeMinimaxLogin MiniMax Code 设备码登录成功：落凭据、重载账号池、立即领当日积分。
+//
+// 立即签到的理由：MiniMax 的每日积分当日不领会清零（次日 00:00 重置），
+// 若只在 00:05 定时跑，白天新登录的账号当天那 300 分就白丢了。
+func (a *App) completeMinimaxLogin(r loginminimax.Result) {
+	log.Printf("minimax 登录成功 uid=%s expires_at=%d scope=%s", r.UID, r.ExpiresAt, r.Scope)
+	if _, err := loginminimax.SaveAuth(a.cfg.AuthDir, r); err != nil {
+		log.Printf("minimax 登录保存凭证失败 uid=%s err=%v", r.UID, err)
+		a.setLoginError("保存凭据失败：" + err.Error())
+		return
+	}
+	a.reloadAccounts()
+	a.afterAccountAdded(provider.Minimax)
+	uid := r.UID
+	a.safeGo(func() {
+		if res, err := a.CheckinAccount(uid); err != nil {
+			log.Printf("minimax 首次签到失败 uid=%s err=%v", uid, err)
+		} else {
+			log.Printf("minimax 首次签到 uid=%s ok=%t msg=%s remain=%d", uid, res.OK, res.Msg, res.Remain)
+		}
+	})
+}
+
+// SubmitClineKey 面板粘贴 Cline 官方 API Key 的入口。
+//
+// 校验只调 GET /api/v1/api-keys（零 token 消耗、零副作用），随后原子落盘并重载账号池。
+// 返回告警文本（同账号多 Key 不扩额度），前端可直接展示。
+func (a *App) SubmitClineKey(key string) (string, string, error) {
+	uid, pr, err := logincline.SaveAuth(a.cfg.AuthDir, key)
+	if err != nil {
+		return "", "", err
+	}
+	log.Printf("cline 账号已添加（手工）uid=%s name=%s prefix=%s", uid, pr.AccountName, pr.KeyPrefix)
+	a.reloadAccounts()
+	a.afterAccountAdded(provider.Cline)
+	warn := ""
+	if len(pr.SiblingKeys) > 0 {
+		warn = fmt.Sprintf("该账号下还有 %d 个 Key（%v）：Cline 配额按账号计，多 Key 不会扩大额度",
+			len(pr.SiblingKeys), pr.SiblingKeys)
+	}
+	return uid, warn, nil
+}
+
 func (a *App) CheckinAccount(uid string) (scheduler.CheckinResult, error) {
 	rt, _ := a.findRuntimeAuth(uid)
 	if rt == nil || rt.Scheduler == nil {
@@ -2332,6 +2415,21 @@ func (a *App) HandleAPI(mux *http.ServeMux) {
 			return
 		}
 		writeJSON(w, http.StatusOK, map[string]any{"ok": true, "uid": uid})
+	})
+	mux.HandleFunc("POST /api/login/cline_key", func(w http.ResponseWriter, r *http.Request) {
+		var req struct {
+			Key string `json:"key"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			apiError(w, http.StatusBadRequest, "请求体解析失败")
+			return
+		}
+		uid, warn, err := a.SubmitClineKey(req.Key)
+		if err != nil {
+			apiError(w, http.StatusBadRequest, err.Error())
+			return
+		}
+		writeJSON(w, http.StatusOK, map[string]any{"ok": true, "uid": uid, "warn": warn})
 	})
 	mux.HandleFunc("POST /api/account/checkin", func(w http.ResponseWriter, r *http.Request) {
 		var req struct {
