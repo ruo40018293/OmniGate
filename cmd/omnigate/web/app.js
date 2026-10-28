@@ -397,8 +397,10 @@ const chLabel = (k) => CH_LABEL[k] || "WorkBuddy";
 const chClass = (k) => CH_CLASS[k] || "wb";
 // 不支持显式签到（手动按钮）的渠道：
 // WorkBuddy 国际版不提供手动签到，而是自动对话保活领日活奖励；
-// 千问办公无签到活动；MonkeyCode / 小浣熊 / Loomy 均无签到端点。
-const NO_EXPLICIT_CHECKIN = new Set(["workbuddyai", "qwenwork", "monkeycode", "raccoon", "loomy"]);
+// 千问办公无签到活动；MonkeyCode / Loomy 无签到端点。
+// 小浣熊**不在此列**（R61）：上游没有领取端点，每日 300 积分是当天首次触达积分服务时
+// 懒发放的，「签到」= 摸一次余额 + 核对流水，幂等且不消耗额度，故给出手动按钮。
+const NO_EXPLICIT_CHECKIN = new Set(["workbuddyai", "qwenwork", "monkeycode", "loomy"]);
 const noExplicitCheckin = (g) => NO_EXPLICIT_CHECKIN.has(g);
 // 导入型渠道：凭据由本机已登录的官方客户端提供，没有浏览器登录流程（见 internal/app/import_local.go）。
 const IMPORT_LOCAL_CHANNELS = new Set(["monkeycode", "raccoon", "loomy"]);
@@ -1272,7 +1274,7 @@ let pendingChannel = null;
 // 待执行动作："login" = 打开浏览器登录，"import" = 从本机客户端导入。
 // 小浣熊两种都支持，由弹窗里的两个按钮分别设定。
 let pendingAction = "login";
-// 无手动签到渠道的登录提示差异文案（国际版会自动领日活奖励）。
+// 各渠道登录提示的补充说明（自动领取/凭据续期等与签到无关的差异）。
 const NO_CHECKIN_LOGIN_HINT = {
   workbuddyai: "（无需手动签到，定时自动对话保活并领取日活奖励）",
   qwenwork: "（每日积分服务端 00:00 自动发放；若浏览器已登录千问办公则全自动完成，否则需扫码一次）",

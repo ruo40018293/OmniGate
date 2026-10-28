@@ -48,6 +48,9 @@ type Client struct {
 
 	// Base 网关基址（默认 LLMBase）；测试注入 httptest 假上游用，生产不设。
 	Base string
+	// SiteBase 站点根（默认 BaseURL，用于 points 服务）；同样只为测试注入，
+	// 生产不设 —— 积分/流水与推理网关不同前缀，见 EpPointsBalance / EpPointsBillsV2。
+	SiteBase string
 }
 
 // baseURL 生效的网关基址。
@@ -56,6 +59,14 @@ func (c *Client) baseURL() string {
 		return b
 	}
 	return LLMBase
+}
+
+// siteBase 生效的站点根（points 服务所在域）。
+func (c *Client) siteBase() string {
+	if b := strings.TrimRight(strings.TrimSpace(c.SiteBase), "/"); b != "" {
+		return b
+	}
+	return BaseURL
 }
 
 // DefaultIdleTimeout 流式空闲超时默认值（与 loomy 对齐，见其注释）。
@@ -567,7 +578,7 @@ type pointsBalanceResp struct {
 // 每日 / 月度 / 奖励 / 充值，另有 `topup_frozen` 标记充值池是否被冻结 —— 冻结时该池
 // 对用户「看得见用不了」，正好对应 `provider.ResourceItem.Usable` 的语义。
 func (c *Client) UserResourceDetail(a *auth.Auth) (int64, []provider.ResourceItem, error) {
-	resp, raw, err := c.do(http.MethodGet, BaseURL+EpPointsBalance, a, nil)
+	resp, raw, err := c.do(http.MethodGet, c.siteBase()+EpPointsBalance, a, nil)
 	if err != nil {
 		return 0, nil, err
 	}
@@ -605,9 +616,24 @@ func parsePointsBalance(d pointsBalanceData) (int64, []provider.ResourceItem) {
 	return d.AvailablePoints, items
 }
 
-// DailyCheckin 实现 provider.Upstream：小浣熊无签到活动。
+// DailyCheckin 实现 provider.Upstream：签到的实质见 checkin.go（R61）。
+//
+// 小浣熊没有「点击领取」的签到接口 —— 每日 300 积分由服务端在当天首次触达
+// 积分服务时**懒发放**（流水 biz_type=daily_grant）。因此这里的「签到」=
+// 主动摸一次积分服务并核对当日流水；报告口径由 DailyCheckinReport 提供，
+// 调度器优先走它，本方法仅为接口兼容保留。
 func (c *Client) DailyCheckin(a *auth.Auth) error {
-	return fmt.Errorf("raccoon 无签到活动")
+	rep, err := c.DailyCheckinReport(a)
+	if err != nil {
+		return err
+	}
+	if rep.Status.Retryable() {
+		if rep.Msg == "" {
+			return fmt.Errorf("raccoon 今日每日积分尚未发放")
+		}
+		return fmt.Errorf("raccoon %s", rep.Msg)
+	}
+	return nil
 }
 
 // ---------------------------------------------------------------------------

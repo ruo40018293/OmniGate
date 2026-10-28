@@ -342,10 +342,12 @@ func sortChannelsByOrder[T any](items []T, kindOf func(T) provider.Kind) {
 // QoderCN/QoderCOM 已实现 campaigns 签到，支持手动按钮（上游同一套机制）。
 // 智谱清言已实现 activity-api 每日签到，支持手动按钮。
 // MonkeyCode 一期也不提供手动签到：上游未提供额度或签到端点。
-// 小浣熊一期也不提供手动签到：上游未提供额度或签到端点。
+// 小浣熊**已支持**签到（R61）：上游没有领取端点，每日 300 积分由积分服务在当天首次
+// 触达时懒发放（created_at == 当天首次请求时刻），故「签到」= 摸一次余额 + 核对流水，
+// 幂等且不额外消耗额度，手动按钮与定时任务都可用 —— 不再列入本名单。
 // Loomy 一期也不提供手动签到：上游未提供额度或签到端点。
 func noExplicitCheckin(k provider.Kind) bool {
-	return k == provider.WorkBuddyAI || k == provider.QwenWork || k == provider.MonkeyCode || k == provider.Raccoon || k == provider.Loomy
+	return k == provider.WorkBuddyAI || k == provider.QwenWork || k == provider.MonkeyCode || k == provider.Loomy
 }
 
 func (a *App) findRuntimeAuth(uid string) (*Runtime, *auth.Auth) {

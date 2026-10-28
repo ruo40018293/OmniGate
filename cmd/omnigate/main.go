@@ -432,12 +432,14 @@ func main() {
 	// 9:00/21:00 签到与 22:00 保活，每天产生两次必然失败的调用与失败日志。
 	mcSch := scheduler.New(scheduler.Config{Pool: mcPool, Upstream: mcUp, Name: "monkeycode",
 		CheckinMinutes: []int{}, KeepaliveHours: []int{}, ExpiringThreshold: expiringThreshold, Ledger: lg})
-	// 小浣熊：无签到（CheckinMinutes 用显式空切片，nil 会被补成 9:00/21:00）；
-	// access_token 实测仅 ≈2h，而 refresh_token ≈30 天，
+	// 小浣熊：**有签到**（R61）—— 每日 300 积分由服务端懒发放：当天首次触达积分服务
+	// 时补写流水 biz_type=daily_grant，且 7 天后到期清零 ⇒ 漏一天真少 300。
+	// 故按全局签到时段跑（摸余额 + 核对流水，两个都幂等、不重复领取）。
+	// 另：access_token 实测仅 ≈2h，而 refresh_token ≈30 天，
 	// 故保活比其它渠道更密（每 4 小时一次）以减少「请求先 401 再刷新」的额外往返；
 	// 请求路径上的 refreshIfSessionDead 仍会兜底自愈。
 	rcSch := scheduler.New(scheduler.Config{Pool: rcPool, Upstream: rcUp, Name: "raccoon",
-		CheckinMinutes: []int{}, KeepaliveHours: []int{1, 5, 9, 13, 17, 21}, ExpiringThreshold: expiringThreshold, Ledger: lg})
+		CheckinMinutes: checkinMinutes, KeepaliveHours: []int{1, 5, 9, 13, 17, 21}, ExpiringThreshold: expiringThreshold, Ledger: lg})
 	// Loomy：无签到，且**上游无 refresh 端点**（session 14 天，到期需重新导入）；
 	// 定时任务全部关闭（显式空切片）：refreshToken 为空，保活虽会按「无 refresh token」
 	// 跳过、不会误禁用账号，但每天仍空跑一次并记录失败，故直接关掉。

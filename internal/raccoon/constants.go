@@ -29,9 +29,15 @@ const (
 	// reward_points,topup_points,topup_frozen}}。路径取自 renderer chunk
 	// `75741-*.js` 的 `class extends ... static get baseUrl(){return `${origin}/api/web/points/v1`}`。
 	EpPointsBalance = "/api/web/points/v1/balance"
-	// EpPointsBills 积分流水（分页参数为 `paging.limit` / `paging.offset` 或 `cursor`，
-	// 另需合法 `type`；暂无必要，保留备查）。
+	// EpPointsBills 积分流水 v1 旧版（分页参数 `paging.limit` / `paging.offset`）。
+	// 官方前端已切到 v2，保留备查。
 	EpPointsBills = "/api/web/points/v1/bills"
+	// EpPointsBillsV2 积分流水 v2 —— **R61 签到取证用的就是它**。
+	// 路径取自官方前端 points 客户端的 `static get billsUrl()`：
+	// `host + "/api/web/points/v2/bills"`，调用参数 `paging.limit=<n>&type=all[&cursor=…]`。
+	// 响应 `data.items[]` 每条含 biz_type / event_name / points / created_at / grant_at / expire_at；
+	// `biz_type="daily_grant"` 即「每日积分发放」——当日签到是否到账只看这一行。
+	EpPointsBillsV2 = "/api/web/points/v2/bills"
 
 	// EpAuthRefresh 桌面端刷新端点（客户端 env: NEXT_PUBLIC_AUTH_API_PREFIX = /api/electron/auth/v1）。
 	EpAuthRefresh = "/api/electron/auth/v1/refresh"
