@@ -1,30 +1,52 @@
-# Windows 图标与 exe 资源
+# 图标与 exe 资源
 
 `dist/omnigate.exe` 带图标和版本信息（资源管理器属性里能看到产品名）。
-这些资源来自 `cmd/omnigate/rsrc_windows_amd64.syso`，由本目录两个脚本从
+这些资源来自 `cmd/omnigate/rsrc_windows_amd64.syso`，由本目录脚本从
 `windows/icon.ico` 生成。
 
-## 用法
+## 标志释义（R79）
+
+标志是**一道门**：圆拱门洞 + 一条比门框更宽的门槛。
+
+`OmniGate` 做的事是「多路上游账号聚合成一个入口」——客户端永远只看见一道门。
+换名字后不再用字母（旧版是 WorkBuddy 的 W），理由是：字母表里的形状会和系统
+图标撞款，而「门」既贴合 Gateway 语义，又不属于任何字母。
+
+小尺寸下的唯一判别特征是**门槛那一横**：只有拱没门槛时，16px 会读成小写 `n`。
+这条横比门框宽出约 7% 画布，是 `check_icon.py` 里断言的一条硬指标。
+
+## 一条龙（改完图标按顺序跑）
 
 ```bash
-# 1. 改图标：编辑 make_icon.py 顶部的配色 / W_PATH，然后
-python build/make_icon.py          # → build/windows/icon.ico + icon_preview.png
+# 1. 改图标：编辑 make_icon.py 顶部的配色 / 骨架常量（CX / R / SPRING_Y / FEET_Y / SILL_*）
+python build/make_icon.py          # → windows/icon.ico + icon_preview.png + appicon.png + logo64.png
 
-# 2. 生成 exe 资源
+# 2. 几何自检（对称 / 门槛判别特征 / 对比度 / 安全边距）
+python build/check_icon.py
+
+# 3. 同步两个消费方副本（go:embed 与 Web UI 各自读一份，漏了 exe/面板仍用旧图标）
+cp build/windows/icon.ico cmd/omnigate/build/trayicon.ico    # 托盘图标
+cp build/logo64.png       cmd/omnigate/web/logo64.png        # 面板 logo / favicon
+
+# 4. 生成 exe 资源
 python build/make_syso.py          # → cmd/omnigate/rsrc_windows_amd64.syso
 
-# 3. 构建 + 校验（校验不过就别发布）
-bash scripts/build_release.sh          # 发布用构建（含 -trimpath -s -w + 产物自检）
+# 5. 构建 + 资源校验（校验不过就别发布）
+bash scripts/build_release.sh
 python build/check_res.py cmd/omnigate/rsrc_windows_amd64.syso dist/omnigate.exe
 ```
 
-改了图标后还要同步托盘与弹层 logo：
+`build/appicon.png`（1024px）是 macOS 侧唯一源图：`build/macos/build-app.sh`
+用 `sips` 从它派生 `.iconset` 再 `iconutil` 打包，所以改图标必须重生成它。
 
-```bash
-python build/make_icon.py          # 顺带刷新 build/logo64.png
-cp build/windows/icon.ico cmd/omnigate/build/trayicon.ico
-cp build/logo64.png cmd/omnigate/web/logo64.png
-```
+> **注意**：`icon_preview.png` 是给人看的对照图（上行 1:1、下行 4 倍放大），
+> 校验靠 `check_icon.py` 的断言，不靠肉眼截图 —— 本仓库的评审经常在没有
+> 图形界面的环境里进行。
+
+> **历史资产**：仓库根目录 `icon.png` 与 `cmd/genicon/` 是 Wails 时代的产物
+> （R7 已删除 Wails），`genicon` 只是把位图缩放成多尺寸，不做设计分档。
+> 现在的图标链路是 `make_icon.py`，**不要再改 `genicon`**。
+
 
 ## 为什么校验是必须的
 

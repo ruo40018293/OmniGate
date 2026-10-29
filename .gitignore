@@ -67,3 +67,7 @@ github_token.txt
 HANDOFF.md
 GO多平台发布备忘.md
 !docs/DECISIONS.md
+
+# Python 脚本运行产生的字节码缓存（build/*.py 是图标/资源生成链路）
+__pycache__/
+*.pyc

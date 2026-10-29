@@ -115,6 +115,7 @@
 | R76 | 成长中心的「手动执行」必须与「定时开关」解耦：能自动跑的动作要有单账号按钮，点了就执行（开关只管定时） |
 | R77 | 发版链路只认 vX.Y.Z 且必须**幂等**：`v*` 通配会把 `version` 这类标签带进来，`gh release create` 撞同名 release 必挂 |
 | R78 | 改名要带兼容层与迁移：新名优先、旧名兜底、数据目录搬过去挪（硬切换 = 存量部署升级即丢配置） |
+| R79 | 图标标志必须是小尺寸可辨的单一形状（当前=门：拱+门槛，门槛比门框宽），改图标必跑 `build/check_icon.py` 的断言，且 ico→托盘/logo64/appicon/syso 四处同源刷新 |
 
 ## 2. 架构选型（依据）
 
@@ -389,8 +390,8 @@ git tag vX.Y.Z && git push origin vX.Y.Z
 
 - [README.md](README.md) — 用户文档
 - [DEVELOPMENT.md](DEVELOPMENT.md) — 开发者文档（面向 AI Agent）
-- [AGENTS.md](AGENTS.md) — 本文件：决议项一句话判据（R1–R78）、架构选型、不变量
-- [docs/DECISIONS.md](docs/DECISIONS.md) — 决议全文（R1–R78）：每条决议的原始背景、踩坑记录与边界条件
+- [AGENTS.md](AGENTS.md) — 本文件：决议项一句话判据（R1–R79）、架构选型、不变量
+- [docs/DECISIONS.md](docs/DECISIONS.md) — 决议全文（R1–R79）：每条决议的原始背景、踩坑记录与边界条件
 - [docs/三接口兼容改造备忘.md](docs/三接口兼容改造备忘.md) — 三接口（Chat/Responses/Anthropic）兼容层架构决策、实施记录、验证清单、已知限制
 - [docs/用量积分流水记账备忘.md](docs/用量积分流水记账备忘.md) — 双流水统计（token/积分）架构、差分算法、实测验证、已知限制（R17）
 
