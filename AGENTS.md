@@ -113,6 +113,7 @@
 | R74 | 批量作业必须「立刻受理 + 进度可查」，同一作业槽拒绝并发（同步等 122.99s = 点了没反应） |
 | R75 | 取证目录按「文件数 + 总字节」双上限修剪，从最旧删起（只封文件数挡不住 400MB） |
 | R76 | 成长中心的「手动执行」必须与「定时开关」解耦：能自动跑的动作要有单账号按钮，点了就执行（开关只管定时） |
+| R77 | 发版链路只认 vX.Y.Z 且必须**幂等**：`v*` 通配会把 `version` 这类标签带进来，`gh release create` 撞同名 release 必挂 |
 
 ## 2. 架构选型（依据）
 
@@ -167,13 +168,19 @@ POST /api/login/glm_auto_cancel    # 取消自动登录并关闭浏览器
 POST /api/login/glm_token          # {refresh_token} → {uid} 智谱清言手工兜底（见 R22）
 POST /api/login/cancel
 POST /api/account/checkin          # {uid}
-POST /api/account/checkin_all
 POST /api/account/refresh          # {uid}
-POST /api/account/refresh_all
 POST /api/account/remove           # {uid}
 POST /api/account/disable          # {uid,disabled} 停用/启用
 POST /api/account/resource_detail  # {uid} → 积分明细
 POST /api/account/nickname          # {uid,nickname} 修改显示名
+POST /api/account/tasks             # {uid,include_mp} 成长任务「一键完成」（异步受理，R74 前的作业模型）
+GET  /api/account/tasks_status       # 成长任务进度
+POST /api/account/growth_travel      # {uid} 猫猫旅行手动执行（同步回摘要，R76）
+POST /api/account/refresh_all        # 积分刷新批量作业（立刻受理，进度见下，R74）
+GET  /api/account/refresh_all_status  # 积分刷新进度 {running,total,done,ok,failed,current}
+POST /api/account/checkin_all        # 批量签到作业（立刻受理，R74）
+GET  /api/account/checkin_all_status  # 批量签到进度 + 每条结果
+GET  /api/inuse                       # 「调用中」徽标轮询专用轻端点（R73，2s 一次，别用 /api/state）
 POST /api/config/checkin_times     # {times:["09:00","21:30"]}
 POST /api/config/listen            # {host,port,admin_password?}（非环回时必须带密码）
 POST /api/config/admin_password    # {password}（空 = 关闭面板鉴权，仅环回监听允许）
@@ -359,7 +366,13 @@ python -c "b=open('dist/omnigate.exe','rb').read(); print('new:',b.count(b'2.5.3
 
 ### 发版（tag 触发）
 
-push `v*` tag → GitHub Actions 构建五平台产物并创建正式 release。
+push `vX.Y.Z` tag → GitHub Actions 构建五平台产物并创建正式 release。
+
+> **触发与守卫**：`on.push.tags: 'v*'` 只是粗筛（`version` 这类标签也会命中），真正的校验在 `guard` job：
+> 必须是 `vX.Y.Z` 或 `vX.Y.Z-预发布`，否则在 build 之前就拒（R77）。
+> 发布步骤**幂等**：同名 release 已存在时走 `upload --clobber` + `edit`，不会因「already exists」失败。
+> 手动 `workflow_dispatch` 检出的是**默认分支**（`github.event.repository.default_branch`，本仓库 `main`）。
+
 **release note 用仓库根目录的 `RELEASE-<tag>.md`（手写摘要，面向用户）**，
 而不是 `--generate-notes`（那只给 commit 链接列表）；文件缺失时回退自动生成，不阻塞发版。
 
@@ -375,8 +388,8 @@ git tag vX.Y.Z && git push origin vX.Y.Z
 
 - [README.md](README.md) — 用户文档
 - [DEVELOPMENT.md](DEVELOPMENT.md) — 开发者文档（面向 AI Agent）
-- [AGENTS.md](AGENTS.md) — 本文件：决议项一句话判据（R1–R76）、架构选型、不变量
-- [docs/DECISIONS.md](docs/DECISIONS.md) — 决议全文（R1–R76）：每条决议的原始背景、踩坑记录与边界条件
+- [AGENTS.md](AGENTS.md) — 本文件：决议项一句话判据（R1–R77）、架构选型、不变量
+- [docs/DECISIONS.md](docs/DECISIONS.md) — 决议全文（R1–R77）：每条决议的原始背景、踩坑记录与边界条件
 - [docs/三接口兼容改造备忘.md](docs/三接口兼容改造备忘.md) — 三接口（Chat/Responses/Anthropic）兼容层架构决策、实施记录、验证清单、已知限制
 - [docs/用量积分流水记账备忘.md](docs/用量积分流水记账备忘.md) — 双流水统计（token/积分）架构、差分算法、实测验证、已知限制（R17）
 

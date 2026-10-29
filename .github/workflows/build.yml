@@ -3,13 +3,37 @@ name: Build Release
 on:
   # 手动触发：Actions 页面选 dev 分支 → Run workflow → 构建 + 发布 dev pre-release
   workflow_dispatch:
-  # 推送 tag（v*）自动触发正式发版
+  # 推送 tag（v*）自动触发正式发版。
+  # ⚠️ `v*` 只是粗筛：`version`、`v-test` 这类标签同样会命中。
+  # 精确校验放在 guard job（只认 vX.Y.Z），避免白跑 5 个平台的构建。
   push:
     tags:
       - 'v*'
 
 jobs:
+  # tag 名守卫：`v*` 通配会把 `version` 这类标签也带进来。
+  # 2026-10-29 真实踩坑：标签名手滑写成 `version` → 构建矩阵跑完 → release job
+  # `gh release create version` 报「a release with the same tag name already exists」→ 整体失败。
+  # 所以正式发版只认 vX.Y.Z，其它在 build 之前就拒绝（省几分钟矩阵时间，也让报错说人话）。
+  guard:
+    if: github.event_name == 'push'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Validate release tag
+        run: |
+          TAG="${GITHUB_REF#refs/tags/}"
+          # 只认 vX.Y.Z 或 vX.Y.Z-预发布后缀（v0.1.4-rc1）。`version`、`v1.2` 这类一律拒。
+          if [[ ! "$TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.]+)?$ ]]; then
+            echo "::error::标签 '$TAG' 不是 vX.Y.Z 形式，拒绝构建/发版（发版请打 v0.1.4 这样的标签）"
+            echo "误推的标签删除：git push origin :refs/tags/$TAG"
+            exit 1
+          fi
+          echo "标签 $TAG 校验通过"
+
   build:
+    needs: guard
+    # guard 在 workflow_dispatch 下是 skipped，不能让 needs 把 build 一起跳过
+    if: ${{ always() && needs.guard.result != 'failure' && needs.guard.result != 'cancelled' }}
     strategy:
       matrix:
         include:
@@ -58,7 +82,8 @@ jobs:
       # 代价是 checkout 变慢，对这个仓库规模可忽略。
       - uses: actions/checkout@v4
         with:
-          ref: ${{ github.event_name == 'push' && github.ref || 'master' }}
+          # 手动触发要检出默认分支：仓库默认分支是 main，写死 master 会直接 checkout 失败
+          ref: ${{ github.event_name == 'push' && github.ref || github.event.repository.default_branch }}
           fetch-depth: 0
       - uses: actions/setup-go@v5
         with:
@@ -109,7 +134,7 @@ jobs:
         if: matrix.name == 'linux-amd64'
         continue-on-error: true
         run: |
-          BASE="origin/master"
+          BASE="origin/${{ github.event.repository.default_branch }}"
           if git rev-parse --verify --quiet "$BASE" >/dev/null; then
             CHANGED=$(git diff --name-only --diff-filter=ACM "$BASE"...HEAD || true)
           else
@@ -170,8 +195,8 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with:
-          # tag 触发（push v*）→ 检出该 tag 代码；手动触发 → 检出 dev 分支代码
-          ref: ${{ github.event_name == 'push' && github.ref || 'master' }}
+          # tag 触发（push v*）→ 检出该 tag 代码；手动触发 → 检出默认分支代码
+          ref: ${{ github.event_name == 'push' && github.ref || github.event.repository.default_branch }}
 
       # 注意顺序：先 checkout 再 download-artifact，否则 git 检出会覆盖 artifacts/
       - uses: actions/download-artifact@v4
@@ -195,18 +220,37 @@ jobs:
             # release note 用仓库里的 RELEASE-<tag>.md（手写摘要），而非 --generate-notes
             # （后者只给 commit 链接列表，没有面向用户的变更摘要）；
             # 找不到该文件时回退到 --generate-notes，不阻塞发版。
+            # 双保险：guard job 已经拦过，但 job 图被改坏/被跳过时这里也要兜住
+            if [[ ! "$TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.]+)?$ ]]; then
+              echo "::error::标签 '$TAG' 不是 vX.Y.Z 形式，拒绝发版"
+              exit 1
+            fi
+            # 带预发布后缀（v0.1.4-rc1）自动标记 prerelease，别让它抢「Latest」
+            PRE=""
+            if [[ "$TAG" == *-* ]]; then PRE="--prerelease"; fi
             NOTES="RELEASE-${TAG}.md"
-            if [[ -f "$NOTES" ]]; then
+            # 幂等：同名 release 已存在时**不能**再 `gh release create`
+            # （会报 a release with the same tag name already exists 并让整个 job 失败，
+            #  2026-10-29 就是卡在这里）。重推同名 tag 是常态，改为覆盖资产 + 更新说明。
+            if gh release view "$TAG" >/dev/null 2>&1; then
+              echo "=== release $TAG 已存在：覆盖资产并更新说明 ==="
+              gh release upload "$TAG" release-assets/* --clobber
+              if [[ -f "$NOTES" ]]; then
+                gh release edit "$TAG" --title "$TAG" $PRE --notes-file "$NOTES"
+              else
+                gh release edit "$TAG" --title "$TAG" $PRE
+              fi
+            elif [[ -f "$NOTES" ]]; then
               echo "=== 使用 $NOTES 作为 release note ==="
-              gh release create "$TAG" release-assets/* --title "$TAG" --notes-file "$NOTES"
+              gh release create "$TAG" release-assets/* --title "$TAG" $PRE --notes-file "$NOTES"
             else
               echo "=== 未找到 $NOTES，回退到自动生成 notes ==="
-              gh release create "$TAG" release-assets/* --generate-notes
+              gh release create "$TAG" release-assets/* $PRE --generate-notes
             fi
             exit 0
           fi
           # workflow_dispatch → 每次更新同一个 dev-build 专属 release
-          # 复用固定 tag，避免堆积；不会删除 master 分支的任何发布包
+          # 复用固定 tag，避免堆积；不会删除默认分支的任何发布包
           DEV_TAG="dev-build"
           if gh release view "$DEV_TAG" >/dev/null 2>&1; then
             gh release delete "$DEV_TAG" --yes --cleanup-tag
