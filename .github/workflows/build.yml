@@ -73,11 +73,11 @@ jobs:
             suffix: ""
     runs-on: ${{ matrix.os }}
     steps:
-      # workflow_dispatch 手动触发按钮只在默认分支（master）显示，但构建目标始终是 dev；
-      # tag 触发（push v*）则构建对应 tag 的代码
+      # workflow_dispatch 手动触发按钮只在默认分支显示，构建目标就是默认分支（本仓库 main）；
+      # tag 触发（push v*，真正的版本校验在 guard job）则构建对应 tag 的代码
       #
       # fetch-depth: 0 —— 拉全历史。用途只有一个：让下方「末尾换行检查」能用
-      # `origin/master...HEAD` 拿到真实的改动文件集。浅克隆实测下该 diff 恒为空
+      # `origin/<默认分支>...HEAD` 拿到真实的改动文件集。浅克隆实测下该 diff 恒为空
       # （不创建 remote-tracking ref、HEAD~1 也不存在），会使那一步形同虚设。
       # 代价是 checkout 变慢，对这个仓库规模可忽略。
       - uses: actions/checkout@v4
