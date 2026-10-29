@@ -2555,9 +2555,11 @@ function renderModels(models) {
       creditCell = `<span title="TraeWork 无单次精确积分，按渠道真实消耗分摊；暂无余额差值消耗">—</span>`;
     } else {
       // R71：credit==0 且该行有消耗，含义是「折算不出来」，不是「免费」。
-      // 旧写法在这里输出字面 0，minimax/cline/monkeycode 这类上游既不下发单次积分、
-      // 又没有公开费率的渠道会显示成「0 积分」，读起来像免费模型——所以改成「—」+说明。
-      creditCell = `<span title="该渠道上游不下发单次积分、也没有公开费率，无法折算积分（Token 与次数统计照常）">—</span>`;
+      // 旧写法在这里输出字面 0，minimax/cline/qodercn 等上游不下发单次积分的渠道
+      // 会显示成「0 积分」，读起来像免费模型——所以改成「—」+说明。
+      // 说明里不提「无公开费率」：qodercn/qwenwork 有费率表，但上游同样只给渠道级扣减，
+      // 按费率反算会与平台概览的「消耗积分」（ledger 真账）打架（R43 两套并列口径）。
+      creditCell = `<span title="上游只给渠道级积分扣减、不下发单次积分，无法按模型折算；积分消耗见上方平台概览（Token 与次数统计照常）">—</span>`;
     }
     const tps = Number(m.avg_tok_per_sec) || 0;
     const ttfb = Number(m.avg_ttfb_ms) || 0;
