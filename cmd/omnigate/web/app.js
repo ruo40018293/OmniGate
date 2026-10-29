@@ -108,24 +108,30 @@ async function loadState() {
 // 并全量 render()，高频调用会让用户的积分 tooltip 反复消失、正在编辑的输入框
 // 被重绘打断。而这个功能只需要 in_use 这一个字段。
 //
-// 为什么仍走 /api/state 而不加专用端点：/api/state 是纯读、无副作用，且当前
-// 账号规模下开销可忽略（几十 KB JSON）。为它新增端点反而多一处要维护的契约。
+// 为什么改走 /api/inuse（R73）：原实现每 2 秒拉一次 /api/state —— 那是全量账号
+// 状态（积分/签到/渠道配置，3.2 KB），只为读一个 in_use 布尔，页面常驻就一直跑。
+// 17 天日志实测 /api/state 独占全部访问的 34.7%（32,250/93,001），其中绝大多数
+// 就是这条轮询；它既定位不了故障也复盘不了用户动作，纯粹把日志写成流水账。
+// 专用端点只回 {uid:{in_use,last}}，载荷只跟账号数有关。
 async function pollInUse() {
+  // 页面在后台：没有人在看徽标，不拉。
+  if (document.visibilityState === "hidden") return;
   // 用户正在输入时不要动 DOM：重渲染会把光标位置和已输入内容弄乱。
   const t = document.activeElement;
   if (t && (t.tagName === "INPUT" || t.tagName === "TEXTAREA")) return;
   try {
-    const st = await api("/api/state");
-    const accs = st.accounts || [];
+    const r = await api("/api/inuse");
+    const rows = r.accounts || {};
     // 只改徽标与高亮，不整体重建 DOM —— 保住 hover 态与滚动位置。
     for (const el of document.querySelectorAll(".acct-card")) {
-      const uid = el.dataset.uid;
-      const a = accs.find((x) => x.uid === uid);
-      if (!a) continue;
-      el.classList.toggle("in-use", !!a.in_use);
+      const v = rows[el.dataset.uid];
+      if (!v) continue;
+      el.classList.toggle("in-use", !!v.in_use);
       const box = el.querySelector(".acct-live-slot");
       if (!box) continue;
-      box.innerHTML = liveTagHtml(a);
+      // 复用 liveTagHtml 的同一份模板：把轻端点的 last 映回 last_used_at，
+      // 免得徽标文案在 render 与轮询两条路径上各写一遍、日后改一处忘一处。
+      box.innerHTML = liveTagHtml({ in_use: v.in_use, last_used_at: v.last });
     }
   } catch (e) { /* 轮询失败静默：不该因瞬时网络抖动弹错误 */ }
 }
@@ -2055,6 +2061,14 @@ function afterStateReady() {
   // 代价很小。
   pollInUse();
   setInterval(pollInUse, INUSE_POLL_MS);
+  // 切回前台立刻补一轮（R73）：后台期间上面所有轮询都被跳过，回来时不能让用户
+  // 盯着一屏几分钟前的数字等下一个周期。startLivePoll 自身幂等（有 timer 就返回）。
+  document.addEventListener("visibilitychange", () => {
+    if (document.visibilityState === "hidden") return;
+    loadStats();
+    pollInUse();
+    if (statsTabActive()) { loadAppLog(); startLivePoll(); }
+  });
 })();
 
 // ---------- 用量与流水面板 ----------
@@ -2264,6 +2278,7 @@ function bindMainTabs() {
       }
       if (b.dataset.mtab === "stats") {
         loadStats(); // 切到运行统计 tab 时拉最新（后台 30s 轮询兜底）
+        loadAppLog(); // 运行日志按 tab 门控（R73），切进来必须立刻补一次
         startLivePoll(); // 实时请求 2s 轮询，仅在本 tab 可见时运行（省 CPU/网络）
       } else {
         stopLivePoll(); // 离开 tab 立即停：排队状态只在用户看的时候才有意义
@@ -2348,6 +2363,9 @@ function stMarkStale() {
 }
 
 async function loadStats() {
+  // 页面在后台不轮询（R73）：切回前台时 visibilitychange 会立刻补一次，不会
+  // 留下「回到页面看到的是几分钟前的数字」的空窗。
+  if (document.visibilityState === "hidden") return;
   if (statsRefreshing) return;
   statsRefreshing = true;
   try {
@@ -2367,7 +2385,18 @@ async function loadStats() {
   }
 }
 
+// statsTabActive 当前是否停在「运行统计」tab —— 运行日志只有那个视图会渲染。
+function statsTabActive() {
+  const b = document.querySelector(".main-tabs .mtab.active");
+  return !!b && b.dataset.mtab === "stats";
+}
+
 async function loadAppLog() {
+  // 运行日志只喂「运行统计」tab（R73）：别的 tab 下 DOM 里没有它的容器，拉了
+  // 也白拉。这不影响「坏消息及时发现」——会话守卫、异常账号、里程碑走的是
+  // loadStats（与 tab 无关，见 init 里的注释）。切 tab 与切回前台都会立即补拉。
+  if (document.visibilityState === "hidden") return;
+  if (!statsTabActive()) return;
   try {
     const d = await api("/api/logs");
     renderAppLog(d.lines || []);
@@ -2655,6 +2684,8 @@ function fmtElapsed(started) {
 }
 
 async function refreshLive() {
+  // 窗口在后台不拉（R73）：liveTimer 只随 tab 启停，不管窗口可见性。
+  if (document.visibilityState === "hidden") return;
   try {
     const d = await api("/api/live");
     renderLive(d.entries || []);

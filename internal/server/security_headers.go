@@ -89,9 +89,39 @@ func SecurityHeaders(next http.Handler, logf func(format string, args ...any)) h
 		rec := &statusRecorder{ResponseWriter: w, status: http.StatusOK}
 		start := time.Now()
 		next.ServeHTTP(rec, r)
+		dur := time.Since(start)
+		if quietPoll(r, rec.status, dur) {
+			return
+		}
 		logf("access %s %s status=%d bytes=%d dur=%s", r.Method, r.URL.Path,
-			rec.status, rec.bytes, time.Since(start).Round(time.Millisecond))
+			rec.status, rec.bytes, dur.Round(time.Millisecond))
 	})
+}
+
+// quietPoll 判断这条访问日志是否属于「面板自动轮询」因而可以丢弃（R73）。
+//
+// 背景（17 天日志实测）：93,001 条 access 里 78,839 条（84.8%）是面板自己的
+// /api/* GET，其中 /api/state 一条就占 32,250 条。它们全是 200、耗时 <0.1s，
+// 既不能定位故障也不能复盘用户动作，却把日志写成 8.5K-18.8K 行/天，
+// 把真正该看的签到/失败/上游错误淹没。
+//
+// 判据取「GET + /api/ 前缀 + 2xx + 快」四条同时成立：
+//   - POST /api/* 是用户动作（登录、签到、刷新、换号），必须留痕；
+//   - 非 2xx 是异常，必须留痕（这条保证上面的省量不会吃掉故障证据）；
+//   - 慢的轮询（>500ms）留痕，那是面板卡顿的第一手线索。
+//
+// 想复盘轮询量本身，看 /api/stats 的请求计数与前端 fetch 的 console 即可。
+func quietPoll(r *http.Request, status int, dur time.Duration) bool {
+	if r.Method != http.MethodGet {
+		return false
+	}
+	if !strings.HasPrefix(r.URL.Path, "/api/") {
+		return false
+	}
+	if status < 200 || status >= 300 {
+		return false
+	}
+	return dur < 500*time.Millisecond
 }
 
 // wantsHTML 判断本次请求是否可能返回一个 HTML 文档。

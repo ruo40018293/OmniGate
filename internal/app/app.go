@@ -2085,6 +2085,13 @@ type AccountView struct {
 	InUse bool `json:"in_use"`
 }
 
+// inUseView 「调用中」轻端点（GET /api/inuse）的单账号载荷（R73）。
+// 字段名与 AccountView.InUse / LastUsedAt 的表意一致，前端两处读同一套语义。
+type inUseView struct {
+	InUse bool   `json:"in_use"`
+	Last  string `json:"last,omitempty"`
+}
+
 // StrategyOption 前端下拉的一项（值 + 中文名 + 说明）。
 type StrategyOption struct {
 	Value string `json:"value"`
@@ -2722,12 +2729,25 @@ func (a *App) HandleAPI(mux *http.ServeMux) {
 	})
 	mux.HandleFunc("GET /api/logs", func(w http.ResponseWriter, r *http.Request) {
 		fp := filepath.Join(filepath.Dir(a.cfg.StateFile), "app.log")
-		raw, _ := os.ReadFile(fp)
-		lines := strings.Split(string(raw), "\n")
-		if len(lines) > 300 {
-			lines = lines[len(lines)-300:]
+		// 只读尾部窗口（R73）：原实现每次轮询全量读 12 MB 再全量 split，
+		// 见 internal/app/tail.go 的注释。
+		writeJSON(w, http.StatusOK, map[string]any{"lines": tailLines(fp, 300)})
+	})
+	// 「调用中」徽标专用轻端点（R73）。
+	//
+	// 面板曾用 /api/state 每 2 秒轮询这份信息 —— 那是全量状态（全部账号 +
+	// 积分 + 签到 + 渠道配置，3.2 KB），只为读一个 in_use 布尔。17 天日志实测
+	// /api/state 占 32,250/93,001 条访问（34.7%）；本端点载荷只跟账号数有关。
+	//
+	// 刻意回 last：徽标在「调用中」消失后要落回「最近用过 hh:mm:ss」，只给布尔
+	// 会让它在两次全量刷新之间闪成空白。
+	mux.HandleFunc("GET /api/inuse", func(w http.ResponseWriter, r *http.Request) {
+		now := time.Now()
+		rows := map[string]inUseView{}
+		for _, s := range a.allStatuses() {
+			rows[s.UID] = inUseView{InUse: pool.InUse(s.LastUsedAt, now), Last: fmtTime(s.LastUsedAt)}
 		}
-		writeJSON(w, http.StatusOK, map[string]any{"lines": lines})
+		writeJSON(w, http.StatusOK, map[string]any{"accounts": rows})
 	})
 	// 运行统计面板（web 第三个 tab）：快照 = internal/stats 引擎的实时聚合，
 	// 载荷字段与 sidecar /capi/stats 对齐（前端 PR2 已按契约轮询）。
