@@ -201,6 +201,12 @@ func New(opts Options) (*App, error) {
 	// 日志文件 data/app.log
 	logFP := filepath.Join(filepath.Dir(opts.Config.StateFile), "app.log")
 	if err := os.MkdirAll(filepath.Dir(logFP), 0o755); err == nil {
+		// R70：体积超限且不是今天写的才归档（今天的行要留给 stats 重扫签到事件）
+		if rotated, rerr := rotateLogIfStale(logFP, logRotateLimit, time.Now()); rerr != nil {
+			log.Printf("日志轮转失败（不影响运行）: %v", rerr)
+		} else if rotated {
+			log.Printf("日志已归档: %s -> %s%s", logFP, logFP, logRotateSuffix)
+		}
 		f, err := os.OpenFile(logFP, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0o644)
 		if err == nil {
 			a.logFile = f
