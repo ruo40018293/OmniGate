@@ -127,9 +127,9 @@ jobs:
       # **恒检查 0 个文件**（浅克隆不创建 remote-tracking ref、`HEAD~1` 也不存在）——
       # 即"在 CI 里放了一盏不亮的灯"。改为完整历史后 diff 基准才真实存在。
       #
-      # 语义说明：基点优先取 origin/master；工作流手动触发时 HEAD 即为 origin/master，
+      # 语义说明：基点取**默认分支**（origin/main；不要写死 master，本仓库默认分支是 main）；手动触发时 HEAD 即默认分支，
       # 三点 diff 为空属正常（那是"没有新改动"，不是"检查失效"）。
-      # 仍保持 advisory：从很旧 master 拉的分支，diff 会含上述存量违规文件。
+      # 仍保持 advisory：从很旧默认分支拉出来的分支，diff 会含上述存量违规文件。
       - name: Check trailing newline of changed files (advisory)
         if: matrix.name == 'linux-amd64'
         continue-on-error: true
