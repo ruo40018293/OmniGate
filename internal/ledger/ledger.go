@@ -109,8 +109,13 @@ func (l *Ledger) trimCurrentMonth() {
 		if err != nil {
 			continue
 		}
-		// 快速路径：首行时间戳已 ≤ cutTs，无需裁剪
-		if idx := findLineTs(raw); idx >= 0 && idx <= cutTs {
+		// 快速路径：首行（append-only 文件里最旧的一条）已在裁剪边界内
+		// → 整个文件都是新的，无需裁剪。
+		// R69 修：这里的判断原来是反的（idx <= cutTs 就 continue），而文件是
+		// append-only、首行正是最旧的一条——只要文件里存在过期条目，首行时间戳
+		// 必然 <= cutTs，于是每次都走「无需裁剪」，7 天裁剪从未真正执行过
+		// （实测 usage-202610.jsonl 留着 10-13 起的 16 天数据、1.8MB 无界增长）。
+		if idx := findLineTs(raw); idx >= cutTs {
 			continue
 		}
 		// 双指针原地过滤（避免分配临时数组）
@@ -568,6 +573,46 @@ func (l *Ledger) Query(days int, enrich func(uid string) (name, channel string))
 		}
 	}
 	return st
+}
+
+// DailyCompletion 汇总最近 days 天内每天的 completion（输出）token 数，
+// 键为本地日期 "2006-01-02"，值为当日输出合计。仅 stats 启动回填用（R69）：
+// stats.json 的 out_days 是 R66 才引入的字段，之前的历史日没有输出归档，
+// 若不回填则「7 日/30 日输出」窗口恒等于今日输出（实测 out7 == out_today）。
+//
+// 口径与 stats.AddUsage 的 completion 一侧一致（同一份 UsageEntry.CT），
+// 按本地时区切日（与 stats.todayKey 相同）。注意单文件只保留 keepDays 天
+// 原始条目，故实际最多能回填 7 天，更早的日子仍缺——调用方按「缺失才填」
+// 处理，不会覆盖已有归档。
+func (l *Ledger) DailyCompletion(days int) map[string]int64 {
+	out := map[string]int64{}
+	if days <= 0 {
+		return out
+	}
+	l.Flush()
+	now := time.Now()
+	from := now.AddDate(0, 0, -(days - 1))
+	fromTs := time.Date(from.Year(), from.Month(), from.Day(), 0, 0, 0, 0, now.Location()).Unix()
+
+	// 与 Query 同口径逐月枚举覆盖的分段（窗口跨月/跨年是常态）。
+	months := map[string]bool{}
+	for t := time.Date(from.Year(), from.Month(), 1, 0, 0, 0, 0, now.Location()); !t.After(now); t = t.AddDate(0, 1, 0) {
+		months[t.Format("200601")] = true
+	}
+	for m := range months {
+		fp := filepath.Join(l.dir, fmt.Sprintf("usage-%s.jsonl", m))
+		scanJSONL(fp, func(line []byte) {
+			var e UsageEntry
+			if json.Unmarshal(line, &e) != nil {
+				return
+			}
+			if e.Ts < fromTs || e.CT == 0 {
+				return
+			}
+			out[time.Unix(e.Ts, 0).Format("2006-01-02")] += e.CT
+		})
+	}
+	return out
 }
 
 // earliestCreditTs 全量 credit 流水最早时间戳（recorded_since 兜底，usage 为空时用）。

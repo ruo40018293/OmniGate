@@ -186,6 +186,12 @@ func New(opts Options) (*App, error) {
 	// 运行统计引擎（data/stats.json）：初始化失败不致命——端点回 disabled、插桩/喂入全判 nil
 	if st, err := statsEngine.New(filepath.Dir(opts.Config.StateFile), log.Printf); err == nil {
 		a.stats = st
+		// R69：用流水回填历史输出量（out_days 是 R66 新增字段，老数据没有输出归档，
+		// 不回填则 7 日/30 日输出窗口恒等于今日）。必须在开始喂入前做：回填只填
+		// 「今天之前且缺失」的日子，与实时计数不重叠。
+		if a.ledger != nil {
+			st.BackfillOut(a.ledger.DailyCompletion(7))
+		}
 		a.statsStop = make(chan struct{})
 		go st.RunFlusher(a.statsStop)
 	} else {

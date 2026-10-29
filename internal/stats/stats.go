@@ -366,6 +366,43 @@ func (s *Stats) rollDayLocked(now time.Time) {
 	s.flushLocked()
 }
 
+// BackfillOut 用流水里的历史 completion（输出）token 回填 out_days（R69）。
+//
+// 为什么需要：out_days 是 R66 引入的字段，之前的历史日只有「合计」归档（token_days），
+// 没有输出归档。结果是 Out7/Out30 窗口恒等于今日输出（实测 out7 == out_today == 53289），
+// 而 In7 = Days7 - Out7 会被同步抬高——两个窗口都在说谎。启动时用 ledger 的原始流水
+// （同一份 UsageEntry.CT）回填，让窗口立刻变真。
+//
+// 规则：
+//   - 只填「今天之前」且 outDays 里不存在的日子；今天由实时计数维护，绝不覆盖。
+//   - 已存在的历史日也不覆盖（磁盘归档优先，避免与 rollDayLocked 重复累加）。
+//   - 只在启动阶段调用一次（New 之后、开始喂入之前）；写入 dirty 由 RunFlusher 落盘。
+//
+// 返回实际回填的天数（0 表示无需回填，例如刚升级完第一次启动之外的场合）。
+func (s *Stats) BackfillOut(daily map[string]int64) int {
+	if len(daily) == 0 {
+		return 0
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	n := 0
+	for day, v := range daily {
+		if day >= s.today { // 字符串比较即日期比较（"2006-01-02" 定长）
+			continue
+		}
+		if _, ok := s.outDays[day]; ok {
+			continue
+		}
+		s.outDays[day] = v
+		n++
+	}
+	if n > 0 {
+		s.dirty = true
+		s.logf("运行统计输出量回填：out_days 补 %d 天（来源 ledger 流水）", n)
+	}
+	return n
+}
+
 // ApplyPoll 应用一份账号状态快照（进程内定时器喂入；等价于轮询 /api/state 的差值记账）。
 //
 // 口径：仅记余额下降差为今日花费；余额上涨不计收入（收入走签到事件口径，见 events.go
