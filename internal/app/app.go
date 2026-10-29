@@ -2699,6 +2699,22 @@ func (a *App) HandleAPI(mux *http.ServeMux) {
 	mux.HandleFunc("GET /api/account/tasks_status", func(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusOK, a.TaskRunView())
 	})
+	// 猫猫旅行：单个账号手动「派出 / 到站领取」。
+	//
+	// 与 /api/account/tasks 的区别：旅行只有 1~2 次上游往返，同步返回具体结果
+	//（已派出 / 在途 / 到站领取 +N），不需要任务那套异步进度轮询。
+	mux.HandleFunc("POST /api/account/growth_travel", func(w http.ResponseWriter, r *http.Request) {
+		var req struct {
+			UID string `json:"uid"`
+		}
+		_ = json.NewDecoder(r.Body).Decode(&req)
+		msg, err := a.RunGrowthTravel(req.UID)
+		if err != nil {
+			apiError(w, http.StatusBadRequest, err.Error())
+			return
+		}
+		writeJSON(w, http.StatusOK, map[string]any{"ok": true, "msg": msg})
+	})
 	mux.HandleFunc("POST /api/account/nickname", func(w http.ResponseWriter, r *http.Request) {
 		var req struct {
 			UID      string `json:"uid"`

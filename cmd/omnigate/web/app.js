@@ -607,10 +607,16 @@ function renderAccounts() {
     const taskBtn = a.growth
       ? `<span class="icon-op" title="执行成长任务（会真实改变账号状态）" onclick="runTasks('${a.uid}')">★</span>`
       : "";
+    // 猫猫旅行入口：与 ★（成长任务）分开——旅行一次按钮一步、结果确定，
+    // 所以同步返回，不走进度轮询。同样只看后端下发的 a.growth。
+    const travelBtn = a.growth
+      ? `<span class="icon-op" title="猫猫旅行：派出或到站领取（会真实改变账号状态）" onclick="runTravel('${a.uid}')">🐱</span>`
+      : "";
     const ops = noCredits
       ? `<span class="icon-op off" title="固定账号，不可停用/删除" onclick="return false">🔒</span>`
       : `${checkinBtn}
           ${taskBtn}
+          ${travelBtn}
           <span class="icon-op" title="刷新积分" onclick="refreshOne('${a.uid}')">↻</span>
           <span class="icon-op warn" title="${disableTitle}" onclick="toggleDisable('${a.uid}',${a.disabled})">${disableIcon}</span>
           <span class="icon-op danger" title="删除账号" onclick="removeAcct('${a.uid}')">✕</span>`;
@@ -1197,6 +1203,30 @@ async function runTasks(uid) {
     await api("/api/account/tasks", { uid: uid || "", include_mp: false });
     toast("任务已开始执行，进度显示在账号列表上方");
     startTaskPolling();
+  } catch (e) { toast(e.message); }
+}
+
+// runTravel 立即对单个账号执行一次猫猫旅行（派出或到站领取）。
+//
+// 与 runTasks 的区别：旅行只有 1~2 次上游往返，后端同步返回具体结果
+//（已派出 / 在途 / 到站领取 +N），所以这里不轮询进度，直接把结果告诉用户。
+async function runTravel(uid) {
+  // 成长任务正在跑时旅行会与它抢同一账号的状态，先让它跑完再说。
+  if (taskPollTimer) {
+    toast("成长任务正在执行，等它跑完再操作旅行");
+    return;
+  }
+  const msg =
+    "即将为该账号执行一次「猫猫旅行」。\n\n" +
+    "⚠️ 这会真实改变账号状态：空闲时派出去（消耗当日次数），已到站则领取奖励（不可撤销）。\n\n" +
+    "确定继续？";
+  if (!confirm(msg)) return;
+  snapshotCredits();
+  try {
+    const r = await api("/api/account/growth_travel", { uid });
+    await loadState();
+    const gain = creditDelta()[uid];
+    toast(`猫猫旅行：${r.msg || "完成"}${gain ? `，积分 +${gain}` : ""}`);
   } catch (e) { toast(e.message); }
 }
 

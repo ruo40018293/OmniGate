@@ -40,6 +40,15 @@ type growthTaskRunner interface {
 	GrowthRunTasks(a *auth.Auth, opts upstream.GrowthTaskOptions) upstream.GrowthTaskReport
 }
 
+// growthTraveler 由支持「猫猫旅行」的上游客户端实现（当前为 workbuddy 渠道）。
+//
+// 与 growthTaskRunner 分立两个接口：旅行只有「查状态 → 领取/派出」1~2 次往返，
+// 结果是一条短摘要；成长任务要几十个请求、要进度回调。合成一个接口会逼着
+// 所有渠道同时实现两套方法。App 只探测当前需要的那个。
+type growthTraveler interface {
+	GrowthTravelOnce(a *auth.Auth, locationID int) (msg string, err error)
+}
+
 // taskRunState 一次任务执行的进度与结果（受 App.taskMu 保护）。
 type taskRunState struct {
 	running    bool
@@ -383,4 +392,53 @@ func (a *App) channelSupportsGrowth(kind provider.Kind) bool {
 // 或「接口不存在」。显式排除可避免面板显示一个必然失败的按钮。
 func isGrowthUnsupportedChannel(kind provider.Kind) bool {
 	return kind != provider.WorkBuddy
+}
+
+// RunGrowthTravel 立即对单个账号执行一次猫猫旅行（面板账号行上的 🐱 按钮）。
+//
+// ## 为什么不受 schedule.growth_travel 开关约束
+//
+// 那个开关管的是「定时自动跑」；用户手动点了按钮就是明确要执行这一次。
+// 若还要求先开开关，按钮就是个摆设——这正是「找不到在哪执行」的由来。
+// 目的地仍沿用配置里的 travel_location（0/越界视为 1），保证手动与自动落到同一处。
+//
+// ## 为什么同步返回
+//
+// 旅行只有 1~2 次上游往返（查状态 → 领取 或 派出），亚秒级；不像成长任务
+// 要几十个请求那样必须异步轮询。同步能让用户立刻看到「已派出 / 在途 / 到站领取 +N」。
+//
+// ## 失败不罚号
+//
+// 这里只是替用户点一下按钮。账号健康由会话失效/限流路径负责，不在此处改冷却。
+func (a *App) RunGrowthTravel(uid string) (string, error) {
+	uid = strings.TrimSpace(uid)
+	if uid == "" {
+		return "", errors.New("账号不能为空")
+	}
+	a.mu.Lock()
+	rt, au := a.findRuntimeAuth(uid)
+	loc := a.cfg.Schedule.GrowthTravelLocation
+	a.mu.Unlock()
+	if rt == nil || au == nil {
+		return "", fmt.Errorf("账号不存在：%s", uid)
+	}
+	tr, ok := rt.Upstream.(growthTraveler)
+	if !ok {
+		return "", fmt.Errorf("渠道 %s 不支持猫猫旅行（成长中心目前仅 WorkBuddy 国内版提供）", rt.Kind)
+	}
+	if loc < 1 || loc > 4 {
+		loc = 1
+	}
+	msg, err := tr.GrowthTravelOnce(au, loc)
+	if err != nil {
+		log.Printf("growth travel manual failed platform=%s uid=%s err=%v", rt.Kind, uid, err)
+		return "", err
+	}
+	log.Printf("growth travel manual ok platform=%s uid=%s loc=%d msg=%s", rt.Kind, uid, loc, msg)
+	// 到站领取会加积分。不刷新的话面板还显示旧余额，用户会以为没领到
+	// ——与 refreshCreditsAfterTasks 同一个理由。
+	if _, e := a.RefreshCredits(uid); e != nil {
+		log.Printf("growth travel credit refresh failed uid=%s err=%v", uid, e)
+	}
+	return msg, nil
 }
