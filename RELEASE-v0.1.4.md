@@ -34,7 +34,9 @@ Codex 这类无状态客户端每轮重放整段历史，工具结果里的截�
 ## 升级方式
 
 1. 下载 `omnigate-windows-amd64.exe`，覆盖旧版即可（配置与账本数据兼容，无需迁移）。
-2. macOS 用户下载 `WorkBuddyAPI-0.1.4-<arch>.dmg`。
+2. macOS 用户下载 `WorkBuddyAPI-0.1.4-amd64.dmg`（Intel）或 `WorkBuddyAPI-0.1.4-arm64.dmg`（Apple 芯片）。
+
+   > v0.1.4 是改名前的版本，资产名沿用旧名；v0.1.5 起统一为 `OmniGate-*`。
 3. Linux 用户下载对应架构的二进制。
 
 ## 新增配置项
