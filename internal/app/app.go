@@ -133,8 +133,8 @@ type App struct {
 	// 由 main.go 注入；nil 时仅写配置不热更。
 	proxySyncer func(proxies map[string]string)
 
-	refreshMu  sync.Mutex // 防并发刷新积分
-	refreshing bool
+	refreshMu sync.Mutex // 保护批量作业状态（bulk，见 bulk.go）
+	bulk      *bulkRun
 
 	// ledger 用量/积分双流水（data/ledger/）；锦上添花统计，nil = 未启用
 	ledger     *ledger.Ledger
@@ -1382,27 +1382,19 @@ func (a *App) CheckinAccount(uid string) (scheduler.CheckinResult, error) {
 }
 
 // CheckinAll 全部账号立即签到。
+// CheckinAll 对全部可签到账号执行签到（同步入口；HTTP 走 StartBulk）。
 func (a *App) CheckinAll() []scheduler.CheckinResult {
+	return a.checkinAllWithProgress(bulkProgress{}, a.checkinTargets())
+}
+
+// checkinAllWithProgress 是批量签到的实际循环；p 为零值时不汇报进度。
+func (a *App) checkinAllWithProgress(p bulkProgress, targets []bulkTarget) []scheduler.CheckinResult {
 	results := make([]scheduler.CheckinResult, 0)
-	for _, rt := range a.runtimes {
-		// 别名渠道复用同一 Pool 且无独立 Scheduler：计入会重复签到同一批账号。
-		if rt == nil || rt.Pool == nil || rt.Scheduler == nil || rt.Alias {
-			continue
-		}
-		if noExplicitCheckin(rt.Kind) { // 无签到活动渠道，跳过
-			continue
-		}
-		for _, st := range rt.Pool.List() {
-			if st.Disabled {
-				results = append(results, scheduler.CheckinResult{UID: st.UID, Msg: "账号已禁用"})
-				continue
-			}
-			res, err := rt.Scheduler.CheckinAccount(st.UID)
-			if err != nil {
-				res = scheduler.CheckinResult{UID: st.UID, Msg: err.Error()}
-			}
-			results = append(results, res)
-		}
+	for _, t := range targets {
+		p.start(t.rt.Kind.String(), t.uid)
+		res := a.checkinOne(t.rt, t)
+		results = append(results, res)
+		p.done(res.OK)
 	}
 	ok := 0
 	for _, r := range results {
@@ -1412,6 +1404,18 @@ func (a *App) CheckinAll() []scheduler.CheckinResult {
 	}
 	log.Printf("批量签到完成：total=%d ok=%d failed=%d", len(results), ok, len(results)-ok)
 	return results
+}
+
+// checkinOne 对单个账号签到；禁用账号直接记「账号已禁用」，不打上游。
+func (a *App) checkinOne(rt *Runtime, t bulkTarget) scheduler.CheckinResult {
+	if t.disabled {
+		return scheduler.CheckinResult{UID: t.uid, Msg: "账号已禁用"}
+	}
+	res, err := rt.Scheduler.CheckinAccount(t.uid)
+	if err != nil {
+		return scheduler.CheckinResult{UID: t.uid, Msg: err.Error()}
+	}
+	return res
 }
 
 // CreditRefreshInterval 积分自动刷新间隔。
@@ -1600,52 +1604,57 @@ func (a *App) RefreshCredits(uid string) (int64, error) {
 }
 
 // RefreshAll 刷新全部账号积分，返回汇总（供托盘消息框 / Web UI）。
+// RefreshAll 刷新全部账号的积分（同步入口；托盘与测试用，HTTP 走 StartBulk）。
 func (a *App) RefreshAll() RefreshSummary {
-	a.refreshMu.Lock()
-	if a.refreshing {
-		a.refreshMu.Unlock()
-		return RefreshSummary{Busy: true}
-	}
-	a.refreshing = true
-	a.refreshMu.Unlock()
-	defer func() {
-		a.refreshMu.Lock()
-		a.refreshing = false
-		a.refreshMu.Unlock()
-	}()
+	return a.refreshAllWithProgress(bulkProgress{}, a.refreshTargets())
+}
+
+// refreshAllWithProgress 是刷新的实际循环；p 为零值时不汇报进度。
+//
+// 循环体与计数必须共用 refreshTargets：各枚举一遍会让「进度总数」和
+// 「实际处理数」按两套判据算，进度条先跳后停。
+func (a *App) refreshAllWithProgress(p bulkProgress, targets []bulkTarget) RefreshSummary {
 	sum := RefreshSummary{Platforms: map[string]PlatformSummary{}}
-	for _, rt := range a.runtimes {
-		// 别名渠道复用同一 Pool：计入会重复刷新同一批账号。
-		if rt == nil || rt.Pool == nil || rt.Upstream == nil || rt.Alias {
-			continue
+	for _, t := range targets {
+		platform := t.rt.Kind.String()
+		p.start(platform, t.uid)
+		ps, ok := sum.Platforms[platform]
+		if !ok {
+			ps = PlatformSummary{Accounts: []AccountRefresh{}}
 		}
-		ps := PlatformSummary{Accounts: []AccountRefresh{}}
-		for _, st := range rt.Pool.List() {
-			au := rt.Pool.AuthByUID(st.UID)
-			// 凭据可用性判据：accessToken 或 refreshToken 任一非空即可。
-			// glm 的 accessToken 允许为空（凭据本体是 refresh_token，见 LoadGLMDir），
-			// 只查 accessToken 会把它误判成「no token」而永不刷新。
-			if au == nil || (au.AccessTokenValue() == "" && au.RefreshTokenValue() == "") {
-				ps.Failed++
-				ps.Accounts = append(ps.Accounts, AccountRefresh{UID: st.UID, OK: false, Msg: "no token"})
-				continue
-			}
-			if usable, expiring, unusable, err := a.creditTotals(rt, au); err == nil {
-				rt.Pool.SetCreditDetail(st.UID, usable, expiring, unusable)
-				ps.OK++
-				ps.Accounts = append(ps.Accounts, AccountRefresh{UID: st.UID, OK: true, Remain: usable})
-			} else {
-				ps.Failed++
-				ps.Accounts = append(ps.Accounts, AccountRefresh{UID: st.UID, OK: false, Msg: shortErr(err)})
-				log.Printf("credits refresh failed platform=%s uid=%s err=%v", rt.Kind, st.UID, err)
-			}
+		res := a.refreshOne(t.rt, t.uid)
+		ps.Accounts = append(ps.Accounts, res)
+		if res.OK {
+			ps.OK++
+			sum.OK++
+		} else {
+			ps.Failed++
+			sum.Failed++
 		}
-		sum.Total += ps.OK + ps.Failed
-		sum.OK += ps.OK
-		sum.Failed += ps.Failed
-		sum.Platforms[rt.Kind.String()] = ps
+		sum.Total++
+		sum.Platforms[platform] = ps
+		p.done(res.OK)
 	}
 	return sum
+}
+
+// refreshOne 刷新单个账号的积分，返回面板用的结果行。
+// 失败只记在结果的 Msg 里，不中断整批（一个号掉线不该让其余号刷不到）。
+func (a *App) refreshOne(rt *Runtime, uid string) AccountRefresh {
+	au := rt.Pool.AuthByUID(uid)
+	// 凭据可用性判据：accessToken 或 refreshToken 任一非空即可。
+	// glm 的 accessToken 允许为空（凭据本体是 refresh_token，见 LoadGLMDir），
+	// 只查 accessToken 会把它误判成「no token」而永不刷新。
+	if au == nil || (au.AccessTokenValue() == "" && au.RefreshTokenValue() == "") {
+		return AccountRefresh{UID: uid, OK: false, Msg: "no token"}
+	}
+	usable, expiring, unusable, err := a.creditTotals(rt, au)
+	if err != nil {
+		log.Printf("credits refresh failed platform=%s uid=%s err=%v", rt.Kind, uid, err)
+		return AccountRefresh{UID: uid, OK: false, Msg: shortErr(err)}
+	}
+	rt.Pool.SetCreditDetail(uid, usable, expiring, unusable)
+	return AccountRefresh{UID: uid, OK: true, Remain: usable}
 }
 
 // RefreshSummary 积分刷新汇总（托盘消息框内容）。
@@ -2468,9 +2477,14 @@ func (a *App) HandleAPI(mux *http.ServeMux) {
 		}
 		writeJSON(w, http.StatusOK, res)
 	})
+	// 批量动作（刷新积分 / 全部签到）一律「立刻受理 + 进度轮询」：一次作业是
+	// 「渠道 × 账号」次上游往返，生产实测最慢 122.99s，同步返回会让面板在两分钟里
+	// 既没结果也没进度。载荷只回 started，进度走对应 *_status（见 bulk.go）。
 	mux.HandleFunc("POST /api/account/checkin_all", func(w http.ResponseWriter, r *http.Request) {
-		results := a.CheckinAll()
-		writeJSON(w, http.StatusOK, map[string]any{"results": results})
+		a.acceptBulk(w, bulkCheckin)
+	})
+	mux.HandleFunc("GET /api/account/checkin_all_status", func(w http.ResponseWriter, r *http.Request) {
+		writeJSON(w, http.StatusOK, a.BulkView())
 	})
 	mux.HandleFunc("POST /api/account/refresh", func(w http.ResponseWriter, r *http.Request) {
 		var req struct {
@@ -2485,7 +2499,10 @@ func (a *App) HandleAPI(mux *http.ServeMux) {
 		writeJSON(w, http.StatusOK, map[string]any{"remain": remain})
 	})
 	mux.HandleFunc("POST /api/account/refresh_all", func(w http.ResponseWriter, r *http.Request) {
-		writeJSON(w, http.StatusOK, a.RefreshAll())
+		a.acceptBulk(w, bulkRefresh)
+	})
+	mux.HandleFunc("GET /api/account/refresh_all_status", func(w http.ResponseWriter, r *http.Request) {
+		writeJSON(w, http.StatusOK, a.BulkView())
 	})
 	mux.HandleFunc("POST /api/account/remove", func(w http.ResponseWriter, r *http.Request) {
 		var req struct {

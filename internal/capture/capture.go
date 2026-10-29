@@ -29,6 +29,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -47,8 +48,17 @@ const EnvOff = "OMNIGATE_CAPTURE_OFF"
 // 但网关类错误页（openresty 502 之类）可能是整页 HTML，限一个上界防爆盘。
 const maxBodyBytes = 64 << 10
 
-// maxFiles 目录内文件数上限。超过后从最旧的开始删，保证长期常开不会无限增长。
-const maxFiles = 500
+// 目录上限。超过任一条就按修改时间从最旧删，保证长期常开不会无限增长。
+//
+// 为什么不能只封文件数：单个取证文件可达 ~900KB（长上下文的出站请求体 +
+// 64KB 回包），500 个能堆到 400MB 以上；实测 115 个文件就已经 18MB。
+// 按字节封顶才是真正起作用的那一条。
+var (
+	maxFiles              = 500            // 文件数上限
+	maxBytes        int64 = 32 << 20       // 总字节上限（32MB）
+	pruneSlackFiles       = 50             // 一次多删 50 个（滞后修剪，避免每个请求都扫目录）
+	pruneSlackBytes       = int64(8 << 20) // 一次多删 8MB，同上
+)
 
 // dirOnce 缓存解析后的目录，避免每个请求都做一次 MkdirAll 系统调用。
 var (
@@ -173,6 +183,10 @@ func Save(rec Record) string {
 	if err := os.WriteFile(full, buf, 0o644); err != nil {
 		return ""
 	}
+	// 写完再看一次：写前修剪留的余量按「滞后目标」算，新文件可能刚好把它顶回
+	// 上限之上（单文件可达 ~900KB）。取证是异常路径，多扫一次目录无所谓；
+	// 「目录不会超过 maxBytes」这条承诺必须落盘后也成立。
+	pruneIfNeeded(dir)
 	atomic.AddInt64(&savedCount, 1)
 	return full
 }
@@ -213,6 +227,7 @@ func SaveSystem(name string, meta map[string]any) string {
 	if err := os.WriteFile(full, buf, 0o644); err != nil {
 		return ""
 	}
+	pruneIfNeeded(dir) // 同 Save：落盘后补一次，保证总字节上限成立
 	atomic.AddInt64(&savedCount, 1)
 	return full
 }
@@ -242,19 +257,27 @@ func sanitizeName(s string) string {
 	return b.String()
 }
 
-// pruneIfNeeded 目录内 .json 文件超过 maxFiles 时，按修改时间删最旧的一批。
-// 只在真正要写盘时调用，读目录失败就放弃修剪（不阻塞写盘）。
+// pruneIfNeeded 修剪取证目录：文件数超过 maxFiles 或总字节超过 maxBytes 时，
+// 按修改时间从最旧的开始删，直到回到「滞后目标」（上限减掉一段 slack）以内。
+//
+// 只按文件数封顶是不够的：单文件可达 ~900KB，500 个能堆到 400MB+。字节数才是
+// 真正决定磁盘占用的那一条，所以两条都查、两条都修。
+//
+// 只在真正要写盘时调用；读目录失败就放弃修剪（绝不阻塞写盘）。
 func pruneIfNeeded(dir string) {
 	ents, err := os.ReadDir(dir)
-	if err != nil || len(ents) < maxFiles {
+	if err != nil {
 		return
 	}
 	type entry struct {
 		name string
 		mod  time.Time
+		size int64
 	}
 	items := make([]entry, 0, len(ents))
+	var total int64
 	for _, e := range ents {
+		// 只修剪自己写的 .json；目录里别的东西（手工备注、外部拷贝）一律不碰。
 		if e.IsDir() || !strings.HasSuffix(e.Name(), ".json") {
 			continue
 		}
@@ -262,25 +285,35 @@ func pruneIfNeeded(dir string) {
 		if err != nil {
 			continue
 		}
-		items = append(items, entry{e.Name(), info.ModTime()})
+		items = append(items, entry{e.Name(), info.ModTime(), info.Size()})
+		total += info.Size()
 	}
-	if len(items) < maxFiles {
+	// 快路径：两个上限都没超，直接返回（绝大多数请求走这里）。
+	if len(items) < maxFiles && total <= maxBytes {
 		return
 	}
-	// 简单插入排序取最旧的 (len-maxFiles+容差) 个：文件数上限 500，O(n²) 完全可接受。
-	need := len(items) - maxFiles + 50 // 一次多删 50 个，避免每个请求都修剪
-	if need <= 0 {
-		return
+
+	wantCount := maxFiles - pruneSlackFiles
+	if wantCount < 0 {
+		wantCount = 0
 	}
-	for i := 0; i < need && i < len(items); i++ {
-		min := i
-		for j := i + 1; j < len(items); j++ {
-			if items[j].mod.Before(items[min].mod) {
-				min = j
-			}
+	wantBytes := maxBytes - pruneSlackBytes
+	if wantBytes < 0 {
+		wantBytes = 0
+	}
+
+	sort.Slice(items, func(i, j int) bool { return items[i].mod.Before(items[j].mod) })
+	left, bytes := len(items), total
+	for _, it := range items {
+		if left <= wantCount && bytes <= wantBytes {
+			return
 		}
-		items[i], items[min] = items[min], items[i]
-		_ = os.Remove(filepath.Join(dir, items[i].name))
+		if err := os.Remove(filepath.Join(dir, it.name)); err != nil {
+			// 删不掉（被占用/权限）就不要把计数减掉：下轮写盘时还会再试。
+			continue
+		}
+		left--
+		bytes -= it.size
 	}
 }
 

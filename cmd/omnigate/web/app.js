@@ -1061,33 +1061,102 @@ function removeAcct(uid) {
   });
 }
 
-// ---------- 批量操作 ----------
-async function checkinAll() {
-  $("btnCheckinAll").disabled = true;
+// ---------- 批量操作（刷新积分 / 全部签到）----------
+//
+// 后端从 R74 起是「立刻受理 + 进度可查」：POST 只回 {started,busy}，结果由
+// GET *_status 轮询。改成轮询是因为生产实测 refresh_all 286 次里 229 次超过 1s、
+// 最慢 122.99s —— 同步等一个两分钟的请求，用户只会看到「点了没反应」然后
+// 反复点，而反复点会让两批作业叠着抢上游配额。
+const BULK_META = {
+  refresh: {
+    post: "/api/account/refresh_all",
+    status: "/api/account/refresh_all_status",
+    btn: "btnRefreshAll",
+    verb: "刷新",
+    label: "积分刷新",
+  },
+  checkin: {
+    post: "/api/account/checkin_all",
+    status: "/api/account/checkin_all_status",
+    btn: "btnCheckinAll",
+    verb: "签到",
+    label: "批量签到",
+  },
+};
+// bulkBusy 前端侧互斥：两个按钮共用一个作业槽，重复点只会得到一个「已有任务」。
+let bulkBusy = false;
+
+async function checkinAll() { await runBulk("checkin"); }
+async function refreshAll() { await runBulk("refresh"); }
+
+// runBulk 发起批量作业并轮询到结束；返回结束时的状态快照（被拒/失败返回 null）。
+// opts.silent=true：不弹完成 toast、不重载账号状态（调用方自己组织文案）。
+async function runBulk(kind, opts) {
+  const meta = BULK_META[kind];
+  if (!meta) return null;
+  const silent = !!(opts && opts.silent);
+  if (bulkBusy) { toast("已有批量任务在进行中，等它跑完"); return null; }
+  const btn = $(meta.btn);
+  const idleText = btn ? btn.textContent : "";
+  bulkBusy = true;
+  if (btn) { btn.disabled = true; btn.textContent = meta.verb + "中…"; }
   try {
-    const r = await api("/api/account/checkin_all", {});
-    const ok = (r.results || []).filter((x) => x.ok).length;
-    const pending = (r.results || []).filter((x) => !x.ok && x.retryable).length;
-    const skip = (state.accounts || []).filter((a) => noExplicitCheckin(a.group)).length;
-    const total = (r.results || []).length + skip;
-    const parts = [skip ? `成功 ${ok} / ${total}（${skip} 个无签到活动跳过）` : `成功 ${ok} / 共 ${total}`];
-    if (pending) parts.push(`${pending} 个未领到将在窗口内自动重试`);
-    toast(`批量签到完成：${parts.join("；")}`);
-    loadState();
-  } catch (e) { toast(e.message); } finally {
-    $("btnCheckinAll").disabled = false;
+    const r = await api(meta.post, {});
+    if (!r.started) {
+      toast(r.busy ? "已有批量任务在进行中" : "没有可处理的账号");
+      return null;
+    }
+    const v = await pollBulk(meta, btn);
+    if (!v) { toast(meta.label + "进度查询失败"); return null; }
+    if (!silent) { toast(bulkSummary(kind, v)); await loadState(); }
+    return v;
+  } catch (e) {
+    toast(e.message);
+    return null;
+  } finally {
+    bulkBusy = false;
+    if (btn) { btn.disabled = false; btn.textContent = idleText; btn.title = ""; }
   }
 }
 
-async function refreshAll() {
-  $("btnRefreshAll").disabled = true;
-  try {
-    const r = await api("/api/account/refresh_all", {});
-    toast(r.busy ? "已有刷新任务进行中" : `积分刷新完成：成功 ${r.ok} / 失败 ${r.failed}`);
-    loadState();
-  } catch (e) { toast(e.message); } finally {
-    $("btnRefreshAll").disabled = false;
+// pollBulk 轮询进度直到作业结束；页面隐藏时停发请求（R73 的轮询纪律），
+// 回到前台后自动继续，不会因为切走一次就永远丢失进度。
+function pollBulk(meta, btn) {
+  return new Promise((resolve) => {
+    const tick = async () => {
+      if (document.visibilityState === "hidden") { setTimeout(tick, 600); return; }
+      let v;
+      try {
+        v = await api(meta.status);
+      } catch (e) {
+        resolve(null);
+        return;
+      }
+      if (btn && v.running) {
+        btn.textContent = meta.verb + "中 " + (v.done || 0) + "/" + (v.total || 0);
+        // current = 正在处理的「渠道/账号」，给悬停在按钮上的人看具体在等谁。
+        btn.title = v.current ? "正在处理 " + v.current : meta.label + "进行中";
+      }
+      if (v.running) { setTimeout(tick, 600); return; }
+      resolve(v);
+    };
+    tick();
+  });
+}
+
+// bulkSummary 把结束快照翻成一句人话。
+function bulkSummary(kind, v) {
+  if (kind === "refresh") {
+    return "积分刷新完成：成功 " + (v.ok || 0) + " / 失败 " + (v.failed || 0) + "（共 " + (v.total || 0) + " 个账号）";
   }
+  // 签到：total 只含真正去打上游的账号，无签到活动的渠道后端整条跳过；
+  // 这里补一句跳过的个数，否则「成功 4 / 共 4」会让人以为漏了账号。
+  const skip = (state && state.accounts ? state.accounts : []).filter((a) => noExplicitCheckin(a.group)).length;
+  const pending = (v.checkin || []).filter((x) => !x.ok && x.retryable).length;
+  const parts = ["成功 " + (v.ok || 0) + " / 共 " + (v.total || 0) + (skip ? "（" + skip + " 个无签到活动跳过）" : "")];
+  if (v.failed) parts.push("失败 " + v.failed);
+  if (pending) parts.push(pending + " 个未领到将在窗口内自动重试");
+  return "批量签到完成：" + parts.join("；");
 }
 
 // ---------- 成长任务「一键完成」 ----------
@@ -1183,8 +1252,10 @@ async function finishTaskRun(v) {
   const energy = (v && v.energy) || 0;
   let refreshed = null;
   try {
-    const r = await api("/api/account/refresh_all", {});
-    if (!r.busy) refreshed = r;
+    // 刷新积分现在是「受理 + 轮询」（R74）：必须等它真的跑完再取汇总，
+    // 否则余额还是旧的，toast 里的「成功 N」也无从谈起。
+    const v = await runBulk("refresh", { silent: true });
+    if (v && v.refresh) refreshed = v.refresh;
   } catch (e) {
     toast("任务已完成，但积分刷新失败：" + e.message);
   }

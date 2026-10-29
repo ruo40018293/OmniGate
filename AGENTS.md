@@ -110,6 +110,8 @@
 | R71 | 模型表积分列折算不出来时显示「—」，不得显示 0（0 会被读成免费） |
 | R72 | 面板 Token 一律「输入/输出/合计」三档给全，只有合计就是在骗人（占比 99:1 时看不出谁在吃额度） |
 | R73 | 面板轮询要按「tab + 可见性」门控，轮询专用信息不拉全量状态（/api/state 一项曾占全部访问 34.7%） |
+| R74 | 批量作业必须「立刻受理 + 进度可查」，同一作业槽拒绝并发（同步等 122.99s = 点了没反应） |
+| R75 | 取证目录按「文件数 + 总字节」双上限修剪，从最旧删起（只封文件数挡不住 400MB） |
 
 ## 2. 架构选型（依据）
 
@@ -372,8 +374,8 @@ git tag vX.Y.Z && git push origin vX.Y.Z
 
 - [README.md](README.md) — 用户文档
 - [DEVELOPMENT.md](DEVELOPMENT.md) — 开发者文档（面向 AI Agent）
-- [AGENTS.md](AGENTS.md) — 本文件：决议项一句话判据（R1–R73）、架构选型、不变量
-- [docs/DECISIONS.md](docs/DECISIONS.md) — 决议全文（R1–R73）：每条决议的原始背景、踩坑记录与边界条件
+- [AGENTS.md](AGENTS.md) — 本文件：决议项一句话判据（R1–R75）、架构选型、不变量
+- [docs/DECISIONS.md](docs/DECISIONS.md) — 决议全文（R1–R75）：每条决议的原始背景、踩坑记录与边界条件
 - [docs/三接口兼容改造备忘.md](docs/三接口兼容改造备忘.md) — 三接口（Chat/Responses/Anthropic）兼容层架构决策、实施记录、验证清单、已知限制
 - [docs/用量积分流水记账备忘.md](docs/用量积分流水记账备忘.md) — 双流水统计（token/积分）架构、差分算法、实测验证、已知限制（R17）
 
