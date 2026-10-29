@@ -1,6 +1,6 @@
 # OmniGate
 
-> 多渠道账号聚合工具 —— 把 12 个平台托管模型的多个账号聚合成**一个 OpenAI 兼容 API**，
+> 多渠道账号聚合工具 —— 把 14 个平台托管模型的多个账号聚合成**一个 OpenAI 兼容 API**，
 > 系统托盘常驻，浏览器管理，Windows / macOS / Linux 通吃。
 
 [![Go](https://img.shields.io/badge/go-1.25-blue)](go.mod)
@@ -30,7 +30,7 @@ Claude Code / Codex / Cursor / 任意 OpenAI 兼容客户端
 
 ## 二、功能总览
 
-### 2.1 渠道聚合（12 个）
+### 2.1 渠道聚合（14 个）
 
 | 渠道前缀 | 平台 | 手动签到 | 添加账号方式 |
 |---|---|---|---|
@@ -45,6 +45,8 @@ Claude Code / Codex / Cursor / 任意 OpenAI 兼容客户端
 | `raccoon/` | 小浣熊 | ❌ 无签到端点 | 浏览器授权 **或** 客户端导入 |
 | `loomy/` | 讯飞 Loomy | ❌ 无签到端点 | 仅本机客户端导入 |
 | `glm/` | 智谱清言 | ✅ | CDP 自动捕获 / 手工粘贴 |
+| `minimax/` | MiniMax Code（中国版） | ✅ | OAuth 设备码 |
+| `cline/` | Cline 官方 API | ❌ 无签到活动 | 粘贴官方 `sk_` API Key |
 | `qoder/` | QoderWork | — | 路由保留，界面已下线 |
 
 **导入型渠道**（`monkeycode`、`raccoon`、`loomy`）的凭据由本项目**不产生**，
@@ -76,7 +78,10 @@ Claude Code / Codex / Cursor / 任意 OpenAI 兼容客户端
 - **三档挑号策略**（`config.strategy`）：`expire` 临期优先（默认）、
   `credits` 积分优先、`roundrobin` 负载均衡
 - **会话粘性**：同一 `conversationId` 恒定走同一账号 —— 命中上游 prompt 缓存，
-  多轮对话里工具调用 ID 与 assistant offset 也才对得上
+  多轮对话里工具调用 ID 与 assistant offset 也才对得上；客户端不发会话 id 时
+  退化为**请求计数粘性**（同一账号连续跑满 50 次再换），遇错立即解绑重选
+- **请求级换号**：同一请求遇账号问题（限流 / 欠费 / 登录态死 / 账号故障）最多换
+  `max_rotate`（默认 3）个账号重试，全部试过才把最后一次上游原文返回客户端
 - **两级冷却**：账号级（余额耗尽 / 限流 / 连续报错）与**模型级**（429 按模型限额，
   同号其它模型不陪葬）；短时间内第二个模型撞墙才升级为整号冷却
 - **错误分类**：区分「请求问题」与「账号问题」—— 内容拦截 / 上下文超限**不罚号**；
@@ -99,23 +104,37 @@ Claude Code / Codex / Cursor / 任意 OpenAI 兼容客户端
 
 - 每日定时签到领额度，时间点可在面板配置（部分渠道带窗口重试，避开上游活动延迟）
 - Token 保活调度，冷却状态机避免反复打扰上游
-- 积分后台自动刷新，401 掉线自动自愈
+- 积分后台自动刷新，401 掉线自动自愈（刷新 token 后按 1.5s / 3s 退避重试，
+  避开上游 token 传播延迟造成的「刚刷新就 401」假失败）
 
 ### 2.6 用量与积分双流水
 
 `internal/ledger` 两套**独立口径**的流水，互不折算：
 
-- **token 流水**：按渠道 × 模型聚合，面板出折线图与模型用量榜
+- **token 流水**：按渠道 × 模型聚合，面板出折线图与模型用量榜，
+  且全程区分**输入（prompt，每轮重发的上下文）与输出（completion，模型实产）**
 - **积分流水**：按账号记 `earn` / `spend` / `expire`，可对账
 
 写入仅 append 缓冲（30s 自动 flush），读取时才按月分段扫描聚合，
 **常驻内存接近 0**。首次见到的账号只记一条「存量额度」基线，不逐条展开。
+
+> **为什么要拆输入/输出**：一次请求的 prompt 是整段上下文重发，实测输入占 99.5%、
+> 输出仅 0.5%。只看合计会误判「模型很烧 token」，也看不出到底是谁在吃额度。
+> 折线图可在「合计 / 输入 / 输出」间切档，KPI 卡副行给「入 X · 出 Y · 输出占 Z%」。
 
 ### 2.7 运行统计
 
 面板第三个标签页：今日签到收入 / 花费 / 账号数里程碑、平台概览、
 使用中接棒（粘性路由实时视图）、最近临期与预计作废、模型消耗、
 请求日志（TTFB / 吞吐 / 状态码）、异常账号、运行日志。
+
+- **token 三档给全**：今日 / 7 日 / 30 日都给「输入 / 输出 / 合计」，平台概览每行
+  标该渠道的入与出 —— 占比 99:1 时只看合计看不出谁在吃额度
+- **轮询按需**：只拉当前标签页要的数据，页面隐藏时停发、切回立即补一次；
+  「调用中」徽标走轻量端点，不再为它轮询全量状态
+- **日志有界**：`data/app.log` 超 20MB 且最后一次写入早于当天 0 点才归档为 `.1`
+  （当天写过的不搬走 —— 启动要重扫它重建今日签到事件）；取证目录按
+  500 文件 / 32MB 双上限从最旧删起
 
 ### 2.8 安全
 
@@ -211,10 +230,10 @@ Claude Code / Cursor 等支持自定义 OpenAI 端点的工具直接填即可；
 
 | 分区 | 能做什么 |
 |---|---|
-| **账号** | 添加（按渠道登录/导入）、签到、刷新积分、停用、删除、改昵称、积分明细、成长任务 |
+| **账号** | 添加（按渠道登录/导入）、签到、刷新积分（**立刻受理**，按钮上走 `刷新中 3/12` 进度，可切页面）、停用、删除、改昵称、积分明细、成长任务 |
 | **模型** | 模型目录与费率、复制模型名、导出配置 |
-| **用量** | token 与积分双流水、折线图、模型用量榜 |
-| **统计** | 里程碑、平台概览、临期预警、请求日志、运行日志 |
+| **用量** | token（合计 / 输入 / 输出三档）与积分双流水、折线图口径切换、模型用量榜 |
+| **统计** | 里程碑、平台概览（每渠道入/出 token）、临期预警、请求日志、运行日志 |
 | **设置** | 监听地址、API Key、管理密码、签到时间、挑号策略、兼容层映射、单渠道代理、成长任务开关 |
 
 **面板鉴权**：监听 `127.0.0.1` 时免登录；监听非环回地址时强制要求管理密码。
@@ -256,7 +275,7 @@ omnigate 整合了三个开源项目的能力。三者同源，都出自早期�
 |---|---|---|
 | [sddvcm/workbuddy-wild](https://github.com/sddvcm/workbuddy-wild) | 同作者的旧项目，Wails 桌面形态 | **账号调度实战经验**：签到遇限流时轮换设备号重试、从本机客户端读取真实设备号、账号挑号策略（临期/积分/轮询）、Windows 凭据 DPAPI 加密、单实例锁、离线镜像构建 |
 | [linguo2625469/workbuddy2api-panel](https://github.com/linguo2625469/workbuddy2api-panel) | 专注 WorkBuddy 成长任务体系 | **成长任务全链路**：成长中心协议层（任务列表/接受/领奖）、连登兑换与抽奖、猫猫旅行、活跃上报、一键完成任务编排 |
-| [rockswang/wild-work](https://github.com/rockswang/wild-work) | 多渠道聚合 + 纯 Go Web UI | **项目基线**：多渠道 provider 抽象与路由、三协议兼容层、Web 管理面板、用量与积分双流水、流式空闲监控、请求体脱敏、运行统计面板、Docker 部署 |
+| [rockswang/wild-work](https://github.com/rockswang/wild-work) | 多渠道聚合 + 纯 Go Web UI | **项目基线**：多渠道 provider 抽象与路由、三协议兼容层、Web 管理面板、用量与积分双流水、流式空闲监控、请求体脱敏、运行统计面板、Docker 部署；**MiniMax 与 Cline 两个渠道**整包移植自它（MIT） |
 
 ### 各自贡献的具体位置
 
@@ -264,7 +283,7 @@ omnigate 整合了三个开源项目的能力。三者同源，都出自早期�
 |---|---|
 | workbuddy-wild | `internal/traework/client.go`（换号重试）、`internal/login_trae/device.go`（设备号读取）、`internal/pool/strategy.go`（挑号策略）、`internal/auth/secure_windows.go`（DPAPI）、`internal/platform/`（单实例锁） |
 | workbuddy2api-panel | `internal/upstream/growth.go`、`growth_tasks.go`、`desktop.go`、`mp_report.go`、`growth_auto.go`、`internal/scheduler/growth.go` |
-| wild-work | `internal/provider/`、`internal/gateway/`（三协议）、`internal/ledger/`、`internal/idle/`、`internal/sanitize/`、`internal/stats/`、`cmd/omnigate/web/`（面板） |
+| wild-work | `internal/provider/`、`internal/gateway/`（三协议）、`internal/ledger/`、`internal/idle/`、`internal/sanitize/`、`internal/stats/`、`cmd/omnigate/web/`（面板）、`internal/minimax/`、`internal/cline/`、`internal/login_cline/` |
 
 **三者的边界很清楚**：workbuddy-wild 只有 2 个渠道、workbuddy2api-panel 只有
 WorkBuddy 单渠道、wild-work 没有成长任务体系 —— 任何一方都不具备本项目的
