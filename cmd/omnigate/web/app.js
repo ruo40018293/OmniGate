@@ -2551,10 +2551,13 @@ function renderModels(models) {
       creditCell = isTrae
         ? `<span title="TraeWork 上游不下发单次积分：按该渠道今日真实消耗（余额差值）与 token 占比分摊，为估算值">≈${fmtCreditS(m.credit)}</span>`
         : fmtCreditS(m.credit);
+    } else if (isTrae) {
+      creditCell = `<span title="TraeWork 无单次精确积分，按渠道真实消耗分摊；暂无余额差值消耗">—</span>`;
     } else {
-      creditCell = isTrae
-        ? `<span title="TraeWork 无单次精确积分，按渠道真实消耗分摊；暂无余额差值消耗">—</span>`
-        : fmtCreditS(m.credit);
+      // R71：credit==0 且该行有消耗，含义是「折算不出来」，不是「免费」。
+      // 旧写法在这里输出字面 0，minimax/cline/monkeycode 这类上游既不下发单次积分、
+      // 又没有公开费率的渠道会显示成「0 积分」，读起来像免费模型——所以改成「—」+说明。
+      creditCell = `<span title="该渠道上游不下发单次积分、也没有公开费率，无法折算积分（Token 与次数统计照常）">—</span>`;
     }
     const tps = Number(m.avg_tok_per_sec) || 0;
     const ttfb = Number(m.avg_ttfb_ms) || 0;
