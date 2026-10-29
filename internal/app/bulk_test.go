@@ -138,7 +138,6 @@ func TestBulkRejectsConcurrentStart(t *testing.T) {
 	if !a.StartBulk(bulkRefresh) {
 		t.Fatal("第一个作业应能启动")
 	}
-	defer close(up.gate)
 
 	if a.StartBulk(bulkRefresh) {
 		t.Fatal("作业进行中时第二次启动应被拒绝")
@@ -150,6 +149,11 @@ func TestBulkRejectsConcurrentStart(t *testing.T) {
 	if v := a.BulkView(); v.Kind != string(bulkRefresh) {
 		t.Fatalf("被拒的启动不得覆盖当前作业：kind=%q", v.Kind)
 	}
+
+	// 作业 goroutine 还在往 t.TempDir() 里写文件：必须等它真正结束再退出，
+	// 否则 TempDir 清理会撞上「目录非空」（Windows 上必现）。
+	close(up.gate)
+	waitBulkFinished(t, a)
 }
 
 // TestBulkEndpointsAcceptThenPoll HTTP 形态：POST 只回 started，结果去 *_status 取。

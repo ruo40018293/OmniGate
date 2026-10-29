@@ -22,6 +22,8 @@ services:
     container_name: omnigate
     restart: unless-stopped
     environment:
+      # 变量前缀：新名 OMNIGATE_* 优先，旧名 WILDWORK_* 兜底（R78 改名兼容层）。
+      # 本文件故意沿用旧名（存量部署不用改）；新部署建议直接写 OMNIGATE_*。
       # 容器内必须监听全部网卡（不能写 127.0.0.1，否则宿主访问不到）。
       # 注意：非环回监听会**强制要求**管理密码，见下面的 ADMIN_PASSWORD。
       WILDWORK_LISTEN: ":7863"

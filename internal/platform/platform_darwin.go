@@ -4,6 +4,7 @@ package platform
 
 import (
 	"fmt"
+	"log"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -86,14 +87,38 @@ func OpenURL(url string) error {
 // 开机自启（LaunchAgent plist）
 // ---------------------------------------------------------------------------
 
-const launchAgentName = "com.workbuddy.api"
+const launchAgentName = "com.omnigate.app"
+
+// legacyLaunchAgentName 是改名前（workbuddy-api 时代）的 LaunchAgent 标签。
+//
+// 改名后必须主动清掉旧 plist：两份 plist 会各拉起一个实例，旧的指向
+// /Applications/WorkBuddyAPI.app（用户升级后目录还在），新的指向 OmniGate.app，
+// 结果是开机后两个进程抢同一个端口（表现为「随机一个起不来」+ 托盘出现两份菜单）。
+const legacyLaunchAgentName = "com.workbuddy.api"
 
 func launchAgentPath() string {
 	return filepath.Join(os.Getenv("HOME"), "Library", "LaunchAgents", launchAgentName+".plist")
 }
 
+func legacyLaunchAgentPath() string {
+	return filepath.Join(os.Getenv("HOME"), "Library", "LaunchAgents", legacyLaunchAgentName+".plist")
+}
+
+// removeLegacyLaunchAgent 卸载并删除改名前的自启项（不存在时静默返回）。
+func removeLegacyLaunchAgent() {
+	p := legacyLaunchAgentPath()
+	if _, err := os.Stat(p); err != nil {
+		return
+	}
+	_ = exec.Command("launchctl", "unload", p).Run()
+	if err := os.Remove(p); err == nil {
+		log.Printf("已清理旧版开机自启项：%s", p)
+	}
+}
+
 // SetAutostart 写/删 ~/Library/LaunchAgents plist。
 func SetAutostart(on bool) error {
+	removeLegacyLaunchAgent()
 	path := launchAgentPath()
 	if !on {
 		_ = exec.Command("launchctl", "unload", path).Run()

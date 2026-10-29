@@ -37,18 +37,18 @@ func TestEntrypointScriptProducesLoadableConfig(t *testing.T) {
 
 	cmd := exec.Command(sh, script)
 	cmd.Env = append(os.Environ(),
-		"WILDWORK_HOME="+dir,
-		"WILDWORK_LISTEN=0.0.0.0:17863",
-		"WILDWORK_ADMIN_PASSWORD=contract-admin-pass",
-		"WILDWORK_API_KEY=contract-api-key",
-		"WILDWORK_AUTH_DIR="+authDir,
-		"WILDWORK_STATE_FILE="+stateFile,
-		"WILDWORK_REGION=cn",
-		"WILDWORK_TIMEOUT_SECONDS=90",
-		"WILDWORK_ERR_THRESHOLD=5",
-		"WILDWORK_GROWTH_REDEEM_STREAK=on",
-		"WILDWORK_GROWTH_TRAVEL=1",
-		"WILDWORK_GROWTH_TRAVEL_LOCATION=3",
+		"OMNIGATE_HOME="+dir,
+		"OMNIGATE_LISTEN=0.0.0.0:17863",
+		"OMNIGATE_ADMIN_PASSWORD=contract-admin-pass",
+		"OMNIGATE_API_KEY=contract-api-key",
+		"OMNIGATE_AUTH_DIR="+authDir,
+		"OMNIGATE_STATE_FILE="+stateFile,
+		"OMNIGATE_REGION=cn",
+		"OMNIGATE_TIMEOUT_SECONDS=90",
+		"OMNIGATE_ERR_THRESHOLD=5",
+		"OMNIGATE_GROWTH_REDEEM_STREAK=on",
+		"OMNIGATE_GROWTH_TRAVEL=1",
+		"OMNIGATE_GROWTH_TRAVEL_LOCATION=3",
 	)
 	// entrypoint 末尾会 exec 容器内的二进制；本测试环境没有它，退出必然非 0。
 	// 这不是失败 —— 我们只关心「exec 之前 config.json 是否已正确写盘」。
@@ -102,7 +102,88 @@ func TestEntrypointScriptProducesLoadableConfig(t *testing.T) {
 	}
 }
 
+// TestEntrypointAcceptsLegacyWildWorkEnv 锁定改名兼容层（R78）：
+// 项目 2026-10 由 workbuddy-api/wild-work 更名为 OmniGate，环境变量前缀随之改为 OMNIGATE_*。
+// 存量部署（compose、K8s manifest、用户脚本）里全是旧名 WILDWORK_*，
+// 若直接硬切换，升级后容器会用默认值启动 —— 监听地址回退 127.0.0.1、管理密码丢失，
+// 表现为「面板突然不用登录 / 外面访问不到」，且日志里没有任何线索。
+//
+// 因此 entrypoint 的判据是「新名优先 + 旧名兜底」，本用例把两条路径都钉死。
+func TestEntrypointAcceptsLegacyWildWorkEnv(t *testing.T) {
+	sh, err := exec.LookPath("sh")
+	if err != nil {
+		t.Skip("环境无 sh，跳过壳-Go 契约测试")
+	}
+	root, err := filepath.Abs("../..")
+	if err != nil {
+		t.Fatal(err)
+	}
+	script := filepath.Join(root, "docker", "entrypoint.sh")
+	if _, err := os.Stat(script); err != nil {
+		t.Skipf("找不到 docker/entrypoint.sh：%v", err)
+	}
+
+	// 子用例一：只给旧名 —— 必须被识别（否则存量部署升级即坏）。
+	t.Run("旧名仍然生效", func(t *testing.T) {
+		dir := filepath.ToSlash(t.TempDir())
+		cmd := exec.Command(sh, script)
+		cmd.Env = append(os.Environ(),
+			"WILDWORK_HOME="+dir,
+			"WILDWORK_LISTEN=0.0.0.0:17863",
+			"WILDWORK_ADMIN_PASSWORD=legacy-admin-pass",
+			"WILDWORK_AUTH_DIR="+dir+"/auths",
+			"WILDWORK_STATE_FILE="+dir+"/state.json",
+			"WILDWORK_GROWTH_TRAVEL=1",
+			"WILDWORK_GROWTH_TRAVEL_LOCATION=4",
+		)
+		_ = cmd.Run()
+
+		c, err := Load(filepath.Join(dir, "config.json"))
+		if err != nil {
+			t.Fatalf("旧名生成的配置无法解析：%v", err)
+		}
+		if got := c.Listen.Addr(); got != "0.0.0.0:17863" {
+			t.Errorf("旧名 WILDWORK_LISTEN 未生效：got %q", got)
+		}
+		if c.AdminPass != "legacy-admin-pass" {
+			t.Errorf("旧名 WILDWORK_ADMIN_PASSWORD 未生效：got %q", c.AdminPass)
+		}
+		if !c.Schedule.GrowthTravel || c.Schedule.GrowthTravelLocation != 4 {
+			t.Errorf("旧名成长开关未生效：travel=%t loc=%d",
+				c.Schedule.GrowthTravel, c.Schedule.GrowthTravelLocation)
+		}
+	})
+
+	// 子用例二：新旧同时给 —— 新名必须赢（否则改名等于没改，排查时还找不到谁在覆盖）。
+	t.Run("新名优先于旧名", func(t *testing.T) {
+		dir := filepath.ToSlash(t.TempDir())
+		cmd := exec.Command(sh, script)
+		cmd.Env = append(os.Environ(),
+			"WILDWORK_HOME="+dir,
+			"WILDWORK_LISTEN=0.0.0.0:17863",
+			"OMNIGATE_LISTEN=0.0.0.0:27863",
+			"WILDWORK_ADMIN_PASSWORD=legacy-pass",
+			"OMNIGATE_ADMIN_PASSWORD=new-pass",
+			"WILDWORK_AUTH_DIR="+dir+"/auths",
+			"WILDWORK_STATE_FILE="+dir+"/state.json",
+		)
+		_ = cmd.Run()
+
+		c, err := Load(filepath.Join(dir, "config.json"))
+		if err != nil {
+			t.Fatalf("新旧混用生成的配置无法解析：%v", err)
+		}
+		if got := c.Listen.Addr(); got != "0.0.0.0:27863" {
+			t.Errorf("新名未优先：got %q（期望 0.0.0.0:27863）", got)
+		}
+		if c.AdminPass != "new-pass" {
+			t.Errorf("新名未优先：admin=%q（期望 new-pass）", c.AdminPass)
+		}
+	})
+}
+
 // TestEntrypointRefusesRemoteListenWithoutPassword 锁定 entrypoint 的安全护栏：
+// 刻意沿用旧名 WILDWORK_*：这条护栏在存量部署上同样必须成立（兼容层不能一改就漏）。
 // 「对外监听 + 未设管理密码」必须**拒绝启动**（退出码 1），
 // 与 Go 侧启动检查（main.go 的 fatal）保持一致的语义 —— 双保险，
 // 避免用户在容器里绕过 Go 的检查（例如未来 Go 侧放宽约束时）。

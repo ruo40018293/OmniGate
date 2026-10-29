@@ -22,7 +22,10 @@ func TestManualCaptureQueueFrame(t *testing.T) {
 	if os.Getenv("QODERCN_CAPTURE") == "" {
 		t.Skip("需要 QODERCN_CAPTURE=1 且本机有 qodercn 账号")
 	}
-	dir := os.Getenv("WILDWORK_HOME")
+	dir := os.Getenv("OMNIGATE_HOME")
+	if dir == "" {
+		dir = os.Getenv("WILDWORK_HOME") // 兼容改名前的环境变量（R78）
+	}
 	if dir == "" {
 		dir = `E:\陈焕生\omnigate`
 	}

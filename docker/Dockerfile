@@ -29,12 +29,13 @@ RUN chmod +x /app/omnigate /app/entrypoint.sh
 VOLUME ["/data"]
 EXPOSE 7863
 
-# 配置全部通过 WILDWORK_* 环境变量传入，由 entrypoint 在容器内生成 config.json。
-ENV WILDWORK_HOME="/app" \
-    WILDWORK_LISTEN=":7863" \
-    WILDWORK_AUTH_DIR="/data/auths" \
-    WILDWORK_STATE_FILE="/data/state.json" \
-    WILDWORK_REGION="cn" \
+# 配置全部通过 OMNIGATE_* 环境变量传入，由 entrypoint 在容器内生成 config.json。
+# 旧名 WILDWORK_* 仍被 entrypoint 识别（新名优先），存量部署无需改动。
+ENV OMNIGATE_HOME="/app" \
+    OMNIGATE_LISTEN=":7863" \
+    OMNIGATE_AUTH_DIR="/data/auths" \
+    OMNIGATE_STATE_FILE="/data/state.json" \
+    OMNIGATE_REGION="cn" \
     TZ="Asia/Shanghai"
 
 # /healthz 无需鉴权，探针不带 API Key。

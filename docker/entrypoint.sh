@@ -2,8 +2,9 @@
 # omnigate 容器入口（无头模式）。
 #
 # 职责：
-#   1. 由 WILDWORK_* 环境变量在容器内生成 config.json
-#      （配合 WILDWORK_HOME=/app，二进制把工作目录定在此处并读到这份配置）。
+#   1. 由 OMNIGATE_* 环境变量在容器内生成 config.json
+#      （配合 OMNIGATE_HOME=/app，二进制把工作目录定在此处并读到这份配置）。
+#      ⚠️ 旧名 WILDWORK_* 仍被识别（见 env_pick），既有 compose 不用改。
 #      config.json 只存在于容器内，**永不 bind 挂载**，从根上避免
 #      「单文件挂载被 Docker 建成立目录」导致的崩溃。
 #   2. 对「对外监听 + 未设管理密码」这一**会被程序拒绝启动**的组合，
@@ -17,21 +18,32 @@ json_escape() {
     printf '%s' "$1" | sed -e 's/\\/\\\\/g' -e 's/"/\\"/g' | tr -d '\r\n\t'
 }
 
-HOME_DIR="${WILDWORK_HOME:-/app}"
-LISTEN="${WILDWORK_LISTEN:-:7863}"
-API_KEY="${WILDWORK_API_KEY:-}"
-ADMIN_PASSWORD="${WILDWORK_ADMIN_PASSWORD:-}"
-AUTH_DIR="${WILDWORK_AUTH_DIR:-/data/auths}"
-STATE_FILE="${WILDWORK_STATE_FILE:-/data/state.json}"
-REGION="${WILDWORK_REGION:-cn}"
-TIMEOUT="${WILDWORK_TIMEOUT_SECONDS:-120}"
-HARD_CREDIT="${WILDWORK_HARD_CREDIT:-12h}"
-SOFT_RATE="${WILDWORK_SOFT_RATE:-60s}"
-ERR_THRESHOLD="${WILDWORK_ERR_THRESHOLD:-3}"
-ERR_COOLDOWN="${WILDWORK_ERR_COOLDOWN:-10m}"
-GROWTH_REDEEM="${WILDWORK_GROWTH_REDEEM_STREAK:-false}"
-GROWTH_TRAVEL="${WILDWORK_GROWTH_TRAVEL:-false}"
-GROWTH_TRAVEL_LOC="${WILDWORK_GROWTH_TRAVEL_LOCATION:-1}"
+# env_pick 新名 旧名 默认值：新名（OMNIGATE_*）优先，旧名（WILDWORK_*）兜底。
+# 项目 2026-10 由 workbuddy-api/wild-work 更名为 OmniGate，既有 compose 大量使用旧名，
+# 故一律「新优先 + 旧兜底」，不做硬切换（硬切换会让存量部署启动即丢配置）。
+env_pick() {
+    eval "_new=\${$1:-}"
+    eval "_old=\${$2:-}"
+    if [ -n "$_new" ]; then printf '%s' "$_new"
+    elif [ -n "$_old" ]; then printf '%s' "$_old"
+    else printf '%s' "$3"; fi
+}
+
+HOME_DIR=$(env_pick OMNIGATE_HOME WILDWORK_HOME /app)
+LISTEN=$(env_pick OMNIGATE_LISTEN WILDWORK_LISTEN :7863)
+API_KEY=$(env_pick OMNIGATE_API_KEY WILDWORK_API_KEY "")
+ADMIN_PASSWORD=$(env_pick OMNIGATE_ADMIN_PASSWORD WILDWORK_ADMIN_PASSWORD "")
+AUTH_DIR=$(env_pick OMNIGATE_AUTH_DIR WILDWORK_AUTH_DIR /data/auths)
+STATE_FILE=$(env_pick OMNIGATE_STATE_FILE WILDWORK_STATE_FILE /data/state.json)
+REGION=$(env_pick OMNIGATE_REGION WILDWORK_REGION cn)
+TIMEOUT=$(env_pick OMNIGATE_TIMEOUT_SECONDS WILDWORK_TIMEOUT_SECONDS 120)
+HARD_CREDIT=$(env_pick OMNIGATE_HARD_CREDIT WILDWORK_HARD_CREDIT 12h)
+SOFT_RATE=$(env_pick OMNIGATE_SOFT_RATE WILDWORK_SOFT_RATE 60s)
+ERR_THRESHOLD=$(env_pick OMNIGATE_ERR_THRESHOLD WILDWORK_ERR_THRESHOLD 3)
+ERR_COOLDOWN=$(env_pick OMNIGATE_ERR_COOLDOWN WILDWORK_ERR_COOLDOWN 10m)
+GROWTH_REDEEM=$(env_pick OMNIGATE_GROWTH_REDEEM_STREAK WILDWORK_GROWTH_REDEEM_STREAK false)
+GROWTH_TRAVEL=$(env_pick OMNIGATE_GROWTH_TRAVEL WILDWORK_GROWTH_TRAVEL false)
+GROWTH_TRAVEL_LOC=$(env_pick OMNIGATE_GROWTH_TRAVEL_LOCATION WILDWORK_GROWTH_TRAVEL_LOCATION 1)
 
 # to_int <值> <兜底>：只保留数字；清洗后为空则用兜底。
 # 防止把 "abc" 之类的值直接写进 JSON 造成解析失败。

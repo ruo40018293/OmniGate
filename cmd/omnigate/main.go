@@ -852,13 +852,14 @@ func appendCallbackLog(stateDir, msg string) {
 
 // workDir 解析数据目录（config.json / auths/ / data/ 的落点）。
 //
-//   - WILDWORK_HOME 显式指定时优先（测试/自定义布局用）；
+//   - OMNIGATE_HOME 显式指定时优先（测试/自定义布局用）；旧名 WILDWORK_HOME
+//     作为兼容兜底继续有效（docker/脚本/老部署里有存量用法）；
 //   - 运行在 macOS .app bundle 内（.../Xxx.app/Contents/MacOS）时改用
-//     ~/Library/Application Support/WildWork：bundle 内容对普通用户只读，
+//     ~/Library/Application Support/OmniGate：bundle 内容对普通用户只读，
 //     且写到包内会在替换/升级 app 时连同账号一起丢失；
 //   - 其余形态（CLI 二进制、Windows 便携包、Linux）沿用 exe 所在目录。
 func workDir() string {
-	if v := os.Getenv("WILDWORK_HOME"); v != "" {
+	if v := dataHomeEnv(); v != "" {
 		if err := os.MkdirAll(v, 0o755); err == nil {
 			return v
 		}
@@ -870,13 +871,55 @@ func workDir() string {
 	dir := filepath.Dir(exe)
 	if strings.Contains(dir, ".app/Contents/MacOS") {
 		if home, err := os.UserHomeDir(); err == nil {
-			p := filepath.Join(home, "Library", "Application Support", "WildWork")
-			if err := os.MkdirAll(p, 0o755); err == nil {
+			if p, err := macDataDir(home); err == nil {
 				return p
 			}
 		}
 	}
 	return dir
+}
+
+// dataHomeEnv 返回显式指定的数据目录：新名 OMNIGATE_HOME 优先，
+// 旧名 WILDWORK_HOME 兜底（项目 2026-10 由 workbuddy-api/wild-work 更名为 OmniGate，
+// docker-compose 与部分脚本仍在用旧名，不能直接删）。
+func dataHomeEnv() string {
+	if v := os.Getenv("OMNIGATE_HOME"); v != "" {
+		return v
+	}
+	return os.Getenv("WILDWORK_HOME")
+}
+
+// macDataDir 返回 macOS .app 形态的数据目录，必要时把旧名目录整体迁移过来。
+//
+// 改名最容易出的两类事故，这里各挡一处：
+//  1. 直接换目录名而不迁移 —— 老用户升级后看到「账号全没了」（其实是新目录是空的）。
+//     所以新目录不存在且旧目录存在时先 os.Rename 整体搬家（同卷秒级、保留 inode）。
+//  2. 迁移失败却仍返回新建的空目录 —— 同上。故 rename 失败时回退用旧目录并记日志，
+//     宁可继续用旧路径，也不制造「数据消失」的假象。
+func macDataDir(home string) (string, error) {
+	base := filepath.Join(home, "Library", "Application Support")
+	dst := filepath.Join(base, "OmniGate")
+	legacy := filepath.Join(base, "WildWork")
+
+	if _, err := os.Stat(dst); err == nil {
+		return dst, nil // 新目录已在：以它为准，不碰旧目录（可能被用户手工保留）
+	} else if !os.IsNotExist(err) {
+		return "", err
+	}
+
+	if _, err := os.Stat(legacy); err == nil {
+		if err := os.Rename(legacy, dst); err != nil {
+			log.Printf("数据目录迁移失败，继续使用旧目录 %s：%v", legacy, err)
+			return legacy, nil
+		}
+		log.Printf("数据目录已迁移：%s → %s", legacy, dst)
+		return dst, nil
+	}
+
+	if err := os.MkdirAll(dst, 0o755); err != nil {
+		return "", err
+	}
+	return dst, nil
 }
 
 // Windows 平台的 Winsock 错误码（WSAE*）。

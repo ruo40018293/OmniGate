@@ -179,6 +179,10 @@ auths/           # 各账号凭据（Windows 下 DPAPI 加密）
 data/            # 状态、流水、日志
 ```
 
+> 改名（workbuddy-api → OmniGate）只影响**可执行文件名与 macOS 包名**：
+> Windows 侧数据目录始终是 exe 所在目录，换名后把新 exe 放到老目录即可沿用
+> 原有 `config.json` / `auths/` / `data/`，不需要迁移。
+
 > ⚠️ Windows SmartScreen 提示「未知发布者」是未做代码签名的正常现象，
 > 自行判断是否信任。程序为单文件绿色版，删除该目录即可完全卸载。
 
@@ -198,7 +202,29 @@ docker compose up -d
 
 详见 [`docker/README.md`](docker/README.md)。
 
-### 3.3 接入 AI 客户端
+### 3.3 macOS
+
+1. 从 Releases 下载 `OmniGate-<版本>-<arch>.dmg`（Apple 芯片选 `arm64`，
+   Intel 选 `amd64`），双击挂载后把 **OmniGate.app** 拖进「应用程序」
+2. 首次打开若提示「无法验证开发者」：右键 → 打开，或
+   `xattr -dr com.apple.quarantine /Applications/OmniGate.app`
+3. 数据目录固定为 `~/Library/Application Support/OmniGate`
+   （`config.json` / `auths/` / `data/` 都在里面，`.app` 本身只读）
+
+> 🔁 **从旧版本升级（改名前后）**：项目原名为 workbuddy-api / wild-work，
+> 0.1.6 起统一为 OmniGate。升级须知三条：
+> 1. **先退出旧的 `WorkBuddyAPI.app`**（托盘 → 退出）。旧版没退出时新实例
+>    会被单实例锁挡住，表现为「双击没反应」。
+> 2. **数据自动迁移**：新版首次启动发现
+>    `~/Library/Application Support/WildWork` 且新目录不存在时，整体
+>    `rename` 到 `.../OmniGate`（失败则退回继续用旧目录，绝不新建空目录盖掉）。
+> 3. **自启需要重设**：bundle id 由 `com.workbuddy.api` 改为
+>    `com.omnigate.app`，旧 LaunchAgent plist 会在下次设置自启时自动清理并改写。
+>    macOS 的「完全磁盘访问 / 本地网络」等授权按 bundle 记录，改名后可能要在
+>    「系统设置 → 隐私与安全性」里重新确认一次。
+> 旧的 `WorkBuddyAPI.app` 可直接删除（它只是外壳，数据已在新目录）。
+
+### 3.4 接入 AI 客户端
 
 客户端填三个参数：**Base URL** `http://<你的地址>:7863/v1`、
 **API Key**（启动日志里那个）、**模型名**（`GET /v1/models` 可查）。
