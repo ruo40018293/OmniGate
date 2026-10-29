@@ -1,5 +1,7 @@
 # OmniGate
 
+<p align="center"><img src="build/appicon.png" width="112" alt="OmniGate 标志：一道门"></p>
+
 > 多渠道账号聚合工具 —— 把 14 个平台托管模型的多个账号聚合成**一个 OpenAI 兼容 API**，
 > 系统托盘常驻，浏览器管理，Windows / macOS / Linux 通吃。
 
@@ -94,7 +96,8 @@ Claude Code / Codex / Cursor / 任意 OpenAI 兼容客户端
 - **成长任务**：22 个动作覆盖 15 个常规任务 + 7 个小程序口径任务（小程序口径默认不跑），
   进度达标自动回读领奖 —— 上游字段名写错时仍会返回 200 只是不入账，故以**回读**判定成功
 - **连登兑换与抽奖**：连登 7/14/28 天档位自动兑换、抽奖次数自动抽完
-- **猫猫旅行**：自动派出 + 到站领取
+- **猫猫旅行**：自动派出 + 到站领取；账号行点 🐱 可对单个账号**立刻**跑一次
+  （手动入口与定时开关解耦 —— 开关只管定时，想马上跑不用等下次调度）
 - **活跃上报**：点亮连登、解锁领养前置
 
 > ⚠️ 兑换与抽奖会**真实改变账号状态**（抽奖次数用掉不可撤销），
@@ -128,6 +131,8 @@ Claude Code / Codex / Cursor / 任意 OpenAI 兼容客户端
 使用中接棒（粘性路由实时视图）、最近临期与预计作废、模型消耗、
 请求日志（TTFB / 吞吐 / 状态码）、异常账号、运行日志。
 
+- **批量作业立刻受理**：批量签到 / 批量刷新积分只做令牌交接就返回，按钮上走
+  `刷新中 3/12` 进度，切走页面不打断；作业状态由服务端持有，重进面板仍在
 - **token 三档给全**：今日 / 7 日 / 30 日都给「输入 / 输出 / 合计」，平台概览每行
   标该渠道的入与出 —— 占比 99:1 时只看合计看不出谁在吃额度
 - **轮询按需**：只拉当前标签页要的数据，页面隐藏时停发、切回立即补一次；
@@ -204,15 +209,16 @@ docker compose up -d
 
 ### 3.3 macOS
 
-1. 从 Releases 下载 `OmniGate-<版本>-<arch>.dmg`（Apple 芯片选 `arm64`，
-   Intel 选 `amd64`），双击挂载后把 **OmniGate.app** 拖进「应用程序」
+1. 从 Releases 下载对应架构的 dmg：Apple 芯片选 `OmniGate-{版本}-arm64.dmg`，
+   Intel 选 `OmniGate-{版本}-amd64.dmg`（`{版本}` 替换成最新 release 的版本号），
+   双击挂载后把 **OmniGate.app** 拖进「应用程序」
 2. 首次打开若提示「无法验证开发者」：右键 → 打开，或
    `xattr -dr com.apple.quarantine /Applications/OmniGate.app`
 3. 数据目录固定为 `~/Library/Application Support/OmniGate`
    （`config.json` / `auths/` / `data/` 都在里面，`.app` 本身只读）
 
 > 🔁 **从旧版本升级（改名前后）**：项目原名为 workbuddy-api / wild-work，
-> 0.1.6 起统一为 OmniGate。升级须知三条：
+> macOS 包名 0.1.4 及更早是 `WorkBuddyAPI.app`，**0.1.5 起为 `OmniGate.app`**。升级须知三条：
 > 1. **先退出旧的 `WorkBuddyAPI.app`**（托盘 → 退出）。旧版没退出时新实例
 >    会被单实例锁挡住，表现为「双击没反应」。
 > 2. **数据自动迁移**：新版首次启动发现
@@ -249,6 +255,26 @@ Claude Code / Cursor 等支持自定义 OpenAI 端点的工具直接填即可；
 `default_channel` 指定不带前缀的模型名走哪个渠道。
 
 </details>
+
+### 3.5 从源码构建
+
+```bash
+bash scripts/build_release.sh                 # Windows amd64 → dist/omnigate.exe
+bash scripts/build_release.sh darwin-arm64    # 交叉编译 macOS
+bash scripts/build_release.sh linux-amd64
+```
+
+发布构建固定带 `-trimpath -s -w`：前者剥掉编译机的绝对源码路径（不然 exe 里
+白送一份用户名与工具链安装路径），后者去符号表，体积 14.6MB → 10.5MB。
+
+改图标走 `build/ICON_README.md` 的一条龙五步：`make_icon.py` 出多尺寸 ico →
+`check_icon.py` 几何自检（对称 / 门槛 / 对比度 / 安全边距）→ 拷两份副本到
+`cmd/omnigate/build/trayicon.ico` 与 `cmd/omnigate/web/logo64.png` →
+`make_syso.py` 写 exe 资源 → 构建后 `check_res.py` 验资源树。
+
+发版：在 `main` 上打 `vX.Y.Z` 标签（工作流只认这个形状，其它名字被 guard job
+直接拦下，不会构建到一半才在 release 步骤炸）；发布说明写在 `RELEASE-vX.Y.Z.md`，
+里面的文件名必须与真实资产一致 —— `internal/app/release_notes_test.go` 守着这条。
 
 ---
 
@@ -288,7 +314,9 @@ Claude Code / Cursor 等支持自定义 OpenAI 端点的工具直接填即可；
 
 > ⚠️ 后四项**开启会真实改变账号状态**（抽奖次数用掉不可撤销），默认全部关闭。
 
-环境变量可覆盖部分配置（`WILDWORK_*` 前缀），完整清单见 `docker/.env.example`。
+环境变量可覆盖部分配置，前缀是 `OMNIGATE_*`；旧前缀 `WILDWORK_*` 仍被识别
+（`docker/.env.example` 与 `docker-compose.yml` 为兼容存量部署沿用旧名），
+完整清单见 `docker/.env.example`。
 
 ---
 

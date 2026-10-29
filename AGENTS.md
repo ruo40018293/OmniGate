@@ -117,6 +117,7 @@
 | R78 | 改名要带兼容层与迁移：新名优先、旧名兜底、数据目录搬过去挪（硬切换 = 存量部署升级即丢配置） |
 | R79 | 图标标志必须是小尺寸可辨的单一形状（当前=门：拱+门槛，门槛比门框宽），改图标必跑 `build/check_icon.py` 的断言，且 ico→托盘/logo64/appicon/syso 四处同源刷新 |
 | R80 | 发布说明里写的文件名必须等于真实产物名（`OmniGate-<ver>-{amd64,arm64}.dmg`），不写 `<arch>` 占位符（GitHub 当 HTML 标签吃掉）；由 `internal/app/release_notes_test.go` 守 |
+| R81 | README 里的资产名同样是契约：必须指向真实文件、不写 `<arch>` 这类尖括号占位符（用 `{版本}`）、环境变量前缀写 `OMNIGATE_*`（旧 `WILDWORK_*` 兜底）；由 `internal/app/release_notes_test.go` 的 `TestReadmeArtifactNamesMatchReality` 守 |
 
 ## 2. 架构选型（依据）
 
@@ -391,8 +392,8 @@ git tag vX.Y.Z && git push origin vX.Y.Z
 
 - [README.md](README.md) — 用户文档
 - [DEVELOPMENT.md](DEVELOPMENT.md) — 开发者文档（面向 AI Agent）
-- [AGENTS.md](AGENTS.md) — 本文件：决议项一句话判据（R1–R80）、架构选型、不变量
-- [docs/DECISIONS.md](docs/DECISIONS.md) — 决议全文（R1–R80）：每条决议的原始背景、踩坑记录与边界条件
+- [AGENTS.md](AGENTS.md) — 本文件：决议项一句话判据（R1–R81）、架构选型、不变量
+- [docs/DECISIONS.md](docs/DECISIONS.md) — 决议全文（R1–R81）：每条决议的原始背景、踩坑记录与边界条件
 - [docs/三接口兼容改造备忘.md](docs/三接口兼容改造备忘.md) — 三接口（Chat/Responses/Anthropic）兼容层架构决策、实施记录、验证清单、已知限制
 - [docs/用量积分流水记账备忘.md](docs/用量积分流水记账备忘.md) — 双流水统计（token/积分）架构、差分算法、实测验证、已知限制（R17）
 

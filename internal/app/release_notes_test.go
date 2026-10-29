@@ -72,3 +72,49 @@ func TestReleaseNotesArtifactNamesMatchReality(t *testing.T) {
 		}
 	}
 }
+
+// TestReadmeArtifactNamesMatchReality 把同一套「名字必须指向真实文件」的约束套到 README 上。
+//
+// README 是用户第一眼看到资产名的地方，写错的代价与发布说明完全一样：他照着下载，
+// 得到一个 404。而这件事构建、go vet、lint 一个都拦不住 —— 只能写测试。
+//
+// 两条具体约束：
+//  1. 不出现 <arch> / <版本> 这类尖括号占位符：Markdown 把 <xxx> 当未知 HTML 标签
+//     吃掉，页面上渲染成 `OmniGate--.dmg`（v0.1.5 发布说明就栽在这上面）；
+//  2. 任何提到 .dmg / .exe 的行，文件名必须是真实产物（OmniGate-* / omnigate-*），
+//     不能是旧产品名。README 里「先退出旧的 WorkBuddyAPI.app」这类**叙述**是故意保留的
+//     —— 那是教用户找到旧安装，不是资产名，所以只在带扩展名的行上报错。
+func TestReadmeArtifactNamesMatchReality(t *testing.T) {
+	root, err := filepath.Abs("../..")
+	if err != nil {
+		t.Fatal(err)
+	}
+	raw, err := os.ReadFile(filepath.Join(root, "README.md"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	body := string(raw)
+
+	for _, bad := range []string{"<arch>", "<版本>", "<version>"} {
+		if strings.Contains(body, bad) {
+			t.Errorf("README.md 用了 %q 占位符：GitHub 渲染时会当 HTML 标签吃掉；请写 `{版本}` 或具体版本号", bad)
+		}
+	}
+
+	for i, line := range strings.Split(body, "\n") {
+		if !strings.Contains(line, ".dmg") && !strings.Contains(line, ".exe") {
+			continue
+		}
+		for _, legacy := range []string{"WorkBuddyAPI-", "WildWork-", "workbuddy-api.exe"} {
+			if strings.Contains(line, legacy) {
+				t.Errorf("README.md:%d 用旧产品名当资产名（%q）: %s", i+1, legacy, strings.TrimSpace(line))
+			}
+		}
+		if strings.Contains(line, ".dmg") && !strings.Contains(line, "OmniGate-") {
+			t.Errorf("README.md:%d 的 dmg 名没有 OmniGate- 前缀: %s", i+1, strings.TrimSpace(line))
+		}
+		if strings.Contains(line, ".exe") && !strings.Contains(line, "omnigate") {
+			t.Errorf("README.md:%d 的 exe 名不是 omnigate-*: %s", i+1, strings.TrimSpace(line))
+		}
+	}
+}
