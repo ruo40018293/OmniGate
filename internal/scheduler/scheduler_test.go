@@ -528,6 +528,71 @@ func (d *deadThenOK) DailyCheckinReport(a *auth.Auth) (provider.CheckinReport, e
 }
 
 func (d *deadThenOK) RefreshToken(a *auth.Auth) error { d.refreshCalls.Add(1); return nil }
+
+// deadTwiceThenOK 连续两次返回 ErrSessionDead，第三次成功。
+//
+// 对应 2026-10-29 生产实测：minimax 刷新成功 40ms 内重试仍 401（新 token 在签到
+// 服务侧有秒级传播延迟），旧实现刷新完立刻重打两次都撞在窗口内。
+type deadTwiceThenOK struct {
+	provider.Upstream
+	reportCalls  atomic.Int32
+	refreshCalls atomic.Int32
+}
+
+func (d *deadTwiceThenOK) DailyCheckin(a *auth.Auth) error { _, err := d.DailyCheckinReport(a); return err }
+
+func (d *deadTwiceThenOK) DailyCheckinReport(a *auth.Auth) (provider.CheckinReport, error) {
+	if d.reportCalls.Add(1) <= 2 {
+		return provider.CheckinReport{Status: provider.CheckinError},
+			&provider.Error{Kind: provider.ErrSessionDead, Status: 401, Msg: "invalid access token"}
+	}
+	return provider.CheckinReport{Status: provider.CheckinClaimed, Msg: "签到成功 +400", Amount: 400}, nil
+}
+
+func (d *deadTwiceThenOK) RefreshToken(a *auth.Auth) error { d.refreshCalls.Add(1); return nil }
+func (d *deadTwiceThenOK) UserResourceDetail(a *auth.Auth) (int64, []provider.ResourceItem, error) {
+	return 0, nil, nil
+}
+func (d *deadTwiceThenOK) FetchModelPricing(a *auth.Auth) ([]provider.ModelPricing, error) {
+	return nil, nil
+}
+
+// TestCheckinSessionDeadRetriesWithBackoff 刷新后重试必须**隔一会**，且两次重试都失败后失败。
+//
+// 杀伤力：把 checkinRetryDelays 改成 {0, 0}（即旧实现「刷新完立刻重打」）时，
+// 本测试的第二次请求会在 0ms 后再打一次仍是 401 ⇒ elapsed 断言变红。
+func TestCheckinSessionDeadRetriesWithBackoff(t *testing.T) {
+	old := checkinRetryDelays
+	checkinRetryDelays = []time.Duration{60 * time.Millisecond, 80 * time.Millisecond}
+	t.Cleanup(func() { checkinRetryDelays = old })
+
+	up := &deadTwiceThenOK{}
+	p := pool.New("")
+	a := &auth.Auth{UID: "u1", AccessToken: "at", RefreshToken: "rt", ExpiresAt: 9999999999,
+		FilePath: filepath.Join(t.TempDir(), "u1.json")}
+	p.Add(a)
+	s := New(Config{Pool: p, Upstream: up, Name: "minimax", CheckinMinutes: []int{10 * 60}})
+
+	start := time.Now()
+	res, err := s.CheckinAccount("u1")
+	elapsed := time.Since(start)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !res.OK {
+		t.Errorf("第三次应成功: %+v", res)
+	}
+	if got := up.reportCalls.Load(); got != 3 {
+		t.Errorf("report calls=%d want 3（首次 + 两次退避重试）", got)
+	}
+	if got := up.refreshCalls.Load(); got != 2 {
+		t.Errorf("refresh calls=%d want 2", got)
+	}
+	if elapsed < 140*time.Millisecond {
+		t.Errorf("重试未退避: elapsed=%v（want ≥140ms，两次等待 60+80ms）", elapsed)
+	}
+}
+
 func (d *deadThenOK) UserResourceDetail(a *auth.Auth) (int64, []provider.ResourceItem, error) {
 	return 0, nil, nil
 }

@@ -781,11 +781,27 @@ code.about-repo:active { transform: translateY(1px); }
 #mtabStats .st-plat-in { color: var(--ok); }
 #mtabStats .st-plat-out { color: var(--warn); }
 #mtabStats .st-plat-tokens { color: var(--text-2); }
-/* R66：Token 单元格第二行「出 xxx」= 其中输出（模型真正产出的量）。
+/* R66：Token 单元格第二行「出 xxx」= 其中输出（模型真正产出的量）；
+   R67 起再加一行「入 xxx」——输入是每轮重发的上下文，通常占合计 99% 以上，
+   只给输出看会把「上下文重发」误读成「模型产出」。
    刻意用块级子元素而不是新增网格轨道——轨道数有静态护栏（R48/R60），
-   加列必须同步桌面+窄屏两处轨道与护栏；这里用上下两行表达同一维度，
+   加列必须同步桌面+窄屏两处轨道与护栏；这里用上下多行表达同一维度，
    零轨道风险，也不会挤压已经贴到 864px 预算的其它列。
-   字号更小、颜色更淡：它是合计的注解，不是并列的第二个数字。 */
+   ⚠️ 必须显式 flex-direction: column（R67 实测）：.st-plat-row > span 是**行向** flex
+   容器，块级 <i> 在里面依然是被排成并排的 flex item——R66 的「下行」从未换行，
+   只是被 overflow:hidden 横向裁掉，且 clientWidth==scrollWidth 看不出纵向问题。
+   改完必须量每行高度与子元素 top，不能只看宽度。 */
+#mtabStats .st-plat-tokens {
+  flex-direction: column;
+  align-items: flex-end;
+  justify-content: center;
+  gap: 0;
+  line-height: 1.3;
+}
+/* 三行内容（合计/入/出）会把数据行撑到 51px，而零值行只有 31px —— 同一张表行高不齐
+   看起来像渲染 bug。给数据行的 Token 单元格固定最小高度，让零值行也占满同样的高度
+   （表头行排除：它的 token 格是纯文字标题，不能跟着变高）。 */
+#mtabStats .st-plat-row:not(.st-plat-head) .st-plat-tokens { min-height: 50px; }
 #mtabStats .st-plat-toksub {
   display: block;
   font-size: 10px;

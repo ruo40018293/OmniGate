@@ -19,6 +19,15 @@ import (
 	"omnigate/internal/provider"
 )
 
+// checkinRetryDelays 会话失效（session dead）刷新后重试的等待时长。
+//
+// 上游刷新出的新 token 在签到服务侧有**秒级传播延迟**：2026-10-29 08:53 实测
+// minimax 刷新成功 40ms 内重试仍 401 invalid access token（同一 token 查余额
+// 却 200），数分钟后同账号首次即成功。旧实现刷新完立刻重打，两次都撞在窗口内
+// ⇒ 当天签到被判失败（面板红标），实际只是早了一秒。
+// 变体为包级变量是为了让测试能缩短等待，生产值不要改小。
+var checkinRetryDelays = []time.Duration{1500 * time.Millisecond, 3 * time.Second}
+
 // Config 调度器依赖。
 //
 // 三个时间字段的零值语义见 New：nil = 未配置（落默认），
@@ -606,10 +615,25 @@ func (s *Scheduler) checkinOne(uid string, slot int) CheckinResult {
 	// 要求渠道返回类型化的 provider.Error（见 qodercn/qodercom 的 sessionDead）。
 	if checkinErr != nil && isSessionDead(checkinErr) {
 		log.Printf("checkin token invalid platform=%s uid=%s, refreshing and retrying", name, uid)
-		if err := s.refreshForCheckin(a, uid); err != nil {
-			checkinErr = fmt.Errorf("token invalid; refresh failed: %w", err)
-		} else {
+		// 刷新后必须**等一会再重试**：2026-10-29 08:53 实测 minimax 刷新成功 40ms 内
+		// 重试仍 401 invalid access token（同一 token 查余额却 200），数分钟后同账号
+		// 首次即成功 ⇒ 新 token 在签到服务侧有秒级传播延迟。旧实现刷新完立刻重打，
+		// 两次都撞在窗口内 ⇒ 当天签到被判失败（面板红标，实际只是早了一秒）。
+		// 两次重试分别等 1.5s / 3s，最坏多花 4.5s（签到每日一次，代价可忽略）。
+		for attempt := 1; attempt <= len(checkinRetryDelays); attempt++ {
+			if err := s.refreshForCheckin(a, uid); err != nil {
+				checkinErr = fmt.Errorf("token invalid; refresh failed: %w", err)
+				break
+			}
+			time.Sleep(checkinRetryDelays[attempt-1])
 			structured, checkinErr = s.dailyCheckin(a, &r)
+			if checkinErr == nil || !isSessionDead(checkinErr) {
+				if attempt > 1 {
+					log.Printf("checkin retry succeeded platform=%s uid=%s attempt=%d", name, uid, attempt)
+				}
+				break
+			}
+			log.Printf("checkin retry still session dead platform=%s uid=%s attempt=%d", name, uid, attempt)
 		}
 	}
 	if checkinErr != nil {

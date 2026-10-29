@@ -2354,13 +2354,13 @@ function stSumItem(label, val, cls, sub) {
     `<span class="st-sum-val ${cls || ""}">${val}</span>` +
     (sub ? `<span class="st-sum-sub">${sub}</span>` : "") + `</span>`;
 }
-// R66：「今日输出」的副标题 —— 输出占今日 Token 的比例。合计为 0 时留空，
-// 不写 "0.0%"（无样本时的百分比是噪音）。比例只做一位小数，避免给出假精度。
-function outPctSub(tu) {
+// R66/R67：占比副标题 —— 分子占今日 Token 合计的比例（一位小数）。合计或分子为 0
+// 时留空，不写 "0.0%"（无样本时的百分比是噪音）。
+function tokPctSub(tu, part) {
   const total = Number(tu.today) || 0;
-  const out = Number(tu.out_today) || 0;
-  if (total <= 0 || out <= 0) return "";
-  return `占 ${((out / total) * 100).toFixed(1)}% · 其余为输入`;
+  const v = Number(part) || 0;
+  if (total <= 0 || v <= 0) return "";
+  return `占 ${((v / total) * 100).toFixed(1)}%`;
 }
 
 // Token 多天行条目（tip 非空时挂 title 悬停说明，R66）
@@ -2379,22 +2379,25 @@ function renderStats(s) {
       ? stSumItem("今日作废", fmtCredits(s.credit_expired), "risk", "积分包到期 · 非消耗")
       : "") +
     stSumItem("消耗 Token", fmtTokensFull(s.tokens), "warn") +
-    // R66：今日输出（模型真正产出的量）+ 占合计的比例。官方口径里「token 用量」
-    // 通常指输出（生成长度），而输入是每轮重发的上下文——两者必须并排看才有意义。
-    stSumItem("今日输出", fmtTokensFull(tu.out_today), "warn", outPctSub(tu)) +
+    // R66/R67：输入与输出并排。官方口径里「token 用量」通常指输出（生成长度），
+    // 而输入是每轮重发的上下文——两者必须并排看才有意义（输出占比常低于 1%）。
+    stSumItem("今日输入", fmtTokensFull(tu.in_today), "warn", tokPctSub(tu, tu.in_today)) +
+    stSumItem("今日输出", fmtTokensFull(tu.out_today), "ok", tokPctSub(tu, tu.out_today)) +
     (Number(s.expire_today) > 0
       ? stSumItem("今日到期", fmtCredits(s.expire_today) + "分", "risk", "今晚作废尽快消耗")
       : "");
   $("stMilestone").textContent = s.milestone_count > 0 ? `里程碑 ${s.milestone_count}×100分` : "";
   renderPlatformTable(s);
   // Token 多天行（今日情况标题右侧）
-  // R66：多一个「其中输出」——输出=模型真正产出的字，输入=每轮重发的上下文。
+  // R66/R67：输入/输出拆开——输出=模型真正产出的字，输入=每轮重发的上下文。
   // 长会话里输入远大于输出，只看合计会误判成「模型很费 token」。
   $("stToken").innerHTML =
     stTkItem("Token 今日", fmtTokensFull(tu.today)) +
+    stTkItem("其中输入", fmtTokensFull(tu.in_today),
+      `输入（上下文重发）今日 ${fmtTokensFull(tu.in_today)} · 7日 ${fmtTokensFull(tu.in7)} · 30日 ${fmtTokensFull(tu.in30)}；` +
+      `占今日合计 ${fmtTokensFull(tu.today)} 的绝大部分`) +
     stTkItem("其中输出", fmtTokensFull(tu.out_today),
-      `输出（模型产出）今日 ${fmtTokensFull(tu.out_today)} · 7日 ${fmtTokensFull(tu.out7)} · 30日 ${fmtTokensFull(tu.out30)}；` +
-      `输入（上下文重发）今日 ${fmtTokensFull(tu.in_today)} · 7日 ${fmtTokensFull(tu.in7)}`) +
+      `输出（模型产出）今日 ${fmtTokensFull(tu.out_today)} · 7日 ${fmtTokensFull(tu.out7)} · 30日 ${fmtTokensFull(tu.out30)}`) +
     stTkItem("7日", fmtTokensFull(tu.days7)) +
     stTkItem("30日", fmtTokensFull(tu.days30)) +
     stTkItem("请求 今日", fmtCredits(tu.req_today) + " / " + fmtCredits(tu.req_all)) +
@@ -2420,7 +2423,7 @@ function renderPlatformTable(s) {
     `<span class="st-plat-in">今日收入</span>` +
     `<span class="st-plat-out" title="花费差值扣除积分包到期作废后的净消耗">今日消耗</span>` +
     `<span class="st-plat-expd" title="今日因积分包到期/回收而作废的额度（已从今日消耗中扣除）">今日作废</span>` +
-    `<span class="st-plat-tokens" title="上行=今日 Token 合计；下行「出」= 其中输出（模型真正产出的量）">今日Token</span>` +
+    `<span class="st-plat-tokens" title="上行=今日 Token 合计；下行「入」= 输入（prompt，每轮重发的上下文），「出」= 输出（completion，模型真正产出的量）">今日Token</span>` +
     `<span class="st-plat-exp">今日到期</span>` +
     `<span class="st-plat-exp">明日到期</span>` +
     `<span class="st-plat-exp">7日内到期</span>` +
@@ -2463,14 +2466,18 @@ function stPlatNum(cls, amount, suffix) {
   if (amount <= 0) return `<span class="${cls} st-plat-zero">—</span>`;
   return `<span class="${cls}">${fmtCredits(amount)}${suffix || ""}</span>`;
 }
-// Token 单元格：上行=今日合计（万/亿），下行=其中输出（R66）。
-// 0 值置灰——但合计为 0 而输出有值时仍展示输出，避免拆分层被合计的置灰逻辑吞掉。
+// Token 单元格：上行=今日合计（万/亿），下行=入/出拆分（R66 出，R67 加入）。
+// 入 = 合计 − 出（与后端 clampNonNeg 同义：模型行 in+out==tokens 是硬约束）。
+// 0 值置灰——但合计为 0 而拆分列有值时仍展示拆分，避免被合计的置灰逻辑吞掉。
 function stPlatTok(amount, out) {
   amount = Number(amount) || 0;
   out = Number(out) || 0;
   if (amount <= 0 && out <= 0) return `<span class="st-plat-tokens st-plat-zero">—</span>`;
   const main = amount > 0 ? fmtTokensFull(amount) : `<span class="st-plat-zero">—</span>`;
-  const sub = out > 0 ? `<i class="st-plat-toksub" title="输出（completion）= 模型真正产出的量">出 ${fmtTokensFull(out)}</i>` : "";
+  const inp = Math.max(0, amount - out);
+  let sub = "";
+  if (inp > 0) sub += `<i class="st-plat-toksub" title="输入（prompt）= 每轮重发的上下文">入 ${fmtTokensFull(inp)}</i>`;
+  if (out > 0) sub += `<i class="st-plat-toksub" title="输出（completion）= 模型真正产出的量">出 ${fmtTokensFull(out)}</i>`;
   return `<span class="st-plat-tokens">${main}${sub}</span>`;
 }
 
