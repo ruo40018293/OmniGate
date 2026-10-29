@@ -95,7 +95,7 @@
       </div>
     </div>
     <div class="usage-cards">
-      <div class="ucard"><div class="ucard-label">Token 总量</div><div class="ucard-value" id="ucTokens">—</div></div>
+      <div class="ucard"><div class="ucard-label">Token 总量</div><div class="ucard-value" id="ucTokens">—</div><div class="ucard-sub" id="ucTokensSub">—</div></div>
       <div class="ucard"><div class="ucard-label">请求数</div><div class="ucard-value" id="ucReqs">—</div></div>
       <div class="ucard"><div class="ucard-label">积分消耗</div><div class="ucard-value warn" id="ucSpend">—</div></div>
       <div class="ucard"><div class="ucard-label">积分入项</div><div class="ucard-value ok" id="ucEarn">—</div></div>
@@ -105,9 +105,17 @@
       <button class="tab" data-tab="credit">积分流水</button>
     </div>
     <div class="tab-body" id="tabToken">
+      <div class="chart-head">
+        <div class="seg" id="usageChartMode">
+          <button class="seg-btn active" data-mode="total">合计</button>
+          <button class="seg-btn" data-mode="in">输入</button>
+          <button class="seg-btn" data-mode="out">输出</button>
+        </div>
+        <span class="chart-note">折线按渠道；输入=prompt 每轮重发，输出=模型产出</span>
+      </div>
       <div id="usageChart" class="chart-box">图表库加载中…</div>
       <table class="table" id="tblModels">
-        <thead><tr><th>模型</th><th>渠道</th><th class="num">请求数</th><th class="num">Token</th><th class="num">日均</th></tr></thead>
+        <thead><tr><th>模型</th><th>渠道</th><th class="num">请求数</th><th class="num">输入</th><th class="num">输出</th><th class="num">合计</th><th class="num">日均</th></tr></thead>
         <tbody></tbody>
       </table>
     </div>

@@ -108,6 +108,7 @@
 | R69 | 7 日/30 日「输出」窗口必须是真实历史，不能恒等于今日 |
 | R70 | 运行日志要轮转，但「今天写过的日志」绝不能搬走 |
 | R71 | 模型表积分列折算不出来时显示「—」，不得显示 0（0 会被读成免费） |
+| R72 | 面板 Token 一律「输入/输出/合计」三档给全，只有合计就是在骗人（占比 99:1 时看不出谁在吃额度） |
 
 ## 2. 架构选型（依据）
 
@@ -370,8 +371,8 @@ git tag vX.Y.Z && git push origin vX.Y.Z
 
 - [README.md](README.md) — 用户文档
 - [DEVELOPMENT.md](DEVELOPMENT.md) — 开发者文档（面向 AI Agent）
-- [AGENTS.md](AGENTS.md) — 本文件：决议项一句话判据（R1–R71）、架构选型、不变量
-- [docs/DECISIONS.md](docs/DECISIONS.md) — 决议全文（R1–R71）：每条决议的原始背景、踩坑记录与边界条件
+- [AGENTS.md](AGENTS.md) — 本文件：决议项一句话判据（R1–R72）、架构选型、不变量
+- [docs/DECISIONS.md](docs/DECISIONS.md) — 决议全文（R1–R72）：每条决议的原始背景、踩坑记录与边界条件
 - [docs/三接口兼容改造备忘.md](docs/三接口兼容改造备忘.md) — 三接口（Chat/Responses/Anthropic）兼容层架构决策、实施记录、验证清单、已知限制
 - [docs/用量积分流水记账备忘.md](docs/用量积分流水记账备忘.md) — 双流水统计（token/积分）架构、差分算法、实测验证、已知限制（R17）
 

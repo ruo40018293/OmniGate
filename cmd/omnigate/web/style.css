@@ -596,6 +596,12 @@ code.about-repo:active { transform: translateY(1px); }
 .ucard-value { font-size: 20px; font-weight: 700; margin-top: 2px; }
 .ucard-value.ok { color: var(--ok); }
 .ucard-value.warn { color: var(--warn); }
+/* 副行（输入/输出拆分）：11px 灰字，不与主数字争视觉权重 */
+.ucard-sub { font-size: 11px; color: var(--muted); margin-top: 2px; font-variant-numeric: tabular-nums; }
+
+/* 图表头部：口径切换（合计/输入/输出）+ 一行口径说明 */
+.chart-head { display: flex; align-items: center; gap: 10px; margin-bottom: 8px; flex-wrap: wrap; }
+.chart-head .chart-note { font-size: 11px; color: var(--muted); }
 
 .tabs { display: flex; gap: 4px; border-bottom: 1px solid var(--border); margin-bottom: 10px; }
 .tab { border: 0; background: transparent; padding: 8px 14px; font-size: 13px; cursor: pointer; color: var(--muted); border-bottom: 2px solid transparent; }

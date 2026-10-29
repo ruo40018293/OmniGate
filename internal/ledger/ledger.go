@@ -388,10 +388,18 @@ type TokenStats struct {
 }
 
 // DayTokens 单日（或单小时）token 分渠道小计。
+//
+// In/Out 与 ByChannelIn/ByChannelOut 是 R72 补的输入/输出拆分：Total = In+Out，
+// 三个 by_channel 映射的键集一致（同一渠道在两侧都会出现，值可能为 0）。
+// 老前端只读 total/by_channel，不看新字段，所以加字段是向后兼容的。
 type DayTokens struct {
-	Date      string           `json:"date"` // "01-15"（按小时时 "14:00"）
-	Total     int64            `json:"total"`
-	ByChannel map[string]int64 `json:"by_channel"`
+	Date         string           `json:"date"` // "01-15"（按小时时 "14:00"）
+	Total        int64            `json:"total"`
+	In           int64            `json:"in"`  // prompt 侧（每轮重发的上下文）
+	Out          int64            `json:"out"` // completion 侧（模型产出）
+	ByChannel    map[string]int64 `json:"by_channel"`
+	ByChannelIn  map[string]int64 `json:"by_channel_in,omitempty"`
+	ByChannelOut map[string]int64 `json:"by_channel_out,omitempty"`
 }
 
 // CreditStats 积分口径统计：总量 + 原始条目（分页/图表由前端自算）。
@@ -428,8 +436,18 @@ func (l *Ledger) Query(days int, enrich func(uid string) (name, channel string))
 	st := &Stats{}
 	// 聚合中间态：全部按天（小时视图由当天流水二次展开）
 	type dayAgg struct {
-		total int64
-		byCh  map[string]int64
+		total   int64
+		in, out int64
+		byCh    map[string]int64
+		byChIn  map[string]int64
+		byChOut map[string]int64
+	}
+	newAgg := func() *dayAgg {
+		return &dayAgg{
+			byCh:    map[string]int64{},
+			byChIn:  map[string]int64{},
+			byChOut: map[string]int64{},
+		}
 	}
 	days_ := map[string]*dayAgg{} // "01-15" -> agg
 	models := map[string]*ModelStat{}
@@ -458,11 +476,15 @@ func (l *Ledger) Query(days int, enrich func(uid string) (name, channel string))
 					}
 					d := days_[key]
 					if d == nil {
-						d = &dayAgg{byCh: map[string]int64{}}
+						d = newAgg()
 						days_[key] = d
 					}
 					d.total += e.PT + e.CT
+					d.in += e.PT
+					d.out += e.CT
 					d.byCh[e.Ch] += e.PT + e.CT
+					d.byChIn[e.Ch] += e.PT
+					d.byChOut[e.Ch] += e.CT
 					st.Token.Total += e.PT + e.CT
 					st.Token.PT += e.PT
 					st.Token.CT += e.CT
@@ -481,11 +503,15 @@ func (l *Ledger) Query(days int, enrich func(uid string) (name, channel string))
 					if t.Format("2006-01-02") == now.Format("2006-01-02") {
 						h := hours[t.Hour()]
 						if h == nil {
-							h = &dayAgg{byCh: map[string]int64{}}
+							h = newAgg()
 							hours[t.Hour()] = h
 						}
 						h.total += e.PT + e.CT
+						h.in += e.PT
+						h.out += e.CT
 						h.byCh[e.Ch] += e.PT + e.CT
+						h.byChIn[e.Ch] += e.PT
+						h.byChOut[e.Ch] += e.CT
 					}
 				case "credit":
 					var e CreditEntry
@@ -518,14 +544,19 @@ func (l *Ledger) Query(days int, enrich func(uid string) (name, channel string))
 	}
 
 	// by_day / by_hour 序列化
+	// toDT：nil 桶也要给出空壳（序列化后 by_channel 是 {}），前端不会撞 undefined
+	toDT := func(date string, a *dayAgg) DayTokens {
+		if a == nil {
+			return DayTokens{Date: date, ByChannel: map[string]int64{}}
+		}
+		return DayTokens{
+			Date: date, Total: a.total, In: a.in, Out: a.out,
+			ByChannel: a.byCh, ByChannelIn: a.byChIn, ByChannelOut: a.byChOut,
+		}
+	}
 	if days == 1 {
 		for h := 0; h <= now.Hour(); h++ {
-			a := hours[h]
-			dt := DayTokens{Date: fmt.Sprintf("%02d:00", h), ByChannel: map[string]int64{}}
-			if a != nil {
-				dt.Total, dt.ByChannel = a.total, a.byCh
-			}
-			st.Token.ByDay = append(st.Token.ByDay, dt)
+			st.Token.ByDay = append(st.Token.ByDay, toDT(fmt.Sprintf("%02d:00", h), hours[h]))
 		}
 	} else {
 		keys := make([]string, 0, len(days_))
@@ -534,7 +565,7 @@ func (l *Ledger) Query(days int, enrich func(uid string) (name, channel string))
 		}
 		sort.Strings(keys)
 		for _, k := range keys {
-			st.Token.ByDay = append(st.Token.ByDay, DayTokens{Date: k, Total: days_[k].total, ByChannel: days_[k].byCh})
+			st.Token.ByDay = append(st.Token.ByDay, toDT(k, days_[k]))
 		}
 	}
 

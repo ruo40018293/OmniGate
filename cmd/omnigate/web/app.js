@@ -2059,6 +2059,8 @@ function afterStateReady() {
 
 // ---------- 用量与流水面板 ----------
 let usageDays = 7;
+let usageChartMode = "total"; // 折线图口径：total | in | out
+let lastUsage = null;         // 最近一次 /api/usage 响应（切图表口径时复用，不重发请求）
 let usageChart = null;    // token 折线图（echarts 实例）
 let creditChart = null;   // 积分消耗折线图（echarts 实例）
 let recentAll = [];       // 全量最近流水（分页源，时间升序）
@@ -2095,26 +2097,41 @@ async function loadUsage() {
 }
 
 function renderUsage(st) {
-  $("ucTokens").textContent = fmtTokensFull(st.token.total);
-  $("ucReqs").textContent = fmtCredits(st.token.requests);
-  $("ucSpend").textContent = fmtCredits(st.credit.spend);
-  $("ucEarn").textContent = fmtCredits(st.credit.earn);
+  const tk = st.token || {};
+  const cr = st.credit || {}; // credit 缺失时不要连文本都渲染不出来
+  $("ucTokens").textContent = fmtTokensFull(tk.total);
+  // 副行给输入/输出拆分：总量只有一个数字时看不出谁在吃 token（输出通常 <1%）
+  const outPct = tk.total > 0 ? ((tk.ct / tk.total) * 100).toFixed(2) : "";
+  $("ucTokensSub").textContent =
+    `入 ${fmtTokensFull(tk.pt)} · 出 ${fmtTokensFull(tk.ct)}` + (outPct ? ` · 输出占 ${outPct}%` : "");
+  $("ucReqs").textContent = fmtCredits(tk.requests);
+  $("ucSpend").textContent = fmtCredits(cr.spend);
+  $("ucEarn").textContent = fmtCredits(cr.earn);
 
+  lastUsage = st; // 图表模式切换时复用，不重新请求
   renderModelTable(st.token.by_model || [], usageDays);
-  renderCreditTab(st.credit || {});
   renderUsageChart(st);
-  renderCreditChart(st.credit || {});
+  // 积分流水（表格 + 折线图）由 renderCreditTab 内部一次画完；
+  // 历史上这里还多调了一次 renderCreditChart(st.credit)，传的是对象不是条目数组，
+  // 每次刷新都在 loadUsage 的 catch 里静默抛 TypeError（上游 v2.6.2 带进来的），已删。
+  renderCreditTab(cr);
 }
 
 function renderModelTable(rows, days) {
   const tb = $("tblModels").querySelector("tbody");
-  if (!rows.length) { tb.innerHTML = `<tr><td colspan="5" class="empty-cell">暂无数据（流水自本功能上线后开始记录）</td></tr>`; return; }
+  if (!rows.length) { tb.innerHTML = `<tr><td colspan="7" class="empty-cell">暂无数据（流水自本功能上线后开始记录）</td></tr>`; return; }
   const top = rows.slice(0, MODEL_TOP_N); // 前 20 名，已按 token 降序
   tb.innerHTML = top.map((r) => {
-    const avg = days > 1 ? Math.round((r.pt + r.ct) / days) : (r.pt + r.ct);
+    const inT = r.pt || 0, outT = r.ct || 0, tot = inT + outT;
+    const avg = days > 1 ? Math.round(tot / days) : tot;
+    // src=none 的 0 token 请求（如失败兜底）拆分开无意义，显示 — 而不是 0
+    const has = inT > 0 || outT > 0;
     return `<tr>
       <td>${esc(r.model)}</td><td><span class="badge ${chClass(r.channel)}">${esc(chLabel(r.channel))}</span></td>
-      <td class="num">${fmtCredits(r.requests)}</td><td class="num">${fmtTokensFull(r.pt + r.ct)}</td>
+      <td class="num">${fmtCredits(r.requests)}</td>
+      <td class="num">${has ? fmtTokensFull(inT) : "—"}</td>
+      <td class="num">${has ? fmtTokensFull(outT) : "—"}</td>
+      <td class="num">${fmtTokensFull(tot)}</td>
       <td class="num">${fmtTokensFull(avg)}</td></tr>`;
   }).join("");
 }
@@ -2167,14 +2184,16 @@ function renderUsageChart(st) {
   if (!usageChart) return;
   const byDay = (st.token.by_day || []);
   const dates = byDay.map((d) => d.date);
-  // 渠道系列：取所有出现过的渠道并集
+  // 渠道并集取自 total 侧：切「输入/输出」时图例与配色不跳（三条曲线同一渠道同一颜色）
   const chans = [...new Set(byDay.flatMap((d) => Object.keys(d.by_channel || {})))];
+  const key = usageChartMode === "in" ? "by_channel_in"
+    : usageChartMode === "out" ? "by_channel_out" : "by_channel";
   const series = chans.map((ch) => ({
     name: CH_NAMES[ch] || ch, type: "line", smooth: true,
-    data: byDay.map((d) => d.by_channel[ch] || 0),
+    data: byDay.map((d) => ((d[key] || {})[ch] || 0)),
   }));
   usageChart.setOption({
-    tooltip: { trigger: "axis" },
+    tooltip: { trigger: "axis", valueFormatter: (v) => fmtTokensFull(v) },
     legend: { data: series.map((s) => s.name) },
     grid: { left: 50, right: 20, top: 36, bottom: 28 },
     xAxis: { type: "category", data: dates },
@@ -2264,6 +2283,13 @@ function bindUsage() {
       usageDays = parseInt(b.dataset.days, 10);
       $("usageRange").querySelectorAll(".seg-btn").forEach((x) => x.classList.toggle("active", x === b));
       loadUsage();
+    };
+  });
+  $("usageChartMode").querySelectorAll(".seg-btn").forEach((b) => {
+    b.onclick = () => {
+      usageChartMode = b.dataset.mode;
+      $("usageChartMode").querySelectorAll(".seg-btn").forEach((x) => x.classList.toggle("active", x === b));
+      if (lastUsage) renderUsageChart(lastUsage); // 只重画，不重新拉数据
     };
   });
   document.querySelectorAll(".tabs .tab").forEach((b) => {
