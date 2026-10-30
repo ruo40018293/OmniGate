@@ -1,4 +1,4 @@
-# 决议全文（R1–R81）
+# 决议全文（R1–R82）
 
 > 本文件是 `AGENTS.md` 第 1 节的**完整原文**——每条决议「为什么这么做 / 踩过什么坑 / 边界在哪」都在这里。
 > `AGENTS.md` 只保留每条的一句话判据，随每次会话自动加载，用来提醒「别推翻什么」；
@@ -90,3 +90,37 @@
 | R79 | **标志改成「门」：拱门洞 + 比门框更宽的门槛，小尺寸判别特征靠门槛那一横**（2026-10-29，用户「然后设计个图标？用于生成exe的？」） | **背景**：R78 把产品名改成 OmniGate，但图标还是旧版的 **W 笔刷标**（`build/make_icon.py` 里的 `W_PATH`）——名字换了、标还是前一个产品的首字母，等于没改名。**为什么用门而不是字母**：①字母标会和系统图标撞款（Win 键、各驱动托盘）；②「一道门」直接对应 Gateway 语义：多路上游账号在门后聚合，客户端只看见一个入口。**形状**：圆角方块底（`#0f1315`）+ 竖向渐变门框（青绿 `#4ade80`→`#22d3ee`，`k=0.099×S` 粗）+ 门槛（比门框两侧各宽 0.070×S）+ 大尺寸（≥48px）门洞内一层很淡的透光（`GATE_GLOW_ALPHA=0.20`，实测门洞内绿通道 ≈63、底 ≈19）。竖向渐变跟着笔画渲染（按 y 查色），不是贴图。**分档**：<16px 只画形状与门槛、无高光无透光（糊成一片比细节全丢更糟）；16–47px 只加左内缘高光；≥48px 才开透光。 | **验证不靠看图**（本模型无图像输入，`read_image` / `modlens_read_image` 都不可用）：①新增 `build/check_icon.py` 四条硬断言——左右对称差 ≤1px、**门槛比门框宽**（16px ≥1px、≥32px ≥3px）、笔画与底相对亮度比 ≥4.5:1（WCAG AA）、安全边距 ≥4% 画布；跑 9 个尺寸全部通过（实测边距 2–42px、门槛 12/6 到 172/52、对比度 11.2–12.1:1）。②**变异四组全红**：拱心右移 0.02 → 5 处不对称；门槛收窄到 0.20 → 16px「门槛 6px vs 门框 6px」；招牌色压暗 → 45 处（含对比度）；拱半径 0.44 → 18 处边距/留白。③另用 ASCII 灰度渲染逐行打印 16/24/48/64 的实际像素，肉眼可读地确认「拱 + 门槛」在小尺寸没退化成小写 n。 | **链路（五个消费方，漏一个就是「改完看着没变」）**：`build/make_icon.py` 一次生成 `windows/icon.ico`（9 尺寸，33382B）、`icon_preview.png`、`appicon.png`（1024px，mac 侧唯一源图，`build-app.sh` 用 sips+iconutil 派生 icns）、`logo64.png`；随后 `cp` 到 `cmd/omnigate/build/trayicon.ico`（`main.go` 的 `go:embed`，托盘）与 `cmd/omnigate/web/logo64.png`（面板 logo/favicon）；再 `python build/make_syso.py` 写 `cmd/omnigate/rsrc_windows_amd64.syso`（9 尺寸 34584B）；最后 `build/check_res.py` 验 exe 资源树——**syso 与 exe 双双 PASS**（三层目录、lang=1033、9/9 为合法 PNG、GROUP OffsetToData 是 RVA、RT_VERSION 含 ProductName/Description）。CI 里 `.github/workflows/build.yml` 还会用 `rsrc -ico build/windows/icon.ico` 现场再生成一次 syso，所以 ico 才是唯一源。 | **教训一**：**「门」和「小写 n」只差一条横**——门槛必须比门框宽且这条宽度要写成断言，否则某次微调把它收进去，16px 立刻读成 n，而大尺寸预览完全看不出来。**教训二**：**透光强度不能凭感觉调**——0.42 实测门洞与底色只差 3/255（等于没有），0.62 直接冲成一块实色（差 87/255），最后按「目标准绿通道 ≈60」反解到 0.20；凡是 alpha 类参数都要先量再定。**教训三**：**对比度采样点必须取笔画最亮那一行**——写死 `SPRING_Y - R×0.7` 在小尺寸会落进门洞内部（那里只有透光），第一版因此误报「对比度 1.0:1」，改成在拱顶那一列扫最亮像素才正确。**教训四**：脚本输出别用非 GBK 字符（`✗` 在中文控制台直接 UnicodeEncodeError 炸掉整轮），跑之前 `export PYTHONIOENCODING=utf-8`。**历史资产**：根目录 `icon.png` 与 `cmd/genicon/` 是 Wails 时代遗留（R7 已删 Wails），只做位图缩放、无设计分档，不要再改。 |
 | R80 | **发布说明里的文件名必须等于真实产物名，且不写尖括号占位符**（2026-10-29，用户「macOS 用户下载 WorkBuddyAPI-0.1.5-<arch>.dmg。 我还看到这个字呢」） | **现象**：改名（R78）之后，GitHub release v0.1.5 页面上仍写着「macOS 用户下载 `WorkBuddyAPI-0.1.5-<arch>.dmg`」，而该 release 的实际资产是 `OmniGate-0.1.5-amd64.dmg` 与 `OmniGate-0.1.5-arm64.dmg`（时间线：说明文件写于改名之前，资产由改名后的工作流在 16:16 上传）。用户点进去既找不到那个文件名，也看不到自己产品的名字。 **取证**：`curl /repos/<owner>/OmniGate/releases?per_page=5` → 只有一个 release（v0.1.5），7 个资产（2 个 dmg 均为 `OmniGate-0.1.5-*.dmg`、5 个裸二进制均为 `omnigate-*`）；`v0.1.4` 的 release 端点返回 404（从未发布）。仓库内 `grep -rn WorkBuddyAPI` 只剩 6 处：本行与 R78 是决议正文、`README.md` 两处是「先退出旧的 WorkBuddyAPI.app」升级指引（必须保留）、`platform_darwin.go` 旧 plist 注释、`build.yml` 历史注释、以及两个 RELEASE 文件。 **第二个坑**：`<arch>` 这种尖括号占位符会被 GitHub 渲染当未知 HTML 标签吃掉，页面上显示成 `…-0.1.5-.dmg` —— 文件名里的占位符要写全（amd64 / arm64），不要指望读者自己替换。 **实现**：`RELEASE-v0.1.5.md` 的升级方式第 2 条改成 `OmniGate-0.1.5-amd64.dmg`（Intel）/ `OmniGate-0.1.5-arm64.dmg`（Apple 芯片）；`RELEASE-v0.1.4.md` 保留旧名但写全架构，并加一行引用说明「v0.1.4 是改名前的版本，资产名沿用旧名；v0.1.5 起统一为 OmniGate-*」；新增 `internal/app/release_notes_test.go` 契约测试，只校验当前版本 `RELEASE-v<Version>.md`（历史版本回改等于篡改）。 **断言四条**：①不出现旧名做文件名（`WorkBuddyAPI-` / `WildWork-` / `workbuddy-api.exe`）；②不出现 `<arch>`；③每个 `*.dmg` 必须匹配 `^OmniGate-<Version>-(amd64|arm64)\.dmg$` 且至少提到一个；④每个 `*.exe` 必须以 `omnigate-` 开头。 **变异三处全红**：换回 `WorkBuddyAPI-0.1.5-<arch>.dmg` → 「出现旧产品名」+「用了 <arch> 占位符」+「没有提到任何 .dmg」三条同时报；旧名写全架构 `WorkBuddyAPI-0.1.5-amd64.dmg` → 旧名 + 名字不符两条；`omnigate-windows-amd64.exe` 改 `workbuddy-api.exe` → 「Windows 资产名不符」。复原后 PASS。 **教训**：①**文档里的文件名不是排版，是可以被验证的契约**——它要么指向真实存在的资产，要么就是错误信息，而这类错误构建/测试/lint 全拦不住，只能写契约测试；②**改名要回改的是「指向未来的说明」，不是「记录过去的说明」**（历史版本的说明写旧名是事实，改它才是错）；③发布说明与资产可能由**不同时间点的构建**产生，写说明时以「这次发布实际会上传什么」为准，不以「仓库里当前叫什么」为准；④`<...>` 在 Markdown 里不是占位符而是 HTML，文件名要么写全，要么用反引号包住也照样会被吞——别在这上面赌。 |
 | R81 | **README 也是文档契约：资产名必须指向真实文件、不写尖括号占位符、环境变量前缀与代码一致**（2026-10-29，用户「然后更新下README.md？」） | **背景**：R78 改名、R79 换图标、R80 修发布说明之后，README 已经落后一个版本——首屏没有标志图、功能清单缺 R74/R76 的两个入口、§3.3 的 dmg 名还写着`OmniGate-<版本>-<arch>.dmg`（R80 刚证明 `<arch>` 会被 Markdown 当 HTML 标签吃掉）、§五 还写着环境变量前缀 `WILDWORK_*`（R78 已改成 `OMNIGATE_*` 优先、旧名兜底）。**更新七处**：①首屏加 `<p align="center"><img src="build/appicon.png" width="112" alt="OmniGate 标志：一道门"></p>`（R79 的 1024px 源图，仓库内相对路径，GitHub 直接渲染）；②§2.4 猫猫旅行补「账号行点 🐱 可对单个账号立刻跑一次（手动入口与定时开关解耦）」（R76）；③§2.7 增加「批量作业立刻受理」条目（R74，按钮走 `刷新中 3/12`、切页面不打断、状态在服务端）；④§3.3 的 dmg 名改成 `OmniGate-{版本}-arm64.dmg` / `-amd64.dmg` —— **刻意不用尖括号**，换成 `{版本}` 后 Markdown 不会吞，读者也看得懂要替换什么；⑤§3.3 升级提示原文「0.1.6 起统一为 OmniGate」是错的，改为「macOS 包名 0.1.4 及更早是 `WorkBuddyAPI.app`，**0.1.5 起为 `OmniGate.app`**」——判据来自 R80 取证的反推：v0.1.5 那个 tag 里 `build/macos/build-app.sh` 的 `APP_NAME` 仍是 `WorkBuddyAPI`、`build.yml` 的 dmg 通配仍是 `dist/WorkBuddyAPI-*-<arch>.dmg`，而实际资产叫 `OmniGate-0.1.5-amd64.dmg` ⇒ 那批二进制是**改名之后**构建的，包名早就是新名；⑥§五 环境变量改为「前缀是 `OMNIGATE_*`；旧前缀 `WILDWORK_*` 仍被识别（`docker/.env.example` 与 compose 为兼容存量部署沿用旧名）」；⑦新增 §3.5 从源码构建（`scripts/build_release.sh` 三个平台、`-trimpath -s -w` 的理由、改图标走 `build/ICON_README.md` 的五步、发版只认 `vX.Y.Z` 且说明放在 `RELEASE-vX.Y.Z.md`）。 | **新增测试**：`internal/app/release_notes_test.go` 追加 `TestReadmeArtifactNamesMatchReality`，两条约束——①全文不得出现 `<arch>` / `<版本>` / `<version>` 尖括号占位符；②任何**含有** `.dmg` 或 `.exe` 的行，文件名必须是真实产物（dmg 行必须含 `OmniGate-`、exe 行必须含 `omnigate`、不得出现 `WorkBuddyAPI-` / `WildWork-` / `workbuddy-api.exe`）。**为什么按「行里有没有扩展名」判而不是全文 grep 旧名**：README 里「先退出旧的 `WorkBuddyAPI.app`」「旧的 `WorkBuddyAPI.app` 可直接删除」是**故意保留的升级指引**（教用户找到旧安装），当成漏改会把人害了；只对「带扩展名的资产名」报错才既守住契约又不误伤叙述。 | **变异三处全红**：dmg 名换回 `OmniGate-0.1.5-<arch>.dmg` → 「用了 `<arch>` 占位符」；换回 `WorkBuddyAPI-0.1.5-amd64.dmg` → 旧名 + 缺 `OmniGate-` 前缀两条；`omnigate-windows-amd64.exe` 改 `workbuddy-api.exe` → 旧名 + 非 omnigate 两条。复原后两条契约测试同时 PASS；`go build ./...` rc=0、`go vet ./...` 干净、`go test ./...` 37 包全绿；README 代码围栏 10 个（偶数，无未闭合）。 | **教训一**：**变异脚本不能拿「当前已被改坏的文件」当基线**——本轮三次变异连续执行，脚本每次 import 时都把当时的 README 存成 `.mutation.orig`，于是第二次起基线已被污染，restore 复原的是「带前一次变异」的版本，测试一直红且 `cmp` 还显示一致。正确做法：**变异前只存一份 pristine**（或在变异之间 `git checkout`），并且复原后必须重跑测试而不是只看 diff。**教训二**：校验文档改动不能只看 diff 与字节数——还要查「代码围栏是否成对」「标题层级是否跳级」，本轮顺手核了 20 个章节标题的顺序（2.1…3.5、一到八）。**教训三**：面向用户的占位符用 `{版本}` 而不是 `<版本>`——后者在 Markdown 里是 HTML 标签，不只是「可能被吞」，而是**浏览器端一定会吞**；写文档时就该默认读者看到的是渲染结果。 |
+
+
+## R82 · 拦截取证：把被拦请求整包落盘，二分重放定位指纹
+
+**判据**：被内容策略拦截（`11-128`）时把发往上游的**原始请求体**整包落盘到
+`data/blocked/blocked-<unixnano>.json`（滚动保留 3 份），供 `scripts/bisect-blocked.py`
+二分重放定位指纹；由 `internal/upstream/diag_test.go` 守。
+
+**背景**：位置检测/指纹拦截的上报文本只有一行 `Illegal API invocation`，既不知道被拦的
+是哪一句，也不知道是单句命中还是跨句组合命中。此前每次都得人工把 system prompt 逐段摘出来
+手动试，一次半小时起步，而且复现不了就等于没结论。
+
+**落地**：
+- `internal/upstream/diag.go`：`DumpBlocked(body []byte)` 写 `data/blocked/blocked-<unixnano>.json`
+  （0644），写完 `pruneBlocked` 按文件名排序删旧保新 3 份；空 body 直接返回，不建目录
+  ——避免 0 字节垃圾样本把真样本挤掉。
+- 接线点：`internal/upstream/client.go:371`，只在判定 `ErrContentBlocked` 的分支调用，
+  落盘的是 `prepared`（已过脱敏的发往上游字节），**不是**客户端原始 body。
+- `scripts/bisect-blocked.py`：只读重放，流程 = 整包 → 只留首条 system → 句子前缀二分 →
+  单句 vs 相邻两句（区分单句指纹与跨句组合指纹）。默认 `--max-requests 24`，打满即停。
+
+**边界**：
+- 样本落盘**不含凭据头**（Authorization 在 HTTP header 里，不在 body），但 system 里可能有
+  用户业务内容 —— 目录按部署数据目录处理，不外发。
+- 重放 = 真实上游请求，**必须用小号渠道跑**，禁止把它当探测循环。
+
+**验收**：`TestDumpBlockedWritesBody`（原字节 + 合法 JSON）、
+`TestDumpBlockedPrunesToKeep`（留 3 份）、`TestDumpBlockedIgnoresEmpty`（空 body 不落盘）。
+三处变异均红：去掉 `pruneBlocked` → 份数 5≠3；允许空 body 落盘 → 目录被创建；
+二次编码写入 → 原字节不一致。
+
+**没做的部分**：本机开发通道会静默转写读到的字符串字面量，`internal/sanitize/sanitize.go`
+与 `internal/upstream/sanitize.go` 因此**不可安全编辑**（已尝试 6 次全部改坏，详见 AGENTS.md §6），
+本次只搬纯新增的取证件，不碰脱敏表本身。

@@ -366,6 +366,10 @@ func (c *Client) ChatStream(a *auth.Auth, body []byte) (rc io.ReadCloser, status
 		kind := Classify(resp.StatusCode, string(raw))
 		log.Printf("chat_stream uid=%s: upstream %d %s body=%s",
 			a.UID, resp.StatusCode, kind, truncate(string(raw), 200))
+		// R82：内容拦截落盘纯出站 body，供 scripts/bisect-blocked.py 二分定位。
+		if kind == ErrContentBlocked {
+			DumpBlocked(prepared)
+		}
 		// R54 异常取证：11-128（内容拦截）与 11140（账号风控）都无法用探针复现，
 		// 只有真实失败时的「出站字节 + 上游回包」能用来定位。
 		capture.Save(capture.Record{
