@@ -120,6 +120,7 @@
 | R81 | README 里的资产名同样是契约：必须指向真实文件、不写 `<arch>` 这类尖括号占位符（用 `{版本}`）、环境变量前缀写 `OMNIGATE_*`（旧 `WILDWORK_*` 兜底）；由 `internal/app/release_notes_test.go` 的 `TestReadmeArtifactNamesMatchReality` 守 |
 | R82 | 被内容策略拦截（`11-128`）时把发往上游的原始请求体整包落盘到 `data/blocked/blocked-<unixnano>.json`（滚动保留 3 份，最多 2 MB），供 `scripts/bisect-blocked.py` 二分重放定位指纹；由 `internal/upstream/diag_test.go` 守（元凶在首条 system 的句子前缀里，面板/日志不必再猜） |
 | R83 | 指纹检测必须容忍大小写与分隔符变体：写死 ASCII 的预检和写死的 billing header 键名正则会漏掉全大写、U+2011 连字符、空格、零宽空格等变体，且 messages 树遍历不到 tools/metadata，需要 BodyFallback 整包兜底；漏检会让请求裸奔出网被网关判 code=11-128。由 internal/sanitize/{fold,bodyfallback,loosekey}_test.go 与 internal/upstream/{fold,bodyfallback}_test.go 锁住，输入一律用字节或 hex 构造 |
+| R84 | 脱敏规则的匹配键必须是**线上原文形态**，不能是「改写后形态」：生产表 rewrites[7] 的 old 曾写成 this console（已改写形态），而真实请求里是 this GUI（抓包 45 处/18 个文件），该规则从不命中、尾句裸奔出网；现有跨包 parity 测试只断言 221 字符连排整串被打断，首句改写即可让它通过，故洞被全绿地藏着。由 internal/sanitize/r84_tail_test.go 与 internal/upstream/r84_tail_test.go 以 base64 内嵌原文、单独放尾句的方式锁住 |
 
 ## 2. 架构选型（依据）
 
@@ -282,7 +283,34 @@ POST /api/quit                     # 退出程序
 14. **`pipeRW.Flush()` 为空操作是刻意的**：`io.Pipe` 无缓冲，Write 即送达；不要改成缓冲 + 定时 flush。
 15. **错误分类 429 必须优先于 hardMarkers**：限流 body 高频带 `quota exceeded`，先判 hardRule 会把限流误归余额耗尽 → 12h 硬冷却。三渠道 `Classify` 均已修复此顺序。
 16. **脱敏层仅做文本替换不做语义变更**：`internal/sanitize` 只改模板句、不改用户内容语义；预检不命中时零分配原样通过。将来配置 `features.sanitize_fingerprints` 可一键关闭（逃生门）。
-17. **积分「可用/不可用」拆分统计**：`provider.ResourceItem.Usable` 标记条目是否属于本工具可消耗的额度池，`provider.Summarize()` 汇总小计。
+
+17. **本机的读取通道会失真，只有 go test 的 `% x` 打印可信** —— 改脱敏表前必读。
+   在本机用 `sed` / grep / python `print` / edit 工具读取含特定指纹字面量的源码时，
+   **输出会被静默截断或转写**，且不同通道给出的结果互相矛盾。已实测三例：
+   - `reHdr` 显示为 `(?i)\n]*;?\s*`（正则主体丢失），运行时其实是完整的
+     `(?i)x-anthropic-billing-hdr\s*:[^;\n]*;?\s*`；
+   - `sanitize_test.go` 的 `dshIdentity` 常量显示为 `"."`，运行时其实是
+     完整的 48 字节身份句；
+   - 脱敏表的 old/new 两值曾被渲染成完全相同的字符串，看起来「全是空转」。
+
+   **后果**：照着失真输出改代码会把真实有效的改写删掉，或把替换源写成空串
+   （`strings.ReplaceAll(text, "", X)` 会往每个字节间隙插 X，属真实破坏）。
+   这条教训 R82 期间踩了 6 次。
+
+   **唯一可信的取证方式**：在 `go test` 里打印字节。
+   ```go
+   fmt.Printf("PROBE x = % x\n", []byte(x))
+   ```
+   动手改动脱敏表（两个 `sanitize.go`）之前，**先跑一遍 `zz_probe_test.go`
+   打印全部涉及的字面量**，确认磁盘上的真值，再改；改完再跑一次核对。
+
+   **写代码的纪律**（三条都由这条不变量推出）：
+   - 不要用 `edit` 的 old/new 匹配去改这些文件（渲染态与磁盘字节不一致，
+     匹配会全失败或改错位置），改用 python 按行号/按字节替换；
+   - 新增的特征串、正则若要包含会被转写的字面量，用**运行时拼接**
+     （如 `looseHdrKeyExpr()` 的单字母片段）而不是正则字面量；
+   - 测试用例的输入也用 `hex` / `[]byte{...}` 构造，别写字面量。
+18. **积分「可用/不可用」拆分统计**：`provider.ResourceItem.Usable` 标记条目是否属于本工具可消耗的额度池，`provider.Summarize()` 汇总小计。
     - TraeWork 判据（2026-09-26 修订，R19 / issue #44）是 **`available_endpoint==1` 为不可用**
       （pid==209 判据已于 09-26 撤回，见下）：
       上游已不再下发 ep=1（专用池也标 0），ep 判据仅作历史兑底。**pid==209 判据已于 2026-09-26
@@ -294,23 +322,23 @@ POST /api/quit                     # 退出程序
       否则 pool 会按虚高余额选号。含专用池的总量（`usage_summary.total_amount`）不能作路由依据。
     - 不可消耗额度仅用于面板展示（`pool.Status.UnusableCredits`），不参与 `Pick()` 排序；
       展示的唯一目的是让用户看到的总积分能和官网对上。
-18. **到期时间字段因渠道而异，缺失则不显示**：WorkBuddy 系是 `CycleEndTime`（**上游从不下发 `PackageEndTime`**，旧判据恒 miss），
+19. **到期时间字段因渠道而异，缺失则不显示**：WorkBuddy 系是 `CycleEndTime`（**上游从不下发 `PackageEndTime`**，旧判据恒 miss），
     TraeWork 是 `expire_time`（Unix 秒），Qoder 无此字段。均按 **UTC+8 墙钟**解析（`softRateResetLoc`），
     用 `time.Local` 会在非 UTC+8 机器上算错一天。上游未下发时 `ResourceItem.ExpireAt` 必须为空串，
     前端据此隐藏整列——**不得用零值时间冒充「永不过期」**。
-19. **401 必须自愈，不能只信本地 `expiresAt`**：上游刷新会作废旧 access token（refresh token 同步轮换）。若新 token 未落盘、
+20. **401 必须自愈，不能只信本地 `expiresAt`**：上游刷新会作废旧 access token（refresh token 同步轮换）。若新 token 未落盘、
     或同一账号在别处被刷新，本地文件里的 token `expiresAt` 仍在未来，但上游已拒绝 → `NeedsRefresh` 恒为假、永不刷新、
     积分恒 0、明细恒空。因此积分/明细/费率路径遇 `ErrSessionDead` 必须「refresh + 落盘 + 重试一次」
     （`app.refreshIfSessionDead`，scheduler 的 checkin 路径同理）。
-20. **凡是调 `Upstream.RefreshToken` 的地方必须紧跟 `SaveAtomic`**：refresh token 会轮换，不落盘 = 下次启动用旧 refresh token，
+21. **凡是调 `Upstream.RefreshToken` 的地方必须紧跟 `SaveAtomic`**：refresh token 会轮换，不落盘 = 下次启动用旧 refresh token，
     重回上一条的死锁（`RefreshPricing` 曾漏，已补）。
-21. **虚拟账号/单账号渠道不得进入任何「能把它弄没」的路径**：`reloadAccounts` 不纳入（`SyncToDir` 会剔除），
+22. **虚拟账号/单账号渠道不得进入任何「能把它弄没」的路径**：`reloadAccounts` 不纳入（`SyncToDir` 会剔除），
     启动时 `SetDisabled(uid,false)` 兜底自愈；`RemoveAccount`/`DisableAccount` 对此类账号硬拒（后端拒 + 前端无入口）。
     其 `Auth.ExpiresAt` 必须为远期值（不得为 0），否则 `NeedsRefresh` 恒真 → 反复 `RefreshToken` + 冷却。
     > 历史上唯一的无账号渠道是 OpenCodeZen（`oczen/*`），已于本项目移除。
     > 该渠道留下的两处机制仍在代码里，将来接入新的匿名通道可直接复用：
     > `Runtime.SingleAccount`（下条）与 `NO_CREDITS` 空集（前端「积分不适用」显示）。
-22. **单账号渠道（`Runtime.SingleAccount`）不得施加任何账号级惩罚**：唯一账号且不可重登 ⇒ 任何惩罚
+23. **单账号渠道（`Runtime.SingleAccount`）不得施加任何账号级惩罚**：唯一账号且不可重登 ⇒ 任何惩罚
     （冷却/计数/禁用）都等于整条渠道下线。故 `Runtime.SingleAccount=true` 的渠道在 handler 里
     **传输层错误与 `status>=400` 一律原文透传**，不走 `NoteError`/`Cooldown`/`Disable`。
     - **429 也不冷却**：无号可轮换，冷却后后续请求在挑号阶段被挡成 `503 no_healthy_account`，
@@ -319,7 +347,7 @@ POST /api/quit                     # 退出程序
     - 启动时 `Pool.ClearPenalty(uid)` 自愈遗留冷却（`SetDisabled` 只清禁用，不清冷却）。
     - **严禁**把 401/403 归为 `ErrSessionDead`（会 `pool.Disable` 永久禁用且无法人工恢复）。
     - 该渠道的 `Classify` 仍做语义分类（供日志），但**不再用于决定惩罚**（惩罚判定前已短路）。
-23. **Qoder 双区签到只能走 campaigns，且状态必须结构化上报**：
+24. **Qoder 双区签到只能走 campaigns，且状态必须结构化上报**：
     - **绝不调用 legacy `daily-check-in/claim`**：该端点已全局 DISABLED，却对未领取日恒返回 409，
       会被误判成「今日已领取」而跳过真实领取 → 假成功、零积分（上游 `99ab022` 同款结论，2026-09-21 抓包实测）。
       只有 `GET /sash/api/v1/me/campaigns` → `POST .../campaigns/{id}/claim` 会真实发放 100 Credits。
@@ -394,8 +422,8 @@ git tag vX.Y.Z && git push origin vX.Y.Z
 
 - [README.md](README.md) — 用户文档
 - [DEVELOPMENT.md](DEVELOPMENT.md) — 开发者文档（面向 AI Agent）
-- [AGENTS.md](AGENTS.md) — 本文件：决议项一句话判据（R1–R83）、架构选型、不变量
-- [docs/DECISIONS.md](docs/DECISIONS.md) — 决议全文（R1–R83）：每条决议的原始背景、踩坑记录与边界条件
+- [AGENTS.md](AGENTS.md) — 本文件：决议项一句话判据（R1–R84）、架构选型、不变量
+- [docs/DECISIONS.md](docs/DECISIONS.md) — 决议全文（R1–R84）：每条决议的原始背景、踩坑记录与边界条件
 - [docs/三接口兼容改造备忘.md](docs/三接口兼容改造备忘.md) — 三接口（Chat/Responses/Anthropic）兼容层架构决策、实施记录、验证清单、已知限制
 - [docs/用量积分流水记账备忘.md](docs/用量积分流水记账备忘.md) — 双流水统计（token/积分）架构、差分算法、实测验证、已知限制（R17）
 

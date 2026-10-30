@@ -68,7 +68,7 @@ var rewrites = [][2]string{
 	// 「they mean this GUI」→「they mean this console」，指纹断裂但语义不变。
 	{"DeepSeek Harness Web GUI", "DeepSeek Harness Web c0nsole"},
 	{
-		"without naming another target, they mean this console",
+		"without naming another target, they mean this GUI",
 		"without naming another target, they mean this c0nsole",
 	},
 	// R59：前 111 字符是上游渠道校验特征，整句改写为等价表达，语义不变。
