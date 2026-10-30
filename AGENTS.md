@@ -119,6 +119,7 @@
 | R80 | 发布说明里写的文件名必须等于真实产物名（`OmniGate-<ver>-{amd64,arm64}.dmg`），不写 `<arch>` 占位符（GitHub 当 HTML 标签吃掉）；由 `internal/app/release_notes_test.go` 守 |
 | R81 | README 里的资产名同样是契约：必须指向真实文件、不写 `<arch>` 这类尖括号占位符（用 `{版本}`）、环境变量前缀写 `OMNIGATE_*`（旧 `WILDWORK_*` 兜底）；由 `internal/app/release_notes_test.go` 的 `TestReadmeArtifactNamesMatchReality` 守 |
 | R82 | 被内容策略拦截（`11-128`）时把发往上游的原始请求体整包落盘到 `data/blocked/blocked-<unixnano>.json`（滚动保留 3 份，最多 2 MB），供 `scripts/bisect-blocked.py` 二分重放定位指纹；由 `internal/upstream/diag_test.go` 守（元凶在首条 system 的句子前缀里，面板/日志不必再猜） |
+| R83 | 指纹检测必须容忍大小写与分隔符变体：写死 ASCII 的预检和写死的 billing header 键名正则会漏掉全大写、U+2011 连字符、空格、零宽空格等变体，且 messages 树遍历不到 tools/metadata，需要 BodyFallback 整包兜底；漏检会让请求裸奔出网被网关判 code=11-128。由 internal/sanitize/{fold,bodyfallback,loosekey}_test.go 与 internal/upstream/{fold,bodyfallback}_test.go 锁住，输入一律用字节或 hex 构造 |
 
 ## 2. 架构选型（依据）
 
@@ -393,8 +394,8 @@ git tag vX.Y.Z && git push origin vX.Y.Z
 
 - [README.md](README.md) — 用户文档
 - [DEVELOPMENT.md](DEVELOPMENT.md) — 开发者文档（面向 AI Agent）
-- [AGENTS.md](AGENTS.md) — 本文件：决议项一句话判据（R1–R82）、架构选型、不变量
-- [docs/DECISIONS.md](docs/DECISIONS.md) — 决议全文（R1–R82）：每条决议的原始背景、踩坑记录与边界条件
+- [AGENTS.md](AGENTS.md) — 本文件：决议项一句话判据（R1–R83）、架构选型、不变量
+- [docs/DECISIONS.md](docs/DECISIONS.md) — 决议全文（R1–R83）：每条决议的原始背景、踩坑记录与边界条件
 - [docs/三接口兼容改造备忘.md](docs/三接口兼容改造备忘.md) — 三接口（Chat/Responses/Anthropic）兼容层架构决策、实施记录、验证清单、已知限制
 - [docs/用量积分流水记账备忘.md](docs/用量积分流水记账备忘.md) — 双流水统计（token/积分）架构、差分算法、实测验证、已知限制（R17）
 

@@ -13,7 +13,7 @@ import (
 
 // PrepareBody 单 pass 改写；无法解析时原样返回。
 func PrepareBody(src []byte) []byte {
-	return sanitize.Messages(prepareBodyInner(src))
+	return sanitize.BodyFallback(sanitize.Messages(prepareBodyInner(src)))
 }
 
 // prepareBodyInner 同 PrepareBody 但不含脱敏（供内部调用）。

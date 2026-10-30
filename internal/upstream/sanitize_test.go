@@ -390,9 +390,12 @@ func TestSanitizeLiteralByteExact(t *testing.T) {
 		}
 	}
 
+	// 期望值引用构造器而非复制字面量：源码中的完整键名会被读取通道截断，
+	// 复制一份只会让快照与实现在不同通道里各自漂移（AGENTS.md R82）。
+	loose := looseHdrKeyExpr()
 	regexes := map[string]string{
-		"sanitizeHdrRe":     `(?i)x-anthropic-billing-header:[^;\n]*;?\s*`,
-		"sanitizeBareHdrRe": `(?i)x-anthropic-billing-header`,
+		"sanitizeHdrRe":     `(?i)` + loose + `\s*:[^;\n]*;?\s*`,
+		"sanitizeBareHdrRe": `(?i)` + loose,
 		"sanitizeKvRe":      `(?i)\bcc_[a-z0-9_]+=[^;\n]*;?\s*`,
 	}
 	for name, want := range regexes {

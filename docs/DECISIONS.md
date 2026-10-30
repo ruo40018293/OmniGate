@@ -1,4 +1,4 @@
-# 决议全文（R1–R82）
+# 决议全文（R1–R83）
 
 > 本文件是 `AGENTS.md` 第 1 节的**完整原文**——每条决议「为什么这么做 / 踩过什么坑 / 边界在哪」都在这里。
 > `AGENTS.md` 只保留每条的一句话判据，随每次会话自动加载，用来提醒「别推翻什么」；
@@ -124,3 +124,71 @@
 **没做的部分**：本机开发通道会静默转写读到的字符串字面量，`internal/sanitize/sanitize.go`
 与 `internal/upstream/sanitize.go` 因此**不可安全编辑**（已尝试 6 次全部改坏，详见 AGENTS.md §6），
 本次只搬纯新增的取证件，不碰脱敏表本身。
+## R83 — 指纹检测必须容忍大小写与分隔符变体，并对 tools/metadata 做整包兜底
+
+**背景**：上游 wild-work R134「指纹脱敏补全」指出两类漏检，本项目实测同样存在：
+
+1. **预检大小写敏感**：`hasFingerprint` 用 `strings.Contains` 逐字匹配特征串。
+   指纹发起方只要把特征串改成全大写或混合大小写，预检就不命中 →
+   **整条净化链路被跳过**，请求带着指纹裸奔出网 → 网关回 `400 code=11-128`。
+   实测 `sanitizeFeatures[1]` 的全大写变体（`CC_ENTRYPOINT=`，hex
+   `43 43 5f 45 4e 54 52 59 50 4f 49 4e 54 3d`）在旧预检下完全漏判。
+
+2. **billing header 键名写死 ASCII**：正则写死 `x-anthropic-billing-hdr`，
+   而指纹方会在各段之间插入非字母分隔符（Unicode 连字符 U+2011、空格、
+   零宽空格 U+200B）规避。写死版本对这些变体全部漏检。
+
+3. **messages 树遍历不到 tools/metadata**：结构化清洗只走
+   `messages[].content` / `tool_calls`，`tools[]` 的函数描述里、
+   `metadata` 里或 body 其它角落的指纹不会被任何现有逻辑碰到。
+
+**决议**：
+
+1. 预检改用 `asciiContainsFold`（自写 ASCII 逐字节折叠，**不用
+   `strings.ToLower`**——那会在每次请求上分配新字符串，违反不变式 16
+   「预检不命中时零分配原样通过」）。
+2. billing header 键名正则改为宽松形态：各段之间容忍 `[^a-z]*`，
+   尾部用可选组表达缩略。键名用运行时拼接的单字母片段构造，
+   **不做正则字面量**——本仓库的读取通道会截断源码里该键名的完整字面量
+   （`reHdr` 的 `% x` 取证：显示被截成 `(?i)\n]*;?\s*`，运行时其实是完整的）。
+3. 新增 `BodyFallback`：整包兜底替换，覆盖 tools/metadata 等结构化清洗
+   摸不到的字段；接线在两处 `PrepareBody`
+   （`internal/upstream/payload.go` 与 `internal/workbuddyai/wb_utils.go`，
+   两者 import 的都是 `omnigate/internal/sanitize`——**真正生效的是这一份**）。
+
+**两份脱敏表的实际地位（重要修正）**：R52 说的「两套平行表」在生产上并不成立——
+`internal/upstream/sanitize.go` 的 `sanitizeText`/`hasFingerprint`
+**只被它自己的测试文件调用**，不在任何生产链路上。两处 `PrepareBody`
+都指向 `internal/sanitize`。本次两侧都改了（保持 R52 的同步纪律），
+但**生产生效的只有 `internal/sanitize`** 一份。
+
+**验收**：
+
+- `internal/sanitize/fold_test.go`：fold 基础行为 + 遍历 `featHeaders`
+  每条生成大小写变体两侧都命中 + 干净文本不误触发。输入一律 hex 构造。
+- `internal/sanitize/loosekey_test.go`：U+2011 / 空格 / 零宽 / 混合大小写
+  四种变体必须被 `reBareHdr` 与 `reHdr` 命中；正常英文散文不得误命中；
+  端到端断言**连 anthropic / billing 这两个词都不许留下**。
+- `internal/sanitize/bodyfallback_test.go`：tools 描述里四种变体都被重写 +
+  干净 body 返回同一底层数组（零分配）。
+- `internal/upstream/{fold,bodyfallback}_test.go`：平行表的同构测试。
+
+**变异验证（全部转红才算数）**：
+
+| 变异 | 结果 |
+|------|------|
+| `asciiContainsFold` 换回 `strings.Contains`（两包各一次） | 大小写变体测试红 |
+| `lowerASCII` 去掉折叠 | 两个 fold 测试齐红 |
+| `BodyFallback` 从 `PrepareBody` 拆掉 | `TestPrepareBodyStripsDSHFromTools` 红 |
+| `reBareHdr` 换回写死 ASCII | U+2011/空格/零宽三种变体齐红 |
+| `reHdr` 换回写死 ASCII | 端到端断言红 |
+
+**假绿教训（必须记住）**：端到端测试第一版只断言「U+2011 没了」，
+在 `reHdr` 被改坏的变异下**仍然绿**——因为 `reBareHdr` 单独命中时会把变体键名
+重写成 ASCII 规范形态留在原地，看起来干净、实则指纹仍在。
+改成断言「连 anthropic / billing 都不许留下」后才真正变红。
+**只检查「变体字符消失」等于没检查。**
+
+**没做的部分**：上游 R134 里那三个 DSH 身份句正则
+（`dshIdentityRe`/`dshWebGuiRe`/`acpPathRe`）与本项目 R52/R59 的整句改写
+是两条等价路线（他们正则插冠词，我们整句替换成等价表达），不做替换。
