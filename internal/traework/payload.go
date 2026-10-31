@@ -3,6 +3,8 @@ package traework
 import (
 	"encoding/json"
 	"strings"
+
+	"omnigate/internal/sanitize"
 )
 
 // PrepareBody 把 OpenAI chat/completions 请求改写为 Trae SOLO llm_utils_chat 请求。
@@ -16,6 +18,8 @@ func PrepareBody(src []byte, function string) []byte {
 	if len(src) == 0 {
 		return src
 	}
+	// R86: 脱敏必须先于协议转换——转成 SOLO 形状后 messages 结构已变。
+	src = sanitize.Messages(src)
 	var obj map[string]any
 	if err := json.Unmarshal(src, &obj); err != nil {
 		return src

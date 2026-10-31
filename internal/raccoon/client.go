@@ -17,6 +17,7 @@ import (
 	"omnigate/internal/auth"
 	"omnigate/internal/capture"
 	"omnigate/internal/provider"
+	"omnigate/internal/sanitize"
 )
 
 // Client 小浣熊（官方托管网关 xiaohuanxiong.com）上游客户端。
@@ -252,6 +253,8 @@ func (c *Client) ChatStream(a *auth.Auth, body []byte) (rc io.ReadCloser, status
 	if m := modelOf(body); m != "" && !c.knownModel(m) {
 		return nil, http.StatusBadRequest, []byte(unknownModelBody(m)), nil
 	}
+	// R86: 第三方上游同样会收到 DSH 运行时上下文，指纹脱敏一视同仁。
+	body = sanitize.Messages(body)
 	orig := body
 	body = forceUpstreamDeepThinking(body)
 	logReasoningStrip(orig, body)

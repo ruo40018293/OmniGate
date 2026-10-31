@@ -1,4 +1,4 @@
-# 决议全文（R1–R85）
+# 决议全文（R1–R86）
 
 > 本文件是 `AGENTS.md` 第 1 节的**完整原文**——每条决议「为什么这么做 / 踩过什么坑 / 边界在哪」都在这里。
 > `AGENTS.md` 只保留每条的一句话判据，随每次会话自动加载，用来提醒「别推翻什么」；
@@ -280,3 +280,83 @@ R52 明文允许两份表用各自的改写策略，只要各自能断指纹即�
 **边界**：本守卫验证的是「每条已有键在两侧都被改写」，**不管键的覆盖率**——
 即线上出现了一个新的指纹形态而两张表都没有对应规则时，它不会报警。
 覆盖率问题靠 `scripts/bisect-blocked.py` 的拦截取证闭环。
+
+## R86 — 脱敏链只覆盖三个包，不是全部渠道；R84 的「裸奔」判据被证伪
+
+**日期**：2026-10-31
+
+**背景**：R84 修了 `internal/sanitize` 表里尾句那条规则的匹配键，理由是
+「抓包里 `they mean this GUI` 出现 45 处 / 18 个文件，说明尾句裸奔出网」。
+本轮把抓包按**角色**拆开重算，结论反了。
+
+**结构事实一：全仓只有三个包接脱敏**
+`grep -rl internal/sanitize` 的结果是：`internal/sanitize` 自身、`internal/upstream`（5 个文件）、
+`internal/workbuddyai`（1 个文件）。其余渠道（raccoon、traework、qoder 系…）**完全不在链上**。
+
+**结构事实二：CN 是两段式，国际版是单段式，而 CN 的 stage2 恒为 no-op**
+- `internal/upstream/payload.go:15` 的 `PrepareBody = BodyFallback(Messages(prepareBodyInner(src)))`，
+  而 `prepareBodyInner` 内部还会调 `sanitizeMessages`（upstream 自己那张表）= 两段式。
+- `internal/workbuddyai/wb_utils.go:21` 同样是 `BodyFallback(Messages(prepareBodyInner(src)))`，
+  但它的 `prepareBodyInner` **没有** `sanitizeMessages` = 单段式。
+
+实测（`PrepareBody` 全链跑同一句运行时上下文尾句）：
+
+| 阶段 | 输出 |
+|---|---|
+| 输入 | `…without naming another target, they mean this GUI.` |
+| stage1（upstream 表） | `…they mean this console.` |
+| stage2 单独跑原文（sanitize 表） | `…they mean this c0nsole.` |
+| **完整 `PrepareBody`** | `…they mean this console.`（== stage1） |
+
+stage1 的输出里 **没有任何 feature 命中**（逐条比对为 `[]`），所以
+`sanitize.Messages` 的 `hasFingerprint` 预检失败、直接原样返回 —— **stage2 一次都没执行过**。
+这解释了一个容易踩空的坑：改 `internal/sanitize` 的表，对 CN 渠道的**出站结果毫无影响**。
+
+**结构事实三：R84 引用的 45 处是对话正文，不是运行时上下文**
+150 个抓包按 `role` 拆开（`system` 单独累加）：
+
+| 渠道 | 抓包数 | system 含运行时上下文 | system 里漏指纹 |
+|---|---|---|---|
+| workbuddy（CN） | 15 | 14 | **0** |
+| workbuddyai | 68 | 0 | **0** |
+| raccoon | 8 | 8 | **8** |
+| traework | 2 | 2 | **2** |
+
+含 marker 的抓包里，`DeepSeek Harness Web GUI` 的出现次数是 **0**，marker 全部落在
+`messages[13].content`（user）、`messages[47].tool_calls[0].function.arguments`（assistant）、
+`messages[196].content`（tool）—— 内容是**本对话自己的分析文本与压缩摘要**。
+反复特征是：`features` 只负责**检测**，真正改写靠 9 对 `rewrites` 的整句匹配；
+正文里出现的只是裸特征词，不属于任何一条整句模板，所以按设计就不该被动。
+把这种命中算作「泄露」是**证据污染**：`"裸奔出网"` 这个判断对 CN 与国际版**都不成立**。
+
+**真实拒信统计（`data/app.log`，13534952 字节）**
+- 最后一次指纹类 `code:11128` 是 **2026-10-27 23:22:27**（在 R59 之前）。
+  之后 workbuddy 10529 次请求、workbuddyai 2929 次请求**零**指纹拒信。
+- raccoon 2642 次、traework 2160 次请求同样**零**拒信 ⇒ 它们漏指纹目前无害，
+  但等于把 DSH 指纹原样交给第三方上游。
+
+**R84 的处置：保留改动，修正判据**
+表里把匹配键改成线上原文形态，对**单段式链路**（国际版原文直达）是正确且必要的防御；
+即使今天 stage2 在 CN 恒为 no-op，将来重构一旦唤醒它就是对的。所以代码不动，
+但「尾句裸奔出网」这句判断作废，判据以后按本条的按角色统计法重算。
+
+**动作**：把 raccoon 与 traework 接进脱敏链。
+- `internal/raccoon/client.go` 的 `ChatStream` 入口、`internal/traework/payload.go` 的
+  `PrepareBody` 入口各加一行 `sanitize.Messages(...)`。
+- traework 必须放在**协议转换之前**：转成 SOLO 形状后 `messages` 结构已变，遍历路径对不上。
+- 两处都是纯文本替换；命中不到指纹时 `Messages` 零分配原样返回，无额外开销；
+  非 JSON body 原样透传（`json.Unmarshal` 失败即返回）。
+
+**测试与变异**
+- `internal/traework/r86_sanitize_test.go`：直接调 `PrepareBody`；
+  `internal/raccoon/r86_sanitize_test.go`：用 `httptest` 起服务、`Client.Base` 指向它，
+  从服务端读回真实出站 body —— 断言的是**接线**，不是 `sanitize` 库本身。
+- 夹具一律 base64 内嵌（沿用不变量 17：源码里的指纹字面量会被开发通道转写）。
+- 变异：把两处的 `sanitize.Messages` 降级成 `sanitize.BodyFallback`（仍能编译、仍用同包，
+  但不是同一件事）→ 两侧同时报
+  `R86: fingerprint "they mean this GUI" still present in outbound body`，
+  精确指到尾句那条规则，不是笼统失败。还原后 37 包全绿。
+
+**边界**：本条只把两个渠道接进链，**不解决**「链上覆盖哪些渠道」这个长期问题——
+以后新增第三方渠道仍要人工判断是否接；`internal/sanitize` 与
+`internal/upstream/sanitize.go` 的双表分裂也仍在（R85 只让它不再静默）。
