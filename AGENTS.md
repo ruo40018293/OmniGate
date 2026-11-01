@@ -123,6 +123,7 @@
 | R84 | 脱敏规则的匹配键必须是**线上原文形态**，不能是「改写后形态」：生产表 rewrites[7] 的 old 曾写成 this console（已改写形态），而真实请求里是 this GUI（抓包 45 处/18 个文件），该规则从不命中、尾句裸奔出网；现有跨包 parity 测试只断言 221 字符连排整串被打断，首句改写即可让它通过，故洞被全绿地藏着。由 internal/sanitize/r84_tail_test.go 与 internal/upstream/r84_tail_test.go 以 base64 内嵌原文、单独放尾句的方式锁住（判据已被 R86 修正：45 处命中是对话正文，不是运行时上下文） |
 | R85 | 逐规则 parity 守卫：跨包 parity 测试只断言「221 字符连排整串被打断」，首句规则一生效整串就断，尾句规则即使完全失效也照样全绿（R84 的洞就是这么藏住的）。`internal/upstream/r84_guard_test.go` 把两份表的 9 条非空 old 键逐条单独喂入两侧，断言每条键在 upstream 与 sanitize 都必须被改写；输入一律 base64 内嵌、JSON 由 `%c` 字节级拼装（文件内零反斜杠）。变异：撤销 R84 → key7 红；upstream idx6 置为空转 → key6 红 |
 | R86 | 脱敏链只覆盖 `internal/upstream`（CN 两段式）与 `internal/workbuddyai`（单段式），其余渠道原本全不在链上；CN 的 stage2 因 stage1 输出已无 feature 命中而**恒为 no-op**（改 `internal/sanitize` 的表对 CN 出站无影响）；R84 的「尾句裸奔」判据按 role 重算后证伪（workbuddy 14/15 带运行时上下文、system 漏 0；raccoon 8/8、traework 2/2 漏但零拒信）。raccoon/traework 已接入，traework 的脱敏必须早于协议转换；由 `internal/{raccoon,traework}/r86_sanitize_test.go` 守 |
+| R87 | CN 脱敏是**两段式且 stage1 是承重墙**：`PrepareBody = BodyFallback(Messages(prepareBodyInner(src)))`，而 `prepareBodyInner`（`internal/upstream/payload.go:65`）已用 upstream 表做过一遍 `sanitizeMessages`；stage1 生效后 stage2（`internal/sanitize` 表）的 `hasFingerprint` 预检不再命中 ⇒ **恒为 no-op**，CN 出站的实际改写形态由 upstream 表决定。两份表的**匹配键**已由 R84 对齐，**替换目标形态仍不同**（upstream 等价词 vs sanitize leetspeak）；删 stage1 会把 CN 出站字节改成从未在生产验证过的 leetspeak 形态，属未声明的行为变更。`internal/workbuddyai` 的 `prepareBodyInner` 没有 stage1，故国际版由 sanitize 表单独生效。由 `internal/upstream/r87_two_stage_test.go` 守（变异：`sanitizeMessages(msgs)` → `_ = msgs` 立刻红） |
 
 ## 2. 架构选型（依据）
 
@@ -364,6 +365,15 @@ POST /api/quit                     # 退出程序
       完成标记按「日期+时段」而非仅日期——本工具支持一天多时段（09:00/21:00），
       只按日期标记会让早间成功吞掉晚间时段。
 
+25. **不许把两份脱敏表「合并真源」，除非先做对照实验**：CN 走两段式（`internal/upstream` 表 → `internal/sanitize` 表），
+    stage1 吃掉指纹后 stage2 恒为 no-op ⇒ **CN 出站的实际改写形态由 `internal/upstream` 表决定**；
+    `internal/workbuddyai` 的 `prepareBodyInner` 没有 stage1 ⇒ 国际版由 `internal/sanitize` 表单独生效。
+    两份表的**匹配键（old）已对齐**（R84/R85），但**替换目标（new）形态不同**：upstream 用等价词，sanitize 用 leetspeak。
+    任何「并成一张表」的改动都会改变 CN 出站字节，而 CN 只在等价词形态下有生产背书
+    （2026-10-27 之后 10529 次请求零指纹拒信）。要改必须按不变式 R23b 做**对照实验**
+    （同一请求两种形态各发一次上游，看是否被拦），不能凭架构整洁直接切。
+    闸门：`internal/upstream/r87_two_stage_test.go`（删 stage1 立刻红）。
+
 ## 7. 平台能力差异表（internal/platform）
 
 | 能力 | Windows | macOS | Linux |
@@ -424,8 +434,8 @@ git tag vX.Y.Z && git push origin vX.Y.Z
 
 - [README.md](README.md) — 用户文档
 - [DEVELOPMENT.md](DEVELOPMENT.md) — 开发者文档（面向 AI Agent）
-- [AGENTS.md](AGENTS.md) — 本文件：决议项一句话判据（R1–R86）、架构选型、不变量
-- [docs/DECISIONS.md](docs/DECISIONS.md) — 决议全文（R1–R86）：每条决议的原始背景、踩坑记录与边界条件
+- [AGENTS.md](AGENTS.md) — 本文件：决议项一句话判据（R1–R87）、架构选型、不变量
+- [docs/DECISIONS.md](docs/DECISIONS.md) — 决议全文（R1–R87）：每条决议的原始背景、踩坑记录与边界条件
 - [docs/三接口兼容改造备忘.md](docs/三接口兼容改造备忘.md) — 三接口（Chat/Responses/Anthropic）兼容层架构决策、实施记录、验证清单、已知限制
 - [docs/用量积分流水记账备忘.md](docs/用量积分流水记账备忘.md) — 双流水统计（token/积分）架构、差分算法、实测验证、已知限制（R17）
 

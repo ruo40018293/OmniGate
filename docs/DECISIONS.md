@@ -1,4 +1,4 @@
-# 决议全文（R1–R86）
+# 决议全文（R1–R87）
 
 > 本文件是 `AGENTS.md` 第 1 节的**完整原文**——每条决议「为什么这么做 / 踩过什么坑 / 边界在哪」都在这里。
 > `AGENTS.md` 只保留每条的一句话判据，随每次会话自动加载，用来提醒「别推翻什么」；
@@ -360,3 +360,58 @@ stage1 的输出里 **没有任何 feature 命中**（逐条比对为 `[]`），
 **边界**：本条只把两个渠道接进链，**不解决**「链上覆盖哪些渠道」这个长期问题——
 以后新增第三方渠道仍要人工判断是否接；`internal/sanitize` 与
 `internal/upstream/sanitize.go` 的双表分裂也仍在（R85 只让它不再静默）。
+
+## R87 — CN 脱敏是两段式，stage1 是承重墙：不许把两份表「合并真源」
+
+**背景**：R85 让两份脱敏表「不再静默」，但双表分裂本身还在。本轮的本意是把
+`internal/sanitize` 提为唯一真源、让 `internal/upstream` 那份改委派，彻底关掉漂移。
+改动只删掉 `internal/upstream/payload.go:65` 的一处 `sanitizeMessages(msgs)` 调用
+（让 `prepareBodyInner` 只做协议改写，脱敏全交给外层 `sanitize.Messages`）。
+`go build` 通过；然后 `internal/upstream/r84_tail_test.go` 的
+`TestR84RewritePreservesMeaning` 立刻转红：
+
+```
+unexpected zero-form substitution: When the user refers to "this page", "this GUI",
+or "this app" without naming another target, they mean this c0nsole.
+```
+
+**取证**：把两张表 idx6/idx7 的 new 值用 `% x` 打印（渲染文本在 R82 已被证明不可信）：
+
+| 表 | idx6 new | idx7 new |
+|---|---|---|
+| `internal/sanitize`（生产表） | `DeepSeek Harness Web c0nsole` | `...they mean this c0nsole` |
+| `internal/upstream`（平行表） | `DeepSeek Harness web console` | `...they mean this console` |
+
+匹配键（old）两份已经一致（R84 修的），**分歧在替换目标**：生产表用 leetspeak，
+平行表用等价词。
+
+**结论（三个硬事实）**：
+1. `internal/upstream.PrepareBody` = `sanitize.BodyFallback(sanitize.Messages(prepareBodyInner(src)))`，
+   而 `prepareBodyInner`（`payload.go:65`）内部**已经调过** `sanitizeMessages(msgs)`
+   （upstream 表）⇒ **CN 是两段式，stage1 先跑**。
+2. stage1 一旦吃掉指纹，stage2（`internal/sanitize` 表）的 `hasFingerprint` 预检就不再命中
+   ⇒ **stage2 在生产上恒为 no-op**。CN 出站的实际形态由 upstream 表决定。
+3. `internal/workbuddyai/wb_utils.go` 的 `prepareBodyInner` **没有** stage1
+   ⇒ **国际版由 `internal/sanitize` 表单独生效**。两份表各管一半渠道，谁都不是死代码。
+
+**为什么不能就这么上线**：删掉 stage1 会把 CN 出站字节从 `console` 改成 `c0nsole`。
+CN 只在等价词形态下有生产背书——`data/app.log` 里 2026-10-27 23:22 之后 workbuddy
+**10529 次请求零指纹拒信**，跑的就是 stage1 的等价词输出；leetspeak 形态在 CN 线路上
+**从未真正发出去过**（stage1 先把 `Web GUI` 改掉，生产表的 old 匹配不上）。
+拿未验证形态去赌 11128 拦截，违背不变式 R23b（观察性数据只能提假设、定因果必须做
+对照实验），也违背 R52/R59 定下的「只换词、语义不变」口径。
+
+**已做**：回滚这处改动（用 `git show HEAD:<path>` 的字节还原，再用 `git diff` 证明与
+HEAD 一致，37 包全绿），并新增闸门 `internal/upstream/r87_two_stage_test.go`：
+`TestR87CNTwoStageSanitizeIsLoadBearing` 断言 ①`prepareBodyInner` 单独就能吃掉尾句
+marker（证明 stage1 承重）②`PrepareBody` 最终输出既不含 marker、也不含 leetspeak 形态。
+夹具沿用 base64 内嵌（不变量 17），leetspeak 词用 `"c"+"0"+"nsole"` 字节级拼接，
+源码内不出现该字面量。
+
+**变异验证**：把 `sanitizeMessages(msgs)` 改成 `_ = msgs`（仍能编译、仍过 vet）→ 立刻红，
+报 `stage1 未吃掉尾句 marker：CN 两段式耦合已被破坏……请先做对照实验再合并真源。`；
+还原后 `git diff` 为空、37 包全绿。
+
+**边界**：本条**不解决**双表分裂，只把「分裂 + 两段式耦合」变成可检查的事实。
+真要合并，正确路径是**对照实验**：同一份带指纹的请求分别用两种替换目标发上游，
+看是否被网关拦（可复用 `scripts/bisect-blocked.py` 的重放能力），有结论后再改表。
