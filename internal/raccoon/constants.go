@@ -58,26 +58,56 @@ const DefaultModel = "raccoon-8c4485"
 // 实测该别名同样被上游接受并路由到默认模型。
 const ClientAliasModel = "raccoon-chat-ml-5-5"
 
+// measuredVisionModels 是**实测**识图能力表，优先于上游 catalog 的 vision 标签。
+//
+// 为什么不能只看标签（R88，2026-10-28 上级项目真实链路「有图/无图」对照实测）：
+//   - raccoon-19b265 / raccoon-405a1c：上游 catalog 漏标 vision，但附图能正确读出内容；
+//   - sn-glm-5-3：上游标签显示支持，实际返回「当前纯文本模型不支持 image_url」⇒ 误标。
+//
+// 对照方法：同一问题先无图问一遍（模型均答「无图」），再附图问（才识别出「左红/右蓝/顶部
+// 绿色矩形」）——只信无图回答会把「不会承认看不见」误当成「能读图」。识图能力在服务端，
+// 与账号无关，故上游结论可直接采用。
+var measuredVisionModels = map[string]bool{
+	"raccoon-8c4485":              true,
+	"raccoon-19b265":              true,
+	"raccoon-405a1c":              true,
+	"sn-sensenova-6-8-flash":      true,
+	"sn-sensenova-6-8-flash-lite": true,
+	"sn-kimi-k3":                  true,
+	"sn-glm-5-3":                  false, // 实测明确不支持 image_url
+	"sn-glm-5-3-flash":            true,
+	"sn-deepseek-v4-1-flash-1017": true,
+}
+
+// supportsImages 汇总两路判据：实测表优先（可纠正漏标与误标），未收录时跟随上游 tags。
+func supportsImages(id string, tags []string) bool {
+	if v, ok := measuredVisionModels[id]; ok {
+		return v
+	}
+	return hasTag(tags, "vision")
+}
+
 // staticModels 静态兜底模型表（模型目录接口不可用时）。
 // 数据来源：2026-09-22 实测 GET /model_catalog。
+// R88 校正：识图能力按实测白名单（见 measuredVisionModels），模型 ID 跟随生产日志。
 // SupportsTools/SupportsImages/SupportsReasoning 按上游 tags 与约定：
 // 仅当上游明确声明时才置 true（provider.ModelInfo 的约定：未知保持 false）。
 var staticModels = []provider.ModelInfo{
 	{ID: "raccoon-8c4485", Name: "Raccoon-Work", ContextWindow: 1_000_000, MaxTokens: 100_000,
 		ContextFromAPI: true, SupportsImages: true, SupportsReasoning: true},
 	{ID: "raccoon-19b265", Name: "Raccoon-Work-260817-A", ContextWindow: 1_000_000, MaxTokens: 100_000,
-		ContextFromAPI: true, SupportsReasoning: true},
+		ContextFromAPI: true, SupportsImages: true, SupportsReasoning: true},
 	{ID: "raccoon-405a1c", Name: "Raccoon-Work-260817-B", ContextWindow: 1_000_000, MaxTokens: 100_000,
-		ContextFromAPI: true},
+		ContextFromAPI: true, SupportsImages: true},
 	{ID: "sn-sensenova-6-8-flash-lite", Name: "SenseNova-6.8-Flash-Lite", ContextWindow: 256_000, MaxTokens: 63_999,
 		ContextFromAPI: true, SupportsImages: true},
 	{ID: "sn-glm-5-3", Name: "GLM-5-3", ContextWindow: 1_000_000, MaxTokens: 100_000,
-		ContextFromAPI: true, SupportsImages: true, SupportsReasoning: true},
+		ContextFromAPI: true, SupportsReasoning: true},
 	{ID: "sn-kimi-k3", Name: "Kimi-K3", ContextWindow: 1_000_000, MaxTokens: 100_000,
 		ContextFromAPI: true, SupportsImages: true, SupportsReasoning: true},
 	{ID: "sn-glm-5-3-flash", Name: "GLM-5-3-Flash", ContextWindow: 1_000_000, MaxTokens: 100_000,
 		ContextFromAPI: true, SupportsImages: true},
-	{ID: "sn-deepseek-v4-1-flash", Name: "DeepSeek-V4.1-Flash", ContextWindow: 1_000_000, MaxTokens: 100_000,
+	{ID: "sn-deepseek-v4-1-flash-1017", Name: "DeepSeek-V4.1-Flash", ContextWindow: 1_000_000, MaxTokens: 100_000,
 		ContextFromAPI: true, SupportsImages: true, SupportsReasoning: true},
 }
 

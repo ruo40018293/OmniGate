@@ -139,8 +139,14 @@ func (c *Client) ChatStream(a *auth.Auth, body []byte) (io.ReadCloser, int, []by
 	}
 	// 本地校验：集合 == 暴露集 == free[]（构造即一致）；目录未拉到过时放行（fail-open）。
 	// R42 的教训：校验过严会误拒上游新模型，故冷启动不拦、集合跟随上游同步。
+	//
+	// R88：这是**本地**判定的请求错误，状态码必须是 400 而不是 404。曾经的 404 会被
+	// Classify 归成 ErrNotFound（可轮换）⇒ handler 认为「这个号不行」去换号，换到
+	// 下一个号照样被本地拒，每次轮换再记一笔账号错误 ⇒ 客户端打错一个模型名就能把
+	// 整条渠道拖进冷却。响应体里的 "not found in cline free catalog" 命中
+	// badParamMarkers ⇒ ErrBadParams（不轮换、不罚号、原文透传）。
 	if !c.knownModel(m) {
-		return nil, http.StatusNotFound,
+		return nil, http.StatusBadRequest,
 			[]byte(fmt.Sprintf(`{"error":{"message":"model not found in cline free catalog: %s",
 			"code":"model_not_found"}}`, jsonEscape(m))), nil
 	}

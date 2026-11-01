@@ -358,7 +358,9 @@ func TestChatStreamAcceptsBeforeCatalog(t *testing.T) {
 	}
 }
 
-// TestChatStreamRejectsUnknownModelAfterCatalog：目录已拉到后，free[] 之外的名字本地 404 不打上游。
+// TestChatStreamRejectsUnknownModelAfterCatalog：目录已拉到后，free[] 之外的名字本地拒绝且不打上游。
+// R88 修正：状态码必须是 400（本地判定的请求错误）。旧写法 404 会被 Classify 归成 ErrNotFound（可轮换）→
+// handler 认为「这个号不行」去换号 + 记一笔账号错误，客户端打错一个模型名就能把整条渠道拖进冷却。
 func TestChatStreamRejectsUnknownModelAfterCatalog(t *testing.T) {
 	hits := 0
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -379,8 +381,12 @@ func TestChatStreamRejectsUnknownModelAfterCatalog(t *testing.T) {
 	}
 	_, status, body, _ := c.ChatStream(a,
 		[]byte(`{"model":"totally/unknown-model","stream":true,"messages":[]}`))
-	if status != http.StatusNotFound || hits != 1 {
-		t.Errorf("目录建立后未知模型应本地 404 且不打上游，实得 status=%d hits=%d body=%.100s", status, hits, body)
+	if status != http.StatusBadRequest || hits != 1 {
+		t.Errorf("目录建立后未知模型应本地 400 且不打上游，实得 status=%d hits=%d body=%.100s", status, hits, body)
+	}
+	if kind := Classify(status, string(body)); kind != provider.ErrBadParams || kind.Rotatable() {
+		t.Errorf("本地拒绝须归 ErrBadParams 且不可轮换（否则换号+记账号错误拖冷却），实得 %s rotatable=%v",
+			kind, kind.Rotatable())
 	}
 	// 已知模型正常直达
 	if _, status, _, err := c.ChatStream(a,

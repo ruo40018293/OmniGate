@@ -63,8 +63,9 @@ func IsRegionBlocked(status int, body string) bool {
 
 // badParamMarkers 是本端参数/头造成的失败，不得计入账号健康度。
 var badParamMarkers = []string{
-	"empty response content", // max_tokens 太小，推理吃光预算 ⇒ 可见内容为空
-	"api_request_error_code", // 多半是漏发 X-CLIENT-TYPE（自己的 bug，不能算到账号头上）
+	"not found in cline free catalog", // R88：**本端** knownModel 拒绝的专属文案（上游不会这么说）
+	"empty response content",          // max_tokens 太小，推理吃光预算 ⇒ 可见内容为空
+	"api_request_error_code",          // 多半是漏发 X-CLIENT-TYPE（自己的 bug，不能算到账号头上）
 	"invalid 'max_output_tokens'",
 	"below minimum value",
 	"integer below minimum",

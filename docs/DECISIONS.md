@@ -1,4 +1,4 @@
-# 决议全文（R1–R87）
+# 决议全文（R1–R88）
 
 > 本文件是 `AGENTS.md` 第 1 节的**完整原文**——每条决议「为什么这么做 / 踩过什么坑 / 边界在哪」都在这里。
 > `AGENTS.md` 只保留每条的一句话判据，随每次会话自动加载，用来提醒「别推翻什么」；
@@ -415,3 +415,71 @@ marker（证明 stage1 承重）②`PrepareBody` 最终输出既不含 marker、
 **边界**：本条**不解决**双表分裂，只把「分裂 + 两段式耦合」变成可检查的事实。
 真要合并，正确路径是**对照实验**：同一份带指纹的请求分别用两种替换目标发上游，
 看是否被网关拦（可复用 `scripts/bisect-blocked.py` 的重放能力），有结论后再改表。
+---
+
+## R88 — 本地判定的请求错误不得用 404，且必须落进不可轮转的 kind
+
+**日期**：2026-11-01
+
+**背景**：上游项目（`rockswang/wild-work`）2026-10-28 的事故记录：WPS Comate 渠道把「模型不在本地目录」
+这个**纯本地**判定写成了 404，`Classify` 归成 `ErrNotFound`，而 `ErrNotFound` 在 `Rotatable()` 白名单里
+（语义是对的：上游偶发 404 换个号可能就好了）。于是 handler 认为「这个号不行」去换号，换到下一个号
+照样被本地拒，每次轮换再 `NoteError` 记一笔账号错误 —— 实测两个号各记两笔后整条渠道进冷却。
+客户端只是打错了一个模型名，代价是整条渠道下线。
+
+**我们在 `internal/cline/client.go` 有完全同型的缺陷**：
+
+```go
+if !c.knownModel(m) {
+    return nil, http.StatusNotFound,                 // ← 本地判定，却用 404
+        []byte(fmt.Sprintf(`{"error":{"message":"model not found in cline free catalog: %s",
+        "code":"model_not_found"}}`, jsonEscape(m))), nil
+}
+```
+
+链路：`handler.go:783` 收 `(nil, 404, body, nil)` → `:803` `Classify(404, body)` → cline 的 `Classify`
+把 404 归 `ErrNotFound` → `provider.go` 的 `Rotatable()` 返回 true → `handler.go:879` 换号 +
+`handler.go:869` `NoteError`。
+
+**为什么只改状态码不够**：`ErrClient`（400 的默认归类）**同样**在 `Rotatable()` 白名单里
+（注释写明「部分渠道业务错误挂在账号权益上，默认可换一次」）。所以 404→400 只是把「每次轮换都必然复现」
+变成「换一次号再复现」，仍然会给健康账号记一笔错误。必须让这个错误落进**不可轮转**的三类之一：
+`ErrBadParams` / `ErrPassthrough` / `ErrModelBlocked`。
+
+**做法（两件必须同时做）**：
+
+1. 状态码 `http.StatusNotFound` → `http.StatusBadRequest`；
+2. 响应体里的 `"model not found in cline free catalog"` 加入 `internal/cline/errors.go` 的
+   `badParamMarkers` —— 该文案是我们自己产出的（上游从不会这么说），不会误伤上游响应；
+   `Classify` 的第 3 步命中它 ⇒ 返回 `ErrBadParams`。该 kind 不在轮转白名单，handler 走
+   `case provider.ErrContentBlocked, provider.ErrPromptTooLong, provider.ErrPassthrough:` 之外的
+   末尾 `transparentError` 分支，**不冷却、不轮转、不记错**。
+
+参照实现：`internal/loomy/client.go` 一直是 400 且带 `unknownModelBody`，本次把 cline 对齐它。
+
+**顺带修正的识图能力表（同一来源 R134，2026-10-28 真实链路「有图/无图」对照实测）**：
+上游给 `sn-glm-5-3` 打了 vision 标签，实际发图返回「当前纯文本模型不支持 image_url」（误标）；
+反过来 `raccoon-19b265` / `raccoon-405a1c` 没标签但能正确读图（漏标）。只信 tags 两个方向都会错，
+故新增 `measuredVisionModels` 实测表 + `supportsImages(id, tags)`：命中实测表即以其为准，
+表外才回落到 tags 判定。
+
+**本次同时用生产日志纠正了一个陈旧 ID**：静态表里写的是 `sn-deepseek-v4-1-flash`，
+而 `data/app.log` 里 1372 次 raccoon 请求**全部**是 `sn-deepseek-v4-1-flash-1017`，旧 ID 出现 0 次
+（`grep -ohE "(sn-[a-z0-9-]+)"` 去重后只有 `-1017`）。目录接口不可用时静态表就是客户端的全部
+视野，报一个不存在的模型名等于把「目录拉取失败」放大成「模型全都不可用」。
+
+**锁住方式**：`internal/cline/r88_local_model_test.go`（断言本地拒绝 = 400 + 响应体指名模型 +
+`Classify`→`ErrBadParams` + `!Rotatable()`；另有一条回归断言「**上游** 404 仍归 `ErrNotFound`」，
+防止把真实 404 语义一起改掉）；`internal/raccoon/r88_vision_test.go`（实测表覆盖误标/漏标/表外回落，
+以及静态表的能力位与真实 ID）。原有 `TestChatStreamRejectsUnknownModelAfterCatalog` 锁的是旧契约
+（404），已按新契约更新——**旧断言正是在证明这个 bug 存在**。
+
+**变异验证（四处全红）**：①状态码改回 404 → `TestLocalUnknownModelIsRequestLevelError` 红；
+②删掉 `badParamMarkers` 里的专属文案 → 同测试红（`ErrClient` 可轮转）；
+③`supportsImages` 忽略实测表 → `TestMeasuredVisionOverridesCatalogTags` 红；
+④静态表 ID 改回 `-flash` → `TestStaticModelsAdvertiseMeasuredCapabilities` 红。
+还原后 `git build/vet/test` 全绿（37 包）。
+
+**边界**：本条只管「本地判定」这一类。上游真实 404 仍按 `ErrNotFound` 短冷却 + 换号（那是合理语义）；
+`knownModel` 的冷启动放行（目录没拉到时全放行）保持不变 —— R42 的教训是校验过严会误拒上游新模型，
+现在误拒的代价从「拖垮整条渠道」降为「一个干净的 400」。

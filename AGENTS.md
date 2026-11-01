@@ -124,6 +124,7 @@
 | R85 | 逐规则 parity 守卫：跨包 parity 测试只断言「221 字符连排整串被打断」，首句规则一生效整串就断，尾句规则即使完全失效也照样全绿（R84 的洞就是这么藏住的）。`internal/upstream/r84_guard_test.go` 把两份表的 9 条非空 old 键逐条单独喂入两侧，断言每条键在 upstream 与 sanitize 都必须被改写；输入一律 base64 内嵌、JSON 由 `%c` 字节级拼装（文件内零反斜杠）。变异：撤销 R84 → key7 红；upstream idx6 置为空转 → key6 红 |
 | R86 | 脱敏链只覆盖 `internal/upstream`（CN 两段式）与 `internal/workbuddyai`（单段式），其余渠道原本全不在链上；CN 的 stage2 因 stage1 输出已无 feature 命中而**恒为 no-op**（改 `internal/sanitize` 的表对 CN 出站无影响）；R84 的「尾句裸奔」判据按 role 重算后证伪（workbuddy 14/15 带运行时上下文、system 漏 0；raccoon 8/8、traework 2/2 漏但零拒信）。raccoon/traework 已接入，traework 的脱敏必须早于协议转换；由 `internal/{raccoon,traework}/r86_sanitize_test.go` 守 |
 | R87 | CN 脱敏是**两段式且 stage1 是承重墙**：`PrepareBody = BodyFallback(Messages(prepareBodyInner(src)))`，而 `prepareBodyInner`（`internal/upstream/payload.go:65`）已用 upstream 表做过一遍 `sanitizeMessages`；stage1 生效后 stage2（`internal/sanitize` 表）的 `hasFingerprint` 预检不再命中 ⇒ **恒为 no-op**，CN 出站的实际改写形态由 upstream 表决定。两份表的**匹配键**已由 R84 对齐，**替换目标形态仍不同**（upstream 等价词 vs sanitize leetspeak）；删 stage1 会把 CN 出站字节改成从未在生产验证过的 leetspeak 形态，属未声明的行为变更。`internal/workbuddyai` 的 `prepareBodyInner` 没有 stage1，故国际版由 sanitize 表单独生效。由 `internal/upstream/r87_two_stage_test.go` 守（变异：`sanitizeMessages(msgs)` → `_ = msgs` 立刻红） |
+| R88 | 本地判定的请求错误不得用 404：`internal/cline` 的 `knownModel` 拒绝原先返回 404，被 `Classify` 归成 `ErrNotFound`（`Rotatable()`）⇒ handler 换号 + `NoteError`，客户端打错一个模型名就能把整条 cline 渠道拖进冷却（上级项目 2026-10-28 同类事故实记：两个号各记两笔后整渠道冷却）。改法两件必须同时做：状态码 400 + 响应体带专属文案命中 `badParamMarkers` ⇒ `ErrBadParams`（不轮换、不罚号、原文透传）；只改状态码不够——`ErrClient` 也在轮转白名单里。识图能力同时按实测表纠正：`sn-glm-5-3` 实测不支持 `image_url` 却带 vision 标签（误标），`raccoon-19b265`/`raccoon-405a1c` 漏标但能读图；静态表旧 ID `sn-deepseek-v4-1-flash` 按生产日志（1372 次全是 `-1017`）更正。闸门：`internal/cline/r88_local_model_test.go`、`internal/raccoon/r88_vision_test.go`（四处变异全红） |
 
 ## 2. 架构选型（依据）
 
@@ -374,6 +375,8 @@ POST /api/quit                     # 退出程序
     （同一请求两种形态各发一次上游，看是否被拦），不能凭架构整洁直接切。
     闸门：`internal/upstream/r87_two_stage_test.go`（删 stage1 立刻红）。
 
+26. **本地判定的请求错误不得用 404，且必须落进不可轮转的 kind**：404 的语义是「上游说没这个资源」，而 `provider.ErrKind.Rotatable()` 把 `ErrNotFound` 当账号级错误（换号有价值）。本端校验（模型不在本地目录、参数越界、请求形态不接受）用 404 会产生**换号必然复现**的死循环，且每次轮换都 `NoteError` 一笔——客户端打错一个名字就能把整条渠道冷却。正确做法两件同时做：①状态码用 400/4xx 表示请求错误；②响应体带专属文案让 `Classify` 归到 `ErrBadParams`/`ErrPassthrough`/`ErrModelBlocked`（三者都不在轮转白名单）。只改状态码不够：`ErrClient` 同样可轮换。参照实现 `internal/loomy/client.go`，事故案例 `internal/cline/client.go`（R88）。
+
 ## 7. 平台能力差异表（internal/platform）
 
 | 能力 | Windows | macOS | Linux |
@@ -434,8 +437,8 @@ git tag vX.Y.Z && git push origin vX.Y.Z
 
 - [README.md](README.md) — 用户文档
 - [DEVELOPMENT.md](DEVELOPMENT.md) — 开发者文档（面向 AI Agent）
-- [AGENTS.md](AGENTS.md) — 本文件：决议项一句话判据（R1–R87）、架构选型、不变量
-- [docs/DECISIONS.md](docs/DECISIONS.md) — 决议全文（R1–R87）：每条决议的原始背景、踩坑记录与边界条件
+- [AGENTS.md](AGENTS.md) — 本文件：决议项一句话判据（R1–R88）、架构选型、不变量
+- [docs/DECISIONS.md](docs/DECISIONS.md) — 决议全文（R1–R88）：每条决议的原始背景、踩坑记录与边界条件
 - [docs/三接口兼容改造备忘.md](docs/三接口兼容改造备忘.md) — 三接口（Chat/Responses/Anthropic）兼容层架构决策、实施记录、验证清单、已知限制
 - [docs/用量积分流水记账备忘.md](docs/用量积分流水记账备忘.md) — 双流水统计（token/积分）架构、差分算法、实测验证、已知限制（R17）
 

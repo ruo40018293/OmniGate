@@ -504,7 +504,7 @@ func (c *Client) FetchModels(a *auth.Auth) ([]provider.ModelInfo, error) {
 			ContextWindow:  m.Params.ContextWindow,
 			MaxTokens:      m.Params.MaxTokens,
 			ContextFromAPI: m.Params.ContextWindow > 0,
-			SupportsImages: hasTag(m.Tags, "vision"),
+			SupportsImages: supportsImages(id, m.Tags), // R88 实测白名单优先
 			// 本渠道不投影档位（上游目录未声明 reasoning_efforts，见阶段 C 实测），
 			// 仅如实声明模型是否具备推理标签，便于客户端自行选择。
 			SupportsReasoning: hasTag(m.Tags, "reasoning"),
