@@ -3,9 +3,7 @@
 package upstream
 
 import (
-	"encoding/hex"
 	"net/http"
-	"time"
 
 	"omnigate/internal/auth"
 )
@@ -72,7 +70,12 @@ func CommonHeaders(req *http.Request, a *auth.Auth) {
 
 // ChatHeaders 在 common 之上加 chat 专属的账号头。
 // 缺省字段用 X-No-* 约定（与 CodeBuddy 官方 CLI 一致）。
-func ChatHeaders(req *http.Request, a *auth.Auth) {
+//
+// conv / turn 是 conversationAnchors 抽出的会话锚点（见同目录 convheaders.go）。
+// R91 之前这里每次现生成全部会话头，等于把一次多轮对话拆成上千个一次性会话——
+// 而 X-Conversation-ID 的语义是**会话级恒定**、X-Conversation-Request-ID 是上游
+// 「一次 user send = 一次请求」的计数键。
+func ChatHeaders(req *http.Request, a *auth.Auth, conv, turn string) {
 	CommonHeaders(req, a)
 	if at := a.AccessTokenValue(); at != "" {
 		req.Header.Set("Authorization", "Bearer "+at)
@@ -96,7 +99,7 @@ func ChatHeaders(req *http.Request, a *auth.Auth) {
 		req.Header.Set("X-No-Department-Info", "1")
 	}
 	injectAttribution(req, a)
-	injectConversationHeaders(req, newMessageID())
+	injectConversationHeaders(req, a, conv, turn)
 }
 
 // BillingHeaders billing 接口请求头。
@@ -141,34 +144,33 @@ func injectAttribution(req *http.Request, a *auth.Auth) {
 	req.Header.Set("X-Agent-Intent", "craft")
 }
 
-// injectConversationHeaders 注入会话头族（X-Conversation-Request-ID / B3 链路）。
+// injectConversationHeaders 注入会话头族（X-Conversation-* / B3 链路）。
 //
 // R49（2026-10-22）：补 X-Conversation-ID。国际版上游已强制该三件套（缺任一
-// 400/11-128，见 AGENTS.md R44）；国内版 10-21 起偶发 400/11128
-// "Illegal API invocation from an unapproved channel"（11h 内 3 次、随后自愈，
-// 灰度特征），直发对照实验未能钉死触发条件——但 12 发带该头全部 200，
-// 证明**无害**；两区同源 API 的校验只可能趋同，先对齐即把已知的最后一个
-// 头差异关掉。真正的定案数据靠 OMNIGATE_CAPTURE_CHAT 捕获下次复现（见 client.go）。
-func injectConversationHeaders(req *http.Request, messageID string) {
-	cid := newMessageID()
-	req.Header.Set("X-Conversation-ID", messageID)
-	req.Header.Set("X-Conversation-Request-ID", cid)
-	req.Header.Set("X-Conversation-Message-ID", messageID)
-	req.Header.Set("X-Request-ID", messageID)
-	req.Header.Set("X-Root-Request-ID", cid)
-	req.Header.Set("X-B3-TraceId", messageID)
-	req.Header.Set("X-B3-SpanId", messageID[:16])
-	req.Header.Set("X-B3-Sampled", "1")
-}
-
-func newMessageID() string {
-	var b [16]byte
-	n := time.Now().UnixNano()
-	for i := 0; i < 8; i++ {
-		b[i] = byte(n >> (i * 8))
-		b[15-i] = byte(n >> ((7 - i) * 8))
+// 400/11-128，见 AGENTS.md R44）；国内版 10-21 起偶发 400/11-128
+// "Illegal API invocation from an unapproved channel"，直发对照实验未能钉死触发条件，
+// 但 12 发带该头全部 200，证明**无害**；两区同源 API 的校验只可能趋同，先对齐即把
+// 已知的最后一个头差异关掉。
+//
+// R91（2026-11-03）：取值语义修正。此前每次现生成三件套（X-Conversation-ID 也每请求变），
+// 按官方 5.8.4 抓包应为「会话级恒定 / 轮级一次 send / 调用级每请求」。取值生成见
+// convheaders.go，本函数只负责落头。
+func injectConversationHeaders(req *http.Request, a *auth.Auth, conv, turn string) {
+	uid := ""
+	if a != nil {
+		uid = a.UID
 	}
-	return hex.EncodeToString(b[:])
+	msgID := newMessageID()
+	turnID := turnIDOf(uid, conv, turn)
+	req.Header.Set("X-Conversation-ID", conversationID(uid, conv))
+	req.Header.Set("X-Conversation-Request-ID", turnID)
+	req.Header.Set("X-Conversation-Message-ID", msgID)
+	req.Header.Set("X-Request-ID", msgID)
+	req.Header.Set("X-Root-Request-ID", turnID)
+	// B3 是**每请求**链路追踪头，跟调用级 id 走（不是会话级）。
+	req.Header.Set("X-B3-TraceId", msgID)
+	req.Header.Set("X-B3-SpanId", msgID[:16])
+	req.Header.Set("X-B3-Sampled", "1")
 }
 
 func acceptLanguageFor(a *auth.Auth) string {

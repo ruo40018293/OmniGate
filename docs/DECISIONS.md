@@ -1,4 +1,4 @@
-# 决议全文（R1–R90）
+# 决议全文（R1–R91）
 
 > 本文件是 `AGENTS.md` 第 1 节的**完整原文**——每条决议「为什么这么做 / 踩过什么坑 / 边界在哪」都在这里。
 > `AGENTS.md` 只保留每条的一句话判据，随每次会话自动加载，用来提醒「别推翻什么」；
@@ -596,3 +596,56 @@ if !outerOK {
 ### 已知未做
 - 上游 `internal/upstream/truncation.go` 的 `isTruncatedArguments` / `dropTruncatedToolCalls`（丢弃半截 tool_call arguments）我们仍未接：它会改变下发给客户端的内容，需单独评估。
 - `internal/provider/streamtrunc.go` 是 R82 期间的半成品（`TruncReason` 枚举那一套），已被本决议的 `TruncationCause/Code` 取代，未接线也未删除，无编译影响。
+
+## R91 — 渠道指纹与会话头必须按上游真实语义生成
+
+### 触发
+用户追问「之前让你看有啥值得吸收的，当时怎么没发现这些」。回看前两轮「上级项目吸收」审计（R82、R88）的取数方式：拉 `rockswang/wild-work` v2.9.6→v2.11.1 的 45 个 commit 与 5 个候选 commit 的 **patch**。
+**方法论缺陷**：diff 视角只能看到「改了什么」。`loopguard`、`provider/usage.go`、`raccoon/headers.go`、`convheaders.go` 这些文件是 **fork 点之前就存在**、且不在那 45 个 commit 的变更集里 ⇒ diff 视角永远看不见。R90 能找到 `stream.go`，是因为当时专门在猎 truncation 代码，不是方法对，是目标对。
+**本轮改成 file-level 结构差集**：`api.github.com/repos/rockswang/wild-work/git/trees/master?recursive=1`（默认分支是 **master**，main 返 404）→ 572 blob / 258 非测试 `.go`；与本地 165 个做差集 ⇒ **仅上游有的 124 个文件**，逐个过一遍。
+
+### 裁决
+| 项 | 处置 | 理由 |
+|---|---|---|
+| raccoon `headers.go` + `requestid.go` | **吸收** | 我们完全不发 UA + 每请求新建会话 |
+| `convheaders.go`（CN + WBAI 两份） | **吸收** | 会话头语义错，影响「一次 user send = 一次请求」计数 |
+| `loopguard/loopguard.go` | 列 R92 候选 | 真实缺口，但要嵌进四个渠道的 `streamAsOpenAI` 并调阈值，属大工程 |
+| `provider/usage.go` + `server/cacheusage.go` | **不接** | 上游缺陷是他们透传 Anthropic 族 `cache_*_input_tokens`；我们 `traework/solosse.go` 自合成 OpenAI 形状、`minimax/cacheusage.go` 已归一成 `cached_tokens`，其余渠道 grep 零命中 |
+| `stats/fallbacks.go` | 不接 | 我们无降级链架构（compat 映射是静态路由） |
+| `handler_images.go` + `imgutil/*` | 不接 | 新功能，非缺陷 |
+| `monkeycode/{checkin,captcha}` | 列候选 | 新能力，需交互 |
+| `raccoon/clientsession.go` | 不接 | 我们自有 import 路径已工作 |
+| gemini/kilo/lobsterai/zcode/codearts/comate/lingxi/officeace/oczen | 不接 | 新渠道；WPS 系用户已否 |
+
+### raccoon：从「裸奔」到协议保真
+**缺陷一**：`internal/raccoon/client.go` 的 `ChatStream` 只设 `Content-Type` / `Accept` / `Authorization` —— **没有 `User-Agent`**，Go 默认发 `Go-http-client/1.1`。全仓 grep 确认 raccoon 是唯一不带 UA 的 chat 渠道。
+**缺陷二**：每次请求现生成 `sess-<32hex>`。上游实测：官方一个 ACP 会话在项目生命周期内**固定不变**（跨 37 分钟、150+ 次 LLM 调用、遇 429 也不换），只有新建项目才 `session/new`。「同一账号几分钟内冒出上百个新会话」是 **429 的真正触发条件**。
+**证据来源**：上游 2026-10-31 反编译「商汤小浣熊-1.0.38-arm64.deb → `resources/box-agent-runtime/bin/box-agent-acp`」（PyInstaller，内嵌 CPython 3.12.13，解 marshal 必须 py3.12）。关键结论：**对话请求走 Python 子进程，不走 Electron 渲染层** —— 旧实现只解 `app.asar` 渲染层 `createHeaders()` 因此全错；官方那组头叫 `x-client-*`，UA 是 `AsyncOpenAI/Python 2.8.0`。
+
+落地：`internal/raccoon/headers.go`（`OfficialUA`/`sdkVersion`/`pyVersion`/`clientName`/`clientVersion`/`clientChannel` 常量 + `ApplyHeaders` + `cleanHeaderValue`）、`internal/raccoon/requestid.go`（`sessionRotation = 24h`、`sessionKeyOf(a, model) = accountKey(a)+"|"+model`、`accountKey` 四级兜底 nil→UID→Nickname→`tok-<sha256[:4]>`、`sessionForEx`、`newTurnID`、`randomHex8`）、`internal/raccoon/osversion_{windows,linux,other}.go`（Windows 走 `RtlGetVersion`，Linux 读 `/etc/os-release` VERSION_ID，macOS 返回空串——宁可少发一个头也不编造）。
+
+**SDK 取值必须照抄，不能推**：`X-Stainless-Arch` 在 Windows amd64 上是 **`other:amd64`**（`get_architecture()` 把 `platform.machine().lower()` 交给 `OtherArch`，`__str__` = `other:<machine>`）；只有 `x86_64`（Linux/macOS）才映射 `x64`。`X-Stainless-OS` 首字母大写（`Linux`/`Windows`/`MacOS`）。**不手写 `Accept`**（SDK 自带 `application/json`，流式也不改成 `text/event-stream`）。`device_id` 官方从不赋值 ⇒ 不发。
+
+### convheaders：三层会话头的语义
+官方 5.8.4 抓包结论：`X-Conversation-ID` 会话级恒定（= 会话 `session.id`）、`X-Conversation-Request-ID` 轮级（一次 user send 一个值，工具回调/重试复用）、`X-Conversation-Message-ID` 调用级（每模型请求新值 = `X-Request-ID`）、`X-Root-Request-ID` = 本轮的 `X-Conversation-Request-ID`。
+我们两区（`internal/upstream/headers.go` 与 `internal/workbuddyai/client.go`）此前都是「每请求现生成」，WBAI 侧更进一步：**五个头全用同一个 `mid`**。后果是「一次多轮对话被拆成上千个一次性会话」，而 `X-Conversation-Request-ID` 是上游「一次 user send = 一次请求」的计数键。
+
+落地：`internal/upstream/convheaders.go` 与 `internal/workbuddyai/convheaders.go` **两份平行实现**（同 R52 脱敏表纪律，渠道包之间不共享实现）。锚点：`conversationAnchors(body)` 取**首条** user 文本指纹当 conv、**末条** user 文本指纹当 turn（工具回调追加的是 assistant/tool，末条 user 仍在 ⇒ 一轮多步复用同一 turn）；`maxAnchorBody = 8<<20` 超限退回随机；`convFingerprint` = sha256 前 8 字节 16 hex；`conversationID(uid, anchor)` = `sha256("wb-conv\x00"+uid+"\x00"+anchor)` 前 16 字节置 v4/variant，`turnIDOf` 同理带 `"wb-turn\x00"+uid+"\x00"+conv+"\x00"+anchor`。`newMessageID` 从**时间戳派生**升级为 **crypto/rand**。
+
+### 顺带修掉的上游 bug
+上游 `randomUUIDv4` 用 `s[0:4]+"-"+s[4:8]+"-"+s[8:12]+"-"+s[12:16]+"-"+s[16:32]`，产出 **4-4-4-4-16 的畸形串**（不是任何 UUID 形态）。我们改为 `formatUUID(b)`（标准 8-4-4-4-12）。照搬会让 `X-RACCOON-Turn-ID` 形态畸形。发现方式：`TestTurnIDIsUUIDv4` 断言 `id[14]=='4'`，实测 `eed5-d477-4258-491a-a5b9590d3f1a3806` 第 15 位不是 `4`。
+
+### 闸门
+- `internal/raccoon/r91_headers_test.go`（10 个）：UA 原文、`Accept` 必须为空、六件 `X-Stainless-*`、五件 `x-client-*`、禁发 `device_id`/`X-Raccoon-Language`、禁伪造 `Title`/`Call-Kind`、空值不发、`cleanHeaderValue` 8 例、会话复用/隔离/24h 轮换、`accountKey` 四级兜底、turn 是标准 UUIDv4。
+- `internal/upstream/r91_convheaders_test.go`（8 个）+ `r91_wiring_test.go`（3 个）：三轮 conv 恒定、工具回调 turn 不变、跨 uid 隔离、随机兜底形态、超限退回、`X-Request-ID == Message-ID`、`X-Root-Request-ID == 本轮 Request-ID`、重试复用同一 turn、锚点空时五个头仍齐（缺任一 400/11-128）。
+- `internal/workbuddyai/r91_convheaders_test.go`（4 个）：同会话恒定、三头**不再同值**、按 uid 隔离、`newMessageIDWBAI` 200 次不重复。
+- 七处变异全红：M1 raccoon UA 不设 / M2 `sessionForEx` 去掉复用分支 / M3 `conversationID` 忽略锚点 / M4 `turnIDOf` 忽略锚点 / M5 WBAI 三头同值 / M6 WBAI 侧 `conversationID` 忽略锚点（锁两份实现不许只改一份）/ M7 conv 锚点取末条 user（每轮都变，正是待修缺陷的形态）。
+
+### 边界
+- 只改「怎么发」，不改「发什么」：请求体、模型名、脱敏链一律不动。
+- 锚点只在本地参与哈希，**原文不上送、不落盘**。
+- 会话池是进程内内存态，重启后重新分配 —— 与官方「新进程新会话」一致，不持久化。
+
+### 已知未做
+- `loopguard` 思考链死循环检测：真实缺口，但需嵌进四个渠道的 `streamAsOpenAI` 并调阈值，列 R92 候选。
+- `X-RACCOON-Turn-ID` 仍每请求新建（官方一轮共用一个 turn_id），属已知限制。

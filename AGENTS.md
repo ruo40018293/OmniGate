@@ -127,6 +127,7 @@
 | R88 | 本地判定的请求错误不得用 404：`internal/cline` 的 `knownModel` 拒绝原先返回 404，被 `Classify` 归成 `ErrNotFound`（`Rotatable()`）⇒ handler 换号 + `NoteError`，客户端打错一个模型名就能把整条 cline 渠道拖进冷却（上级项目 2026-10-28 同类事故实记：两个号各记两笔后整渠道冷却）。改法两件必须同时做：状态码 400 + 响应体带专属文案命中 `badParamMarkers` ⇒ `ErrBadParams`（不轮换、不罚号、原文透传）；只改状态码不够——`ErrClient` 也在轮转白名单里。识图能力同时按实测表纠正：`sn-glm-5-3` 实测不支持 `image_url` 却带 vision 标签（误标），`raccoon-19b265`/`raccoon-405a1c` 漏标但能读图；静态表旧 ID `sn-deepseek-v4-1-flash` 按生产日志（1372 次全是 `-1017`）更正。闸门：`internal/cline/r88_local_model_test.go`、`internal/raccoon/r88_vision_test.go`（四处变异全红） |
 | R89 | `/v1/models` 必须把上游声明过的思考档位 / 上下文档位声明出去：审计发现渠道侧其实**能收** `reasoning_effort`（qoder 系、minimax、loomy、monkeycode），但声明侧一个字段都没有（实测 212 个模型：`reasoning_efforts`/`default_reasoning_effort`/`can_disable_thinking` 各 0 条）⇒ 客户端无法渲染下拉框，用户「没得选」。改法：`provider.ModelInfo` 新增 `ContextWindows`；`buildModelEntry` 输出 `reasoning_efforts`（len>0）、`default_reasoning_effort`（非空）、`can_disable_thinking`（指针非 nil，false 与 nil 不同义）、`context_windows`（**>1 才输出**，单档不算选择）；qoder/qodercn/qodercom 把 `context_config` 档位表拷进 `ContextWindows`，loomy 把 `/models` 的 `reasoning_efforts`/`default_reasoning_effort` 带进 `ModelInfo`。**不编造是硬约束**：给 qoder 补 low/medium/high 就是替上游做主。闸门：`internal/server/r89_capability_declare_test.go`、`internal/{qoder,qodercn,qodercom}/r89_context_windows_test.go`、`internal/loomy/r89_reasoning_efforts_test.go`（五处变异全红） |
 | R90 | 流式错误必须带着原因出去、必须能被惩罚：实测生产日志 `qodercn err=upstream stream truncated` 47 条 + `qodercom` 30 条，出口一律是固定串 「upstream stream truncated」（底层 err 被丢弃），客户端只能看到「断了」，180 秒后才收场；另 `qwenwork err=upstream 402` **118 条**额度耗尽却不冷却——因为流内错误帧走的是裸 `fmt.Errorf`，实现不了 `provider.StreamErrorClassifier`，handler 的 `errors.As` 取不到 kind、落 default「不罚账号」，粘性路由把下一次请求送回同一个刚撞完额度的号。改法三条：① `internal/provider/stream.go` 补齐 `TruncationCause`/`TruncationError`/`TruncationCode`/`TruncationFrame`/`WriteTruncationFrame`，`IsIdleTimeout` 还要认 `context.Canceled`/`DeadlineExceeded`/`net.ErrClosed`（否则「我们主动掐的」与「上游真断的」同形，R58 就卡在这）；② 四渠道流内错误帧统一成 `sseError{status,msg,retryAfter}` 实现 `Kind()`，出口 code `upstream_quota_exhausted`/`_rate_limited`/`_session_dead`/`_model_blocked`/`_business_error`/`_server_error`，信封 `statusCodeValue>=400` 在 onChunk **之前**早返回；③ 四渠道 `parseNestedSSE` 的 EOF 判定：`!outerOK` 一律判截断（外层 JSON 非法 = 帧断在半路），`err==io.EOF && !innerOK` 判截断，末行空判定改用 `lastNonBlankLine`（`ReadString('\n')` 会把「最后完整帧自带空行」一并交回，`TrimSpace` 判不出来，会把干净收尾误判成截断）。闸门：`internal/qodercn/r90_stream_error_test.go`（含 `TestTruncationErrorKeepsCause` 直锁原因保留）、四渠道 `TestStreamTruncationNotDisguisedAsDone` 各补一条「干净 EOF 但末帧不完整」用例；八处变异全红 |
+| R91 | 渠道指纹与会话头必须按上游**真实语义**生成，不按「能过校验」生成：① [raccoon] chat 请求此前**完全不发 `User-Agent`**（Go 默认 `Go-http-client/1.1`），也没有 `x-client-*` 家族；上游 2026-10-31 反编译「小浣熊 1.0.38 → box-agent-acp」证实**对话请求走 Python 子进程**（不是 Electron 渲染层），真实头集 = `AsyncOpenAI/Python 2.8.0` + `X-Stainless-{Lang,Package-Version,OS,Arch,Runtime,Runtime-Version}` 六件 + `x-client-{name,platform,version,os-version,channel}`（`device_id` 官方从不赋值 ⇒ 不发）；并且「每请求新建 `sess-<hex>`」会让上游看到同一账号几分钟内冒出上百个新会话 —— **这是 429 的真正触发条件**（官方一个 ACP 会话跨 37 分钟、150+ 次调用都不换）⇒ `internal/raccoon/{headers,requestid,osversion_windows,osversion_linux,osversion_other}.go` 落地 `ApplyHeaders` + 24h 会话池（key = `账号|模型`，必须带账号否则会话跨号漂移）。② [workbuddy CN / WBAI] 两区的 `X-Conversation-ID` 此前也是每请求现生成，官方语义是三层：**会话级恒定 / 轮级（一次 user send）/ 调用级（每模型请求）** ⇒ `internal/upstream/convheaders.go` 与 `internal/workbuddyai/convheaders.go` **两份平行实现**（锚点 = 首条 user 文本 sha256 前 8 字节派生 conv、末条 user 指纹派生 turn，`maxAnchorBody = 8<<20` 超限退回随机），`newMessageID` 由时间戳派生升级为 crypto/rand。闸门：raccoon 10 个 + upstream 12 个 + WBAI 4 个测试；七处变异全红；顺带修掉上游 `randomUUIDv4` 的切片 bug（产出 4-4-4-4-16 畸形串，不是任何 UUID 形态） |
 
 ## 2. 架构选型（依据）
 
@@ -386,6 +387,14 @@ POST /api/quit                     # 退出程序
     另：`ContextWindows` 必须**拷贝**上游切片（`append([]int64(nil), ...)`），共享底层数组会让后续写入反向污染已缓存模型表。
     闸门：`internal/server/r89_capability_declare_test.go`、`internal/{qoder,qodercn,qodercom}/r89_context_windows_test.go`、`internal/loomy/r89_reasoning_efforts_test.go`（五处变异全红）。
 
+28. **渠道指纹与会话头按上游真实语义生成，不按「能通过校验」生成**：R44 只证明了「头必须齐」，从头约束过「取值语义」。两类语义一旦错，后果不是 400 而是**悄悄被限流**。
+    - **UA 与 SDK 头照抄原文**：raccoon 的 `User-Agent` 必须是 `AsyncOpenAI/Python 2.8.0`（openai SDK 的 `BaseClient.user_agent` 原文）；`X-Stainless-Arch` 在 Windows amd64 上是 **`other:amd64`**（SDK 的 `get_architecture()` 对未知 machine 走 `OtherArch`，`__str__` 为 `other:<machine>`），只有 Linux/macOS 的 `x86_64` 才是 `x64`。不要凭直觉填 `amd64` 或 `x64`。
+    - **不手写 `Accept`**：`Accept: application/json` 由 SDK 的 `default_headers` 自带；流式请求也**不**改成 `text/event-stream`。
+    - **空值不发，宁缺不编造**：`cleanHeaderValue` 规则是 TrimSpace 后空 / 长度 >256 / 含非 ASCII（r>127）⇒ 该头整个不发。取不到系统版本就发空串，不要编一个。
+    - **会话 ID 必须复用，不许每请求新建**：raccoon 24h 池（`sessionKeyOf` 必须含账号）；convheaders 按锚点派生（同 uid + 同锚点 = 同 id）。每请求一个新会话是上游 429 的直接触发器。
+    - **两份 convheaders 必须同步改**：`internal/upstream/` 与 `internal/workbuddyai/` 是平行实现（同 R52 脱敏表纪律），不许抽成共享包（渠道包之间不共享实现，R58/R111）。
+    - 闸门：`internal/raccoon/r91_headers_test.go`、`internal/{upstream,workbuddyai}/r91_{convheaders,wiring}_test.go`。
+
 ## 7. 平台能力差异表（internal/platform）
 
 | 能力 | Windows | macOS | Linux |
@@ -446,8 +455,8 @@ git tag vX.Y.Z && git push origin vX.Y.Z
 
 - [README.md](README.md) — 用户文档
 - [DEVELOPMENT.md](DEVELOPMENT.md) — 开发者文档（面向 AI Agent）
-- [AGENTS.md](AGENTS.md) — 本文件：决议项一句话判据（R1–R90）、架构选型、不变量
-- [docs/DECISIONS.md](docs/DECISIONS.md) — 决议全文（R1–R90）：每条决议的原始背景、踩坑记录与边界条件
+- [AGENTS.md](AGENTS.md) — 本文件：决议项一句话判据（R1–R91）、架构选型、不变量
+- [docs/DECISIONS.md](docs/DECISIONS.md) — 决议全文（R1–R91）：每条决议的原始背景、踩坑记录与边界条件
 - [docs/三接口兼容改造备忘.md](docs/三接口兼容改造备忘.md) — 三接口（Chat/Responses/Anthropic）兼容层架构决策、实施记录、验证清单、已知限制
 - [docs/用量积分流水记账备忘.md](docs/用量积分流水记账备忘.md) — 双流水统计（token/积分）架构、差分算法、实测验证、已知限制（R17）
 

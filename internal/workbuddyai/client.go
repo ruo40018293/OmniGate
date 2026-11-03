@@ -5,7 +5,6 @@ package workbuddyai
 import (
 	"bytes"
 	"crypto/tls"
-	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -86,7 +85,11 @@ func commonHeaders(req *http.Request) {
 
 // chatHeaders 对话专有头：Authorization 族 + X-No-* 缺省约定。
 // 安全红线：绝不携带 X-Refresh-Token。
-func chatHeaders(req *http.Request, a *auth.Auth) {
+//
+// conv / turn 是 conversationAnchors 抽出的会话锚点（见同目录 convheaders.go）。
+// R91 之前这里把五个会话头全设成同一个现生成的 mid，等于「一次多轮对话 =
+// 上千个一次性会话」，与官方语义（会话级恒定 / 轮级一次 send / 调用级每请求）不符。
+func chatHeaders(req *http.Request, a *auth.Auth, conv, turn string) {
 	commonHeaders(req)
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("Authorization", "Bearer "+a.AccessTokenValue())
@@ -106,12 +109,16 @@ func chatHeaders(req *http.Request, a *auth.Auth) {
 	// 缺它一律 400 code=11-128「request illegal / 不是官方客户端发出」，
 	// 与其值格式无关（UUID 与 36/32 位 hex 均通过，与另两个会话头同值也通过）。
 	// 官方客户端见 app.asar 的 applyGatewayHeaders：三头齐全。
+	//
+	// R91：取值语义按官方 5.8.4 抓包修正 —— 会话级恒定 / 轮级一次 send / 调用级每请求。
+	uid := a.UID
 	mid := newMessageIDWBAI()
-	req.Header.Set("X-Conversation-ID", mid)
-	req.Header.Set("X-Conversation-Request-ID", mid)
+	turnID := turnIDOf(uid, conv, turn)
+	req.Header.Set("X-Conversation-ID", conversationID(uid, conv))
+	req.Header.Set("X-Conversation-Request-ID", turnID)
 	req.Header.Set("X-Conversation-Message-ID", mid)
 	req.Header.Set("X-Request-ID", mid)
-	req.Header.Set("X-Root-Request-ID", mid)
+	req.Header.Set("X-Root-Request-ID", turnID)
 }
 
 // injectAttributionWBAI 归属头。取值口径见 constants.go 的 R51 注释：
@@ -125,16 +132,6 @@ func injectAttributionWBAI(req *http.Request) {
 	req.Header.Set("X-Product", clientProd)
 	req.Header.Set("X-Private-Data", "true")
 	req.Header.Set("X-Agent-Intent", "craft")
-}
-
-func newMessageIDWBAI() string {
-	var b [16]byte
-	n := time.Now().UnixNano()
-	for i := 0; i < 8; i++ {
-		b[i] = byte(n >> (i * 8))
-		b[15-i] = byte(n >> ((7 - i) * 8))
-	}
-	return hex.EncodeToString(b[:])
 }
 
 // billingHeaders 余额 / 签到接口头。
@@ -300,7 +297,10 @@ func (c *Client) chatStreamOnce(a *auth.Auth, prepared []byte) (rc io.ReadCloser
 	if err != nil {
 		return nil, 0, nil, err
 	}
-	chatHeaders(req, a)
+	// R91：会话锚点从 prepared（真实出站字节）抽，保证会话头反映用户实际发送的消息。
+	// 重试循环里 prepared 不变 ⇒ conv/turn 也不变，正是「重试复用同一轮 id」的官方语义。
+	conv, turn := conversationAnchors(prepared)
+	chatHeaders(req, a, conv, turn)
 	req, cancel := idle.WithCancel(req)
 	hc := c.HTTP
 	if c.StreamHTTP != nil {

@@ -23,7 +23,7 @@ func TestChatHeadersConversationFamily(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	ChatHeaders(req, &auth.Auth{AccessToken: "at", UID: "u1", Domain: "www.codebuddy.cn"})
+	ChatHeaders(req, &auth.Auth{AccessToken: "at", UID: "u1", Domain: "www.codebuddy.cn"}, "", "")
 	for _, k := range []string{"X-Conversation-ID", "X-Conversation-Request-ID", "X-Conversation-Message-ID"} {
 		if req.Header.Get(k) == "" {
 			t.Errorf("%s 缺失或为空：上游渠道校验会回 400 code=11-128（R44/R49）", k)

@@ -339,7 +339,10 @@ func (c *Client) ChatStream(a *auth.Auth, body []byte) (rc io.ReadCloser, status
 	if err != nil {
 		return nil, 0, nil, err
 	}
-	ChatHeaders(req, a)
+	// R91：会话锚点必须从 **prepared**（真实出站字节）里抽，因为会话头族要反映
+	// 用户实际发送的消息；锚点只取 user 文本做哈希，脱敏不改语义，稳定性不受影响。
+	conv, turn := conversationAnchors(prepared)
+	ChatHeaders(req, a, conv, turn)
 	req, cancel := idle.WithCancel(req)
 	hc := c.HTTP
 	if c.StreamHTTP != nil {

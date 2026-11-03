@@ -26,7 +26,7 @@ func TestIdentityHeadersMatchOfficialDesktop(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	ChatHeaders(req, &auth.Auth{AccessToken: "at", UID: "u1", Domain: "www.codebuddy.cn"})
+	ChatHeaders(req, &auth.Auth{AccessToken: "at", UID: "u1", Domain: "www.codebuddy.cn"}, "", "")
 
 	// UA 三段与官方 buildUserAgent 输出同形：
 	// <productName>/<appVersion> <productName>/<appVersion> CLI/<cliVersion>
@@ -57,7 +57,7 @@ func TestNoSelfInventedFingerprintHeaders(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	ChatHeaders(req, &auth.Auth{AccessToken: "at", UID: "u1", Domain: "www.codebuddy.cn"})
+	ChatHeaders(req, &auth.Auth{AccessToken: "at", UID: "u1", Domain: "www.codebuddy.cn"}, "", "")
 	for _, k := range []string{"X-Machine-ID", "X-Session-ID"} {
 		if v := req.Header.Get(k); v != "" {
 			t.Errorf("%s=%q 不应出现在 chat 请求里：官方客户端不发（R51）", k, v)
@@ -71,7 +71,7 @@ func TestLoginSideUsesSameIdentity(t *testing.T) {
 	// 直接断言包内常量，避免引入 login 包的循环依赖（login → upstream 不存在，
 	// 但 upstream → login 也不该有；用文本级护栏在 parity 测试里做跨包检查）。
 	req, _ := http.NewRequest("POST", "https://chat.example/v2/chat/completions", nil)
-	ChatHeaders(req, &auth.Auth{AccessToken: "at", UID: "u1"})
+	ChatHeaders(req, &auth.Auth{AccessToken: "at", UID: "u1"}, "", "")
 	ua := req.Header.Get("User-Agent")
 	if !strings.Contains(ua, "CLI/"+cliVersion) {
 		t.Errorf("UA %q 必须含 CLI/%s 段：/v3/config 有 \"CLI 形 UA\" 门禁（400/12403）", ua, cliVersion)

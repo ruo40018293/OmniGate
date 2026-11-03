@@ -263,9 +263,20 @@ func (c *Client) ChatStream(a *auth.Auth, body []byte) (rc io.ReadCloser, status
 	if err != nil {
 		return nil, 0, nil, err
 	}
-	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("Accept", "application/json")
-	req.Header.Set("Authorization", "Bearer "+accessToken(a))
+	// R91：出站头对齐官方 box-agent 的 LLM 路径（UA=AsyncOpenAI/Python 2.8.0、
+	// X-Stainless-* 六件、x-client-* 五件、X-RACCOON-Session-ID/Turn-ID）。
+	//
+	// 此前这里只设 Content-Type/Accept/Authorization，**完全不发 User-Agent** ⇒
+	// Go 默认的 `Go-http-client/1.1` 是一个裸奔级指纹（全仓唯一不带 UA 的 chat 渠道）。
+	//
+	// ⚠️ session id 与头部套件**必须一起上**：只加头部而让 session 每请求新建，
+	// 上游会看到「同一账号几分钟内冒出上百个新会话」——那是 429 的触发维度。
+	// session id 按「账号 + 模型」分桶并 24h 轮换（见 requestid.go）。
+	sessID, sessNew := sessionForEx(sessionKeyOf(a, modelOf(orig)))
+	// 会话新建是低频事件、复用是高频事件，两者各一行，可与 429 时间戳对照。
+	// **不打 token**：只打账号 key、模型名与会话 ID（后者本就是发往上游的非敏感随机串）。
+	log.Printf("raccoon session: uid=%s model=%q sid=%s new=%t", accountKey(a), modelOf(orig), sessID, sessNew)
+	ApplyHeaders(req, accessToken(a), "", gatewayOSVersion(), sessID, newTurnID())
 	// 用无总超时的 client：长思考请求不受整请求上限约束（见 Client.StreamHTTP）。
 	resp, err := c.streamClient().Do(req)
 	if err != nil {
