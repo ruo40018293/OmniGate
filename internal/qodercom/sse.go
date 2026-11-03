@@ -59,13 +59,22 @@ func parseNestedSSE(r io.Reader, onChunk func(map[string]any) error, truncated *
 					}
 				}
 			}
-			if err == io.EOF && !(outerOK && innerOK) {
-				set() // EOF 处这一行（内层或外层）不是完整 JSON：半个帧
+			if !outerOK {
+				// R90 修：data: 行的**外层** JSON 就不合法 = 这一帧被切断在半路上。
+				//
+				// 此前只有「恰好卡在 EOF」时才判截断，于是「上游写到一半断连、但残帧
+				// 自带换行」（生产上极常见——残帧后面就跟着两个换行收尾）被判成干净
+				// 收尾：客户端收到 [DONE]、网关记成一条成功流水，实际只收到半个帧。
+				set()
+			} else if err == io.EOF && !innerOK {
+				set() // EOF 处这一行（内层）不是完整 JSON：半个帧
 			}
 		}
 		if err == io.EOF {
-			// 最后一行没有换行符收尾且非空 → 帧不完整（半帧）；正常收尾的最后一行是空行。
-			if strings.TrimSpace(line) != "" {
+			// 末尾没有换行收尾时，ReadString 会把「最后一个非空帧 + 其中的空行」一起
+			// 交回来，故按最后一个**非空行**判定：它是空行 → 干净收尾；
+			// 否则帧不完整（半帧）。
+			if last := lastNonBlankLine(line); last != "" {
 				set()
 			}
 			return nil
@@ -296,4 +305,19 @@ func StreamCapture(w http.ResponseWriter, r io.Reader, model string, onUsage fun
 		onUsage(usage)
 	}
 	return usage, err
+}
+
+// lastNonBlankLine 返回多行文本里最后一个非空行（去空白）。
+//
+// 用于 EOF 收尾判定：ReadString('\n') 在最后一段没有换行收尾时，会把「最后一个
+// 完整帧 + 它自带的空行」一并交回，此时行内仍含换行，
+// 直接 TrimSpace 判不出「末行其实是空的」。
+func lastNonBlankLine(s string) string {
+	lines := strings.Split(s, "\n")
+	for i := len(lines) - 1; i >= 0; i-- {
+		if t := strings.TrimSpace(lines[i]); t != "" {
+			return t
+		}
+	}
+	return ""
 }

@@ -1,4 +1,4 @@
-# 决议全文（R1–R89）
+# 决议全文（R1–R90）
 
 > 本文件是 `AGENTS.md` 第 1 节的**完整原文**——每条决议「为什么这么做 / 踩过什么坑 / 边界在哪」都在这里。
 > `AGENTS.md` 只保留每条的一句话判据，随每次会话自动加载，用来提醒「别推翻什么」；
@@ -516,3 +516,83 @@ if !c.knownModel(m) {
 **变异验证（五处全红）**：①去掉 `reasoning_efforts` 输出 → declares 测试红；②给未声明档位的渠道编造 low/medium/high → omit 测试红；③`context_windows` 的阈值从 `>1` 改 `>0` → 单档测试红；④档位表不拷贝（直接赋值）→ alias 测试红；⑤loomy 不把档位带进 `ModelInfo` → loomy 测试红。还原后 `go build/vet/test` 全绿（37 包），`dist/omnigate.exe` 已重建。
 
 **边界**：本条只改「声明」，不改任何渠道的出站请求形态，也不动 `compat.max_tokens_cap`（用户裁决保持 32000）。要真正在面板里给用户选，属于下一步的 UI 工作（本轮不做）。
+
+## R90 — 流式错误必须带着原因出去、必须能被惩罚
+
+### 触发
+
+用户报「最近老是一半卡住」「是不是上限了？过会又能用，只知道断了是吗」。
+初判怀疑是我们自己的超时或粘性路由放大了故障，逐条用数据核对后推翻，并定位到三件事。
+
+### 取证（全部来自生产日志与源码，不是推测）
+
+日志 `E:\陈焕生\workbuddy-api\data\app.log`（15 165 340 字节）中 `stream relay end` 共 260 条：
+
+| 形态 | 条数 |
+|---|---|
+| `qwenwork err=upstream 402: {"code":"402","message":"Error in upstream response"}` | **118** |
+| `qodercn err=upstream stream truncated` | 47 |
+| `qodercom err=upstream stream truncated` | 30 |
+| `qodercn err=上游模型排队中 model=dfmodel 预计等待=30s` | 4 |
+| `traework err=solo error code=4008 msg=Your requests have exceeded the quota.` | 1 |
+| `write tcp 127.0.0.1:7863->...: wsasend: An established connection was aborted by the software in your host machine.`（客户端主动断开） | 多条 |
+
+**推翻「我们的 180s 超时 / 3 次阈值 / 粘性路由」三连**：
+- 四个 Qoder 系渠道 `IdleTimeout` 全取 `internal/idle/idle.go:22` 的 300s，`StreamHTTP` **无 Timeout** ⇒ 不存在 180s 硬超时；
+- `auths/` 仅 10 个文件，`data/state-*.json` 每渠道 `accounts` 全为 1 ⇒ 每渠道只有一个号，粘性只是「粘着唯一的号」，没有第二条线可换；
+- 截断期间 `cooldown` 0 条、`rotate` 0 条 ⇒ `ErrThreshold=3` 从未参与，流式失败根本不做账号惩罚；
+- 存在 `dur>200s` 且成功的请求（max 480s）与 `bytes=754687` 的长流 ⇒ 无全局定时器。
+
+**真实机制两层**：
+1. 截断时写给客户端的 `bytes` 极小（qodercom 242/243/274/513、qodercn 81..431）⇒ 上游只发了 `role` 首帧就沉默，约 180s 后被判截断；
+2. 四个渠道的 `streamAsOpenAI` 把底层 `err` **整块丢弃**，固定写 `{"message":"upstream stream truncated"}` 并 `return errors.New("upstream stream truncated")` ⇒ 客户端只能看到「断了」，日志里也只有这一句。
+
+**qwenwork 402 是另一个独立缺陷**：`internal/qwenwork/sse.go` 的 `parseNestedSSE` 在信封 `statusCodeValue>=400` 时 `return fmt.Errorf("upstream %d: %s", ...)` —— 裸 error **实现不了** `provider.StreamErrorClassifier`，于是 `internal/server/handler.go` 的 `errors.As(serr, &sec)` 取不到 kind、落 `default`「不罚账号」。后果：额度耗尽的号不被冷却，粘性路由把下一次请求原样送回同一个号，客户端每次都要等 180 秒才看到一句「断了」。118 条 402 全部走的这条路径。
+
+### 上游对照（rockswang/wild-work v2.11.1）
+
+上游有整套 truncation 体系，我们缺的是「原因」和「惩罚」两环：
+- `internal/provider/stream.go` 有 `TruncationCause` / `TruncationCode` / `TruncationError` / `TruncationFrame` / `WriteTruncationFrame`，且 `IsIdleTimeout` 还认 `context.Canceled` / `DeadlineExceeded` / `net.ErrClosed`。其注释原话：「若这里认不出，『我们主动掐的』与『上游真断的』在日志与出口错误码里就完全同形。实测排查一次 qoder 截断时正是卡在这里（R58）。」
+- `internal/qodercn/sse.go` 有 `sseError{status,msg,retryAfter}` 实现 `StreamErrorClassifier`；`internal/server/stream_error_penalty_test.go` 注释写明闭环理由：「流式请求的 HTTP 200 与响应头在读到上游 error 帧之前已发出，协议上无法在同一请求内换号重试。唯一补救是把中招账号冷却掉，让客户端下一次重试时由挑号逻辑换到别的号。」
+
+### 改法（三条，都已落地）
+
+**① `internal/provider/stream.go` 补齐原因链路**（对齐上游语义）
+- `IsIdleTimeout(err)` 增加 `context.Canceled` / `context.DeadlineExceeded` / `net.ErrClosed`；
+- `TruncationCause(err)`：nil → `"unknown cause"`；空闲超时 → 归一成 `ErrIdleTimeout.Error()`（不直接写 `context canceled`，那会被读成客户端断开）；否则原样；
+- `TruncationError(err)`：用 `%w` 包住原错误，保留旧前缀 `upstream stream truncated`（日志与客户端按前缀识别，不能改）；
+- `TruncationCode(err)`：空闲超时 → `upstream_timeout`，其余 `upstream_truncated`；
+- `TruncationFrame` / `WriteTruncationFrame`：生成并写出错误帧，**不补 `[DONE]`**。
+
+**② 四渠道流内错误帧统一成 `sseError`**（`internal/{qoder,qodercn,qodercom,qwenwork}/sse.go`）
+- `type sseError struct{ status int; msg string; retryAfter int }`，`Error()` 给 `upstream <status>: <msg>`，`Kind()` 复用本包 `Classify`，并 `var _ provider.StreamErrorClassifier = (*sseError)(nil)`；
+- 出口 code 细分：`upstream_quota_exhausted` / `upstream_rate_limited` / `upstream_session_dead` / `upstream_model_blocked` / `upstream_business_error` / `upstream_server_error`；
+- 信封 `statusCodeValue>=400` 在 `onChunk` **之前**早返回（此前 qodercn 完全不认信封错误，只认扁平帧；qoder/qodercom 连字段都没有）；
+- `parseNestedSSE` 里不再 `fmt.Errorf`，改为返回 `*sseError`，`streamAsOpenAI` 用 `errors.As` 命中后写错误帧并上抛。
+
+**③ 四渠道 `parseNestedSSE` 的 EOF 判定（真 bug）**
+旧逻辑只有 `if err == io.EOF && !(outerOK && innerOK) { set() }`。于是「上游写到一半断连、但残帧自带换行」时 `err == nil` 而 `outerOK == false`——**根本不进任何截断判定**，被当干净收尾：客户端收到 `[DONE]`、网关记一条成功流水。生产上残帧后面常跟着 `\n\n`，这条路径很常见。改为：
+```go
+if !outerOK {
+    set()   // 外层 JSON 非法 = 帧被切断在半路（无论是否 EOF）
+} else if err == io.EOF && !innerOK {
+    set()   // EOF 处内层不完整
+}
+```
+并把 `if strings.TrimSpace(line) != ""` 换成 `lastNonBlankLine(line) != ""`：`ReadString('\n')` 在最后一段无换行收尾时会把「最后一个完整帧 + 它自带的空行」一并交回，行内仍含 `\n`，`TrimSpace` 判不出「末行其实是空的」，会把干净收尾误判成截断。
+
+### 契约边界（不许放宽）
+- 「EOF 但末帧完整、上游漏发 `[DONE]`」**必须仍算正常收尾**并补 `[DONE]`（`internal/qodercn/stream_truncation_test.go` 的既有断言）。
+- `internal/qodercn/activity_test.go` 的 `TestFlatErrorFramePassesThrough`：`data: {"code":"110","message":"Billing daily count exceeded"}` 必须原样下传、保留 `"code":"110"`。
+- 排队帧（`internal/qodercn/queue.go` 的 `*QueueError`）**实现**了 `StreamErrorClassifier` 并返回 `ErrPassthrough` ⇒ handler 落 `default` 不罚号。断言排队帧「不能被 `errors.As` 命中」是错的，正确断言是「命中且 `Kind()==ErrPassthrough`」。
+- 出口 code 集合里 `upstream_truncated` 保持不变（`internal/gateway/chat_sse.go` 的 `streamErrKind` 只把 `upstream_rate_limited` 归限流，其余落 other；改 code 会让网关分类漂移）。
+
+### 闸门
+- `internal/qodercn/r90_stream_error_test.go`：信封 402/401 → `errors.As` 命中 + `Kind()==ErrHardCredit` + 出口含 `upstream_quota_exhausted`；`TestTruncationKeepsRealCause`（半帧判截断）；`TestTruncationErrorKeepsCause`（**直锁 `TruncationError` 保留原因**——端到端用例的半帧是干净 EOF，只能拿到 `unknown cause`，覆盖不到「有真实错误时是否保原因」）；`TestIdleTimeoutReportsItsOwnCode`；`TestWriteStreamErrorFrameIsValidSSE`。
+- 四渠道 `TestStreamTruncationNotDisguisedAsDone` 各补一条「干净 EOF 但末帧不完整」用例（此前只有读错误路径的样本，正是这条缺失让三个变异存活）。
+- 修复 `internal/qwenwork/stream_truncation_test.go` 的**虚假测试**：其 `framef` 把裸 JSON 塞在 `data: {"body":"` 后面，得到非法外层 JSON（`outerOK=false`），原测试根本没测它声称测的东西。改为层叠转义（用 `json.dumps` 生成内层字符串再填 raw string）。
+- 八处变异全部转红：M1 信封 `>=400` 不识别 / M2 `sseError.Kind` 不复用 Classify / M3 qodercn `!outerOK` 不判截断 / M4 `IsIdleTimeout` 不认 `context.Canceled` / M5 `TruncationError` 丢弃原始原因 / M6 qwenwork 内层半帧不判截断 / M7 qoder 外层非法不判 / M8 qodercom 同 M7。
+
+### 已知未做
+- 上游 `internal/upstream/truncation.go` 的 `isTruncatedArguments` / `dropTruncatedToolCalls`（丢弃半截 tool_call arguments）我们仍未接：它会改变下发给客户端的内容，需单独评估。
+- `internal/provider/streamtrunc.go` 是 R82 期间的半成品（`TruncReason` 枚举那一套），已被本决议的 `TruncationCause/Code` 取代，未接线也未删除，无编译影响。

@@ -16,9 +16,15 @@ import (
 // "tool input was not fully received"，网关日志却无错误。
 func TestStreamTruncationNotDisguisedAsDone(t *testing.T) {
 	// envelope 写法：{body: "<inner json>"}，inner json 含 content 与一个未收尾的 tool_call。
+	// 注意：envelope 的 body 字段是**转义后的字符串**，所以下面的 inner 必须自带反斜杠转义；
+	// 直接写裸 JSON 会得到非法外层 JSON（本文件曾因此测出假阴性）。
 	framef := func(inner string) string { return `data: {"body":"` + inner + `"}` + "\n\n" }
-	content := `{"id":"x","choices":[{"index":0,"delta":{"content":"hi"}}]}`
-	toolPartial := `{"id":"x","choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"function":{"name":"Bash","arguments":"{\"cmd\""}}]}}]}`
+	content := `{\"id\":\"x\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"hi\"}}]}`
+	toolPartial := `{\"id\": \"x\", \"choices\": [{\"index\": 0, \"delta\": {\"tool_calls\": [{\"index\": 0, \"function\": {\"name\": \"Bash\", \"arguments\": \"{\\\"cmd\\\"\"}}]}}]}`
+	// toolCut：body 是**合法字符串**，但其内容 JSON 被切断（缺右花括号）。
+	// 与 toolPartial 的区别：toolPartial 内层其实是合法 JSON（只是 arguments 半截），
+	// toolCut 内层整体不合法 —— 才是 innerChunk 返回 nil 的真实场景。
+	toolCut := `{\"id\":\"x\",\"choices\":[{\"delta\":{\"tool_calls\":[{\"function\":{\"arguments\":\"{\\\"cmd\\\"`
 	dones := "data: {\"body\":\"[DONE]\"}\n\n"
 	full := framef(content) + framef(toolPartial)
 
@@ -33,6 +39,10 @@ func TestStreamTruncationNotDisguisedAsDone(t *testing.T) {
 		{"断在半个帧上", &qwCut{payload: full, keep: len(full) - 10}, true, false, true},
 		{"正常 [DONE] 收尾", strings.NewReader(full + dones), false, true, false},
 		{"EOF 但上游漏发 [DONE]", strings.NewReader(full), false, true, false},
+		// R90：这一条才是上一条真 bug 的靶心 —— 传输层**干净 EOF**（rd 不报错），
+		// 但末帧内层是半截 JSON（解不出来）。innerChunk 对「解不出来」一律返回 nil，
+		// 与 body=="[DONE]" 完全同形；没有 innerTruncated 就只能当正常收尾。
+		{"干净 EOF 但末帧内层是半截 JSON", strings.NewReader(framef(toolCut)), true, false, true},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
@@ -52,7 +62,10 @@ func TestStreamTruncationNotDisguisedAsDone(t *testing.T) {
 	}
 }
 
-type qwReadErr struct{ payload string; sent bool }
+type qwReadErr struct {
+	payload string
+	sent    bool
+}
 
 func (r *qwReadErr) Read(p []byte) (int, error) {
 	if !r.sent {
@@ -62,7 +75,10 @@ func (r *qwReadErr) Read(p []byte) (int, error) {
 	return 0, fmt.Errorf("simulated: connection reset")
 }
 
-type qwCut struct{ payload string; keep, off int }
+type qwCut struct {
+	payload   string
+	keep, off int
+}
 
 func (r *qwCut) Read(p []byte) (int, error) {
 	if r.off >= r.keep {

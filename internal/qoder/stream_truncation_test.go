@@ -44,6 +44,15 @@ func TestStreamTruncationNotDisguisedAsDone(t *testing.T) {
 			wantDone: false, wantErrFrm: true,
 		},
 		{
+			// R90：这一条才是「残帧自带换行」的真靶心 —— 传输层**干净 EOF**（rd 不报错），
+			// 但末帧 data: 行的外层 JSON 就残缺（截断在外层，不是内层）。
+			// 旧代码只在「恰好卡在 EOF」时判截断，于是这种残帧被当成干净收尾。
+			name:     "干净 EOF 但末帧外层 JSON 残缺",
+			rd:       strings.NewReader(full + `data: {"body":"{\"id\":\"x` + "\n\n"),
+			wantErr:  true,
+			wantDone: false, wantErrFrm: true,
+		},
+		{
 			name:     "正常 [DONE] 收尾",
 			rd:       strings.NewReader(full + chunk("[DONE]")),
 			wantErr:  false,

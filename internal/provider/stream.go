@@ -1,9 +1,12 @@
 package provider
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
+	"net"
 	"time"
 )
 
@@ -79,7 +82,100 @@ func truncateRunes(s string, n int) string {
 var ErrIdleTimeout = errors.New("upstream stream idle timeout")
 
 // IsIdleTimeout 报告错误是否为空闲超时（含被 IdleReader 包装后的形态）。
-func IsIdleTimeout(err error) bool { return errors.Is(err, ErrIdleTimeout) }
+//
+// 也识别 internal/idle 看门狗的那一族错误：它没有 ErrIdleTimeout 变量可比较，
+// 只能按形态判别——cancel 请求 context 会让在途 Read 返回上下文错误，
+// 或（连接被连带关闭时）返回 net.ErrClosed 包装。
+//
+// ⚠️ 为什么必须认得（R90）：idle 看门狗唯一的动作就是 cancel，若这里认不出，
+// 「我们主动掐的」与「上游真断的」在日志与出口错误码里就完全同形。生产实测
+// 排查 qoder 系截断时就卡在这里——77 条日志全是同一句固定串，分不清是上游
+// 额度耗尽挂死、还是我们自己的看门狗掐的。
+func IsIdleTimeout(err error) bool {
+	if errors.Is(err, ErrIdleTimeout) {
+		return true
+	}
+	return errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) ||
+		errors.Is(err, net.ErrClosed)
+}
+
+// TruncationCause 把流被砍断的**原始原因**压成一行短文本，供日志与出口 error 帧使用。
+//
+// 背景（R90 生产取证）：qoder/qodercn/qodercom/qwenwork 四个渠道原先无论什么原因
+// 都只报固定串 "upstream stream truncated"，原始 err 被**丢弃** ⇒ 生产上无法区分
+// 三种完全不同的故障：
+//   - 空闲看门狗掐的（连续无字节，可能是上游排队 / 额度耗尽挂死）
+//   - 上游主动断连（connection reset / unexpected EOF）
+//   - 读到半个帧就 EOF
+//
+// 用户看到的「只知道断了」就是这个丢弃的直接后果——不是观感问题，是信息被扔了。
+func TruncationCause(err error) string {
+	switch {
+	case err == nil:
+		return "unknown cause"
+	case IsIdleTimeout(err):
+		// 归一成单一措辞：调用方看到的 err 可能是 context.Canceled 或 net.ErrClosed，
+		// 直写原文只会让人以为是客户端断开。
+		return ErrIdleTimeout.Error()
+	default:
+		return err.Error()
+	}
+}
+
+// TruncationError 构造「流被截断」错误：保留原始原因，并让 IsIdleTimeout 能穿透。
+//
+// 不直接把原 err 返回，是因为调用方还需附加「截断」这一事实；但原因必须留在文本里，
+// 且空闲超时不能只留文本——上游 handler 用 errors.Is 判形态，故用 %w 保留链。
+func TruncationError(err error) error {
+	switch {
+	case err == nil:
+		return errors.New("upstream stream truncated")
+	case IsIdleTimeout(err):
+		return fmt.Errorf("upstream stream truncated: %w", ErrIdleTimeout)
+	default:
+		return fmt.Errorf("upstream stream truncated: %w", err)
+	}
+}
+
+// TruncationCode 给出出口 error 帧应使用的 code：空闲超时单独给码。
+//
+// 与 TruncationErrorCode 的区别：后者是历史命名（保留以兼容既有调用方），
+// 前者是 R90 与上游对齐后的出口口径。两者语义一致：空闲超时 → upstream_timeout。
+func TruncationCode(err error) string {
+	if IsIdleTimeout(err) {
+		return "upstream_timeout"
+	}
+	return "upstream_truncated"
+}
+
+// TruncationFrame 构造出口 error 帧的 JSON 载荷（不含 "data: " 前缀与结尾空行）。
+//
+// msg 里可能含双引号/反斜杠（原始 err 文本），故必须走 JSON 编码而非字符串拼接。
+// 文案做 rune 安全截断：上游/网络错误文本可能很长（含 URL、证书细节），
+// 全部塞进 SSE 帧会撑大客户端日志，200 字足够定位。
+func TruncationFrame(err error) string {
+	payload, _ := json.Marshal(map[string]any{"error": map[string]any{
+		"message": truncateRunes(TruncationCause(err), 200),
+		"type":    "upstream_error",
+		"code":    TruncationCode(err),
+	}})
+	return string(payload)
+}
+
+// WriteTruncationFrame 写一帧截断 error（**不补 [DONE]**，R36）并 flush。
+//
+// 调用方随后应把 TruncationError(err) 上抛给 handler 记日志。
+// w 不是 Flusher 时静默跳过 flush（httptest.ResponseRecorder 等场景）。
+func WriteTruncationFrame(w io.Writer, err error) error {
+	frame := "data: " + TruncationFrame(err) + "\n\n"
+	if _, werr := io.WriteString(w, frame); werr != nil {
+		return werr
+	}
+	if fl, ok := w.(interface{ Flush() }); ok {
+		fl.Flush()
+	}
+	return nil
+}
 
 // IdleReader 给流式响应体加「空闲超时」看门狗。
 //

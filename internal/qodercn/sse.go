@@ -9,13 +9,91 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log"
+	"strconv"
 
 	"net/http"
 	"omnigate/internal/capture"
 	"strings"
 	"sync"
 	"time"
+
+	"omnigate/internal/provider"
 )
+
+// sseError 上游以 HTTP 200 包裹的业务失败帧（R90）。
+//
+// 为什么必须有它：信封 statusCodeValue >= 400 的帧（402 额度耗尽、403 风控、
+// 400 参数错…）在旧实现里被 path 成「非错误帧」直接丢弃 —— 客户端既收不到
+// choices 也收不到 error，界面停在「正在等待模型…」，直到网关 180s 后判截断。
+// 更糟的是即便识别到，裸 fmt.Errorf 也**不实现** StreamErrorClassifier，
+// handler 的 errors.As 取不到 kind ⇒ 落 default「不罚账号」⇒ 粘性路由把下一次
+// 请求送回同一个号，反复撞额度（实测 qwenwork 118 条 402 全是这个形态）。
+//
+// Kind 复用与 HTTP 路径同一套 Classify，使 server 层不必 import 本渠道包。
+type sseError struct {
+	status     int
+	msg        string
+	retryAfter int // 上游 retryAfterSeconds / waitTime；0 = 上游未声明
+}
+
+func (e *sseError) Error() string { return fmt.Sprintf("upstream %d: %s", e.status, e.msg) }
+
+// Kind 实现 provider.StreamErrorClassifier。
+func (e *sseError) Kind() provider.ErrKind { return Classify(e.status, e.msg) }
+
+var _ provider.StreamErrorClassifier = (*sseError)(nil)
+
+// writeStreamErrorFrame 补写一帧带原因与重试时长的 SSE error（**不补 [DONE]**，R36）。
+//
+// 补 [DONE] 会把失败伪装成正常结束，客户端拿着空结果继续走，网关侧还把它记成
+// 一条成功流水。原因与退避时长结构化传出，重试交回客户端。
+func writeStreamErrorFrame(w io.Writer, e *sseError) {
+	errObj := map[string]any{
+		"message": truncate(e.msg, 300),
+		"type":    "upstream_error",
+		"code":    streamErrorCode(e.Kind()),
+	}
+	if e.retryAfter > 0 {
+		errObj["retry_after_seconds"] = e.retryAfter
+	}
+	frame, merr := json.Marshal(map[string]any{"error": errObj})
+	if merr != nil {
+		// 纯字符串/整数 map，序列化不会失败；真失败也要保证客户端拿到一帧原因。
+		frame = []byte(`{"error":{"message":"upstream business error","type":"upstream_error","code":"upstream_business_error"}}`)
+	}
+	if _, werr := w.Write(append(append([]byte("data: "), frame...), []byte("\n\n")...)); werr != nil {
+		log.Printf("qodercn stream error frame write failed: %v", werr)
+		return
+	}
+	if fl, ok := w.(interface{ Flush() }); ok {
+		fl.Flush()
+	}
+}
+
+// streamErrorCode 把 ErrKind 归一成客户端可见的 code。
+//
+// 与 internal/gateway/chat_sse.go 的 streamErrKind 口径分工不同：那边判的是
+// 「客户端看到的 code 要不要改」，这里判的是「对外 code 叫什么」。两者都只做
+// 归并、不新增语义 —— 额度耗尽必须让客户端能识别成「可等可换」而非「重试」。
+func streamErrorCode(k provider.ErrKind) string {
+	switch k {
+	case provider.ErrHardCredit:
+		return "upstream_quota_exhausted"
+	case provider.ErrSoftRate:
+		return "upstream_rate_limited"
+	case provider.ErrSessionDead:
+		return "upstream_session_dead"
+	case provider.ErrModelBlocked:
+		return "upstream_model_blocked"
+	case provider.ErrPassthrough:
+		return "upstream_business_error"
+	case provider.ErrServer:
+		return "upstream_server_error"
+	default:
+		return "upstream_business_error"
+	}
+}
 
 // looksLikeErrorFrame 判断扁平帧是否是需要处理的业务错误帧（R46）。
 //
@@ -33,6 +111,99 @@ func looksLikeErrorFrame(m map[string]any) bool {
 		return true
 	}
 	return m["message"] != nil && m["error"] == nil
+}
+
+// accountLevelFrameError 把**账号级**扁平错误帧归一成 *sseError（R90）。
+//
+// 与 R46 的 onChunk 下传契约并存：只有「明确属于账号/额度问题」的扁平帧才归一，
+// 其余（计费计数超限 110、业务参数错等）继续原样下传。
+//
+// 判据顺序很讲究：
+//  1. 排队帧（10605 / isQueued）先返回 nil —— 它必须留给 onChunk 走 parseQueueFrame
+//     生成 *QueueError（queue_test.go 锁定 queueCount/waitTime 两个字段），
+//     归一成 sseError 会把队列信息压成一句 message。
+//  2. code 必须是能解析的 >= 400 状态码 —— 110 这种业务计数不是 HTTP 状态，
+//     归一只会让 Classify 拿到 0 而落 ErrClient（可轮转），把健康号拖下水。
+//  3. message 命中额度/余额词表才归一 —— 上游把额度耗尽既发 402 也发 403/200
+//     包 code，词表是唯一可靠的判据。
+func accountLevelFrameError(m map[string]any) *sseError {
+	msg := ""
+	if s, ok := m["message"].(string); ok {
+		msg = s
+	}
+	if looksLikeQueueFrame(msg) {
+		return nil
+	}
+	status := 0
+	if v, ok := m["code"]; ok {
+		if n, err := strconv.Atoi(strings.TrimSpace(fmt.Sprint(v))); err == nil && n >= 400 {
+			status = n
+		}
+	}
+	if status == 0 {
+		return nil
+	}
+	if !looksLikeQuotaText(msg) {
+		return nil
+	}
+	return &sseError{status: status, msg: msg}
+}
+
+// looksLikeQueueFrame 报告文本里是否带排队特征（10605 / isQueued）。
+// 只在扁平帧里用：嵌套帧的排队判定由 onChunk 里的 parseQueueFrame 负责。
+func looksLikeQueueFrame(s string) bool {
+	return strings.Contains(s, "10605") || strings.Contains(s, "isQueued")
+}
+
+// quotaWords 额度/余额耗尽的文案特征（小写匹配）。
+//
+// 为什么需要它：上游把「今日次数用完」以 402、403、甚至 200 包 code 三种形态发出，
+// 状态码不足以判定；而这三种都被归成 ErrHardCredit（冷却整号到次日），错判的代价
+// 是把健康号冻 12 小时，漏判的代价是用户每次都要等 180 秒才看到一句「断了」。
+// 词表刻意保守：只收**明确指向额度/余额**的措辞，不收泛化的 "quota"。
+var quotaWords = []string{
+	"次数已达上限", "次数已用完", "额度不足", "额度用尽", "额度耗尽",
+	"积分不足", "余额不足", "今日额度", "usage limit reached",
+	"quota exhausted", "quota exceeded", "insufficient quota",
+	"daily limit reached", "daily count exceeded", "credit not enough",
+}
+
+// looksLikeQuotaText 报告文本是否指向额度/余额耗尽。
+func looksLikeQuotaText(s string) bool {
+	if s == "" {
+		return false
+	}
+	lower := strings.ToLower(s)
+	for _, w := range quotaWords {
+		if strings.Contains(lower, w) {
+			return true
+		}
+	}
+	return false
+}
+
+// errTextOf 提取信封 body 里的错误文案（R90）。
+//
+// body 形如 {"code":"402","message":"<再嵌一层的 JSON 文本>"}，文案取 message 原文
+// （内层 10605/RESOURCE_LIMIT 等结构化字段随之带出，不做二次解析）。
+// 解不出时退回原始 body —— 宁可把上游原文交给客户端，也不要吞成空串。
+func errTextOf(body string) string {
+	var withMsg struct {
+		Code    string `json:"code"`
+		Message string `json:"message"`
+	}
+	if json.Unmarshal([]byte(body), &withMsg) == nil {
+		if withMsg.Message != "" {
+			return withMsg.Message
+		}
+		if withMsg.Code != "" {
+			return "code=" + withMsg.Code
+		}
+	}
+	if s := strings.TrimSpace(body); s != "" {
+		return s
+	}
+	return "upstream business error"
 }
 
 // parseNestedSSE 逐行解析嵌套 SSE，每个有效 chunk 调 onChunk。
@@ -64,10 +235,22 @@ func parseNestedSSE(r io.Reader, onChunk func(map[string]any) error, truncated *
 		if strings.HasPrefix(line, "data:") {
 			payload := strings.TrimPrefix(line, "data:")
 			var env struct {
-				Body string `json:"body"`
+				Body            string `json:"body"`
+				StatusCodeValue int    `json:"statusCodeValue"`
 			}
 			outerOK := json.Unmarshal([]byte(payload), &env) == nil
 			innerOK := false
+			// R90：信封 statusCodeValue >= 400 = 上游以 HTTP 200 包裹的业务失败
+			// （402 额度耗尽 / 403 风控 / 400 参数错）。必须在 onChunk **之前**识别：
+			// 这类帧没有 choices，当 chunk 透传等于给客户端一个空 delta，界面停在
+			// 「正在等待模型…」直到网关掐断；而裸 error 又拿不到 kind ⇒ 不罚账号 ⇒
+			// 粘性路由把下一次请求送回同一个号，反复撞同一堵墙。
+			if outerOK && env.StatusCodeValue >= 400 {
+				return &sseError{
+					status: env.StatusCodeValue,
+					msg:    errTextOf(env.Body),
+				}
+			}
 			if outerOK && env.Body != "" {
 				if env.Body == "[DONE]" {
 					return nil // 上游显式收尾
@@ -83,22 +266,50 @@ func parseNestedSSE(r io.Reader, onChunk func(map[string]any) error, truncated *
 				// 扁平帧兜底（R46）：没有 body 信封、整帧就是业务报文。
 				// 排队/限流等错误帧在部分上游版本里以这种形态出现，若在此处丢弃，
 				// 客户端既看不到 error 也会被补 [DONE] 伪装成正常收尾。
-				// 只把「像业务错误」的扁平帧交给 onChunk，避免把无关字段当 chunk 透传。
+				//
+				// R90 收窄了这里的行为：**只把「额度/账号级」扁平帧归一成 sseError**，
+				// 其余一律沿用 R46 的「交给 onChunk 原样下传」契约。为什么不能全归一：
+				//   - activity_test.go 的 TestFlatErrorFramePassesThrough 锁定
+				//     `data: {"code":"110","message":"Billing daily count exceeded"}`
+				//     必须**原样**到达客户端（含 code 字段），归一成 sseError 会把
+				//     原文重写成 error 帧、丢掉 code，用户反而看不到上游原话；
+				//   - queue_test.go 的 TestStreamQueueFrameBothEnvelopes 锁定扁平
+				//     排队帧必须识别成 *QueueError（含 queueCount/waitTime），
+				//     归一成 sseError 会把排队信息压成一句 message。
+				// 这两条都是既有契约，不能被 R90 覆盖。
 				var flat map[string]any
 				if json.Unmarshal([]byte(payload), &flat) == nil && looksLikeErrorFrame(flat) {
-					innerOK = true
+					if se := accountLevelFrameError(flat); se != nil {
+						return se
+					}
 					if err := onChunk(flat); err != nil {
 						return err
 					}
+					innerOK = true
 				}
 			}
-			if err == io.EOF && !(outerOK && innerOK) {
-				set() // EOF 处这一行（内层或外层）不是完整 JSON：半个帧
+			if !outerOK {
+				// R90 修：data: 行的**外层** JSON 就不合法 = 这一帧被切断在半路上。
+				//
+				// 此前只有「恰好卡在 EOF」时才判截断（见下面 err==io.EOF 分支），
+				// 于是「上游写到一半断连，但残帧自带换行」（生产上极常见——残帧
+				// 后面就跟着 \n\n 收尾）被判成干净收尾：客户端收到 [DONE]、网关
+				// 记成一条成功流水，实际只收到半个帧。用户看到的「流已中断」里
+				// 有一类就是它被掩盖成了「正常结束」。
+				set()
+			} else if err == io.EOF && !innerOK {
+				set() // EOF 处这一行（内层）不是完整 JSON：半个帧
 			}
+		} else if err == io.EOF && strings.TrimSpace(line) != "" {
+			// R90 修：EOF 落在一条**非 data: 且非空**的行上 = 上游在一个帧中间断掉。
+			// （正常的空行收尾走到这里时 TrimSpace 为空，不判截断。）
+			set()
 		}
 		if err == io.EOF {
-			// 最后一行没有换行符收尾且非空 → 帧不完整（半帧）；正常收尾的最后一行是空行。
-			if strings.TrimSpace(line) != "" {
+			// 末尾没有换行收尾时，ReadString 会把「最后一个非空帧 + 其中的空行」一起
+			// 交回来（如 "data: {...}\n"），故按最后一个**非空行**判定：
+			// 它是空行 → 干净收尾；否则帧不完整（半帧）。
+			if last := lastNonBlankLine(line); last != "" {
 				set()
 			}
 			return nil
@@ -302,13 +513,31 @@ func streamAsOpenAI(w io.Writer, r io.Reader, model string, flush func(), onCont
 	// 截断优先于 err：读错误（连接中断/超时）本身就体现为 err != nil，必须先把
 	// 已透传的半截流的收尾处理掉（发 error 帧、不补 [DONE]），再报错给调用方。
 	if truncated {
-		if _, werr := io.WriteString(w, "data: {\"error\":{\"message\":\"upstream stream truncated\",\"type\":\"upstream_error\",\"code\":\"upstream_truncated\"}}\n\n"); werr != nil {
+		// R90：出口帧与日志都保留**原始原因**。此前无论什么原因都只写固定串
+		// "upstream stream truncated" 并把 err 丢弃 ⇒ 生产上分不清「空闲看门狗掐的」
+		// （连续无字节，疑似上游排队 / 额度耗尽挂死）、「上游主动断连」、
+		// 「读到半个帧就 EOF」这三种完全不同的故障。用户看到的「只知道断了」
+		// 就是这个丢弃的直接后果。
+		//
+		// 空闲超时另给 code=upstream_timeout，其余仍为 upstream_truncated ——
+		// 对外 code 集合不变，internal/gateway 的 streamErrKind 分类不受影响。
+		if werr := provider.WriteTruncationFrame(w, err); werr != nil {
 			return usage, werr
 		}
 		if flush != nil {
 			flush()
 		}
-		return usage, errors.New("upstream stream truncated")
+		return usage, provider.TruncationError(err)
+	}
+	// R90：流内业务错误（信封 statusCodeValue>=400 / 扁平错误帧）已归一成 *sseError。
+	// 补一帧带原因与退避时长的 SSE error 并**不补 [DONE]**（R36）——补了就把失败
+	// 伪装成正常结束，客户端会拿着空结果继续走，网关侧还把它记成一条成功流水。
+	if sErr := (*sseError)(nil); errors.As(err, &sErr) {
+		writeStreamErrorFrame(w, sErr)
+		if flush != nil {
+			flush()
+		}
+		return usage, sErr
 	}
 	if err != nil {
 		return usage, err
@@ -382,4 +611,19 @@ func StreamCaptureWithContent(w http.ResponseWriter, r io.Reader, model string, 
 		})
 	}
 	return usage, err
+}
+
+// lastNonBlankLine 返回多行文本里最后一个非空行（去空白）。
+//
+// 用于 EOF 收尾判定：ReadString('\n') 在最后一段没有换行收尾时，会把「最后一个
+// 完整帧 + 它自带的空行」一并交回（如 "data: {...}\n"），此时行内仍含换行，
+// 直接 TrimSpace 判不出「末行其实是空的」。
+func lastNonBlankLine(s string) string {
+	lines := strings.Split(s, "\n")
+	for i := len(lines) - 1; i >= 0; i-- {
+		if t := strings.TrimSpace(lines[i]); t != "" {
+			return t
+		}
+	}
+	return ""
 }
