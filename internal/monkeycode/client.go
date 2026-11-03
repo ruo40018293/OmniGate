@@ -28,6 +28,7 @@ import (
 
 	"omnigate/internal/auth"
 	"omnigate/internal/capture"
+	"omnigate/internal/httpretry"
 	"omnigate/internal/provider"
 	"omnigate/internal/upstream"
 )
@@ -237,7 +238,10 @@ func (c *Client) ChatStream(a *auth.Auth, body []byte) (io.ReadCloser, int, []by
 	}
 
 	// 用无总超时的 client：长思考请求不受整请求上限约束（见 Client.StreamHTTP）。
-	resp, err := c.streamClient().Do(req)
+	// R92：传输层瞬态错误同号原地重试（本渠道只有 1 个账号，换号无处可换）。
+	cl := c.streamClient()
+	resp, _, err := httpretry.Do(req, cl.Do, nil,
+		httpretry.LogRetry("monkeycode", a.UID))
 	if err != nil {
 		// R54 异常取证：传输层失败也留证（截断/握手失败常是风控前置信号）。
 		capture.Save(capture.Record{

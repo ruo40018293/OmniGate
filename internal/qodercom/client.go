@@ -21,6 +21,7 @@ import (
 
 	"omnigate/internal/auth"
 	"omnigate/internal/capture"
+	"omnigate/internal/httpretry"
 	"omnigate/internal/idle"
 	"omnigate/internal/provider"
 )
@@ -335,8 +336,10 @@ func (c *Client) ChatStream(a *auth.Auth, body []byte) (rc io.ReadCloser, status
 	if err := sess.ApplyHeaders(req, encoded, url, a.UID, "text/event-stream", true, modelKey); err != nil {
 		return nil, 0, nil, fmt.Errorf("cosy headers: %w", err)
 	}
-	req, cancel := idle.WithCancel(req)
-	resp, err := c.streamHTTP().Do(req)
+	// R92：传输层瞬态错误同号原地重试（本渠道只有 1 个账号，换号无处可换）。
+	cl := c.streamHTTP()
+	resp, cancel, err := httpretry.Do(req, cl.Do, idle.WithCancel,
+		httpretry.LogRetry("qodercom", a.UID))
 	if err != nil {
 		cancel()
 		log.Printf("qodercom chat_stream uid=%s model=%s: transport error: %v", a.UID, modelKey, err)

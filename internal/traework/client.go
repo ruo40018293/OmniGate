@@ -13,6 +13,7 @@ import (
 
 	"omnigate/internal/auth"
 	"omnigate/internal/capture"
+	"omnigate/internal/httpretry"
 	"omnigate/internal/idle"
 	"omnigate/internal/provider"
 )
@@ -211,12 +212,14 @@ func (c *Client) ChatStream(a *auth.Auth, body []byte) (rc io.ReadCloser, status
 		return nil, 0, nil, err
 	}
 	SOLOHeaders(req, a, true)
-	req, cancel := idle.WithCancel(req)
 	hc := c.HTTP
 	if c.StreamHTTP != nil {
 		hc = c.StreamHTTP
 	}
-	resp, err := hc.Do(req)
+	// R92：传输层瞬态错误（DNS/拨号超时/连接重置）同号原地重试。
+	// 本渠道每个环境只有 1 个账号，换号无处可换；实测这类抖动 1–16 秒即恢复。
+	resp, cancel, err := httpretry.Do(req, hc.Do, idle.WithCancel,
+		httpretry.LogRetry("traework", a.UID))
 	if err != nil {
 		cancel()
 		log.Printf("traework chat_stream uid=%s: transport error: %v", a.UID, err)

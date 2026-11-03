@@ -13,6 +13,7 @@ import (
 
 	"omnigate/internal/auth"
 	"omnigate/internal/capture"
+	"omnigate/internal/httpretry"
 	"omnigate/internal/idle"
 )
 
@@ -262,8 +263,9 @@ func (c *Client) ChatStream(a *auth.Auth, body []byte) (io.ReadCloser, int, []by
 	if c.StreamHTTP != nil {
 		hc = c.StreamHTTP
 	}
-	httpReq, cancel := idle.WithCancel(httpReq)
-	resp, err := hc.Do(httpReq)
+	// R92：传输层瞬态错误同号原地重试（本渠道只有 1 个账号，换号无处可换）。
+	resp, cancel, err := httpretry.Do(httpReq, hc.Do, idle.WithCancel,
+		httpretry.LogRetry("glm", a.UID))
 	if err != nil {
 		cancel()
 		// R54 异常取证：传输层失败也留证（截断/握手失败常是风控前置信号）。

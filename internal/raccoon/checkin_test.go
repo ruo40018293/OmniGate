@@ -27,6 +27,17 @@ func billJSON(bizType, points, createdAt, grantAt, expireAt string) pointsBill {
 	return pointsBill{BizType: bizType, Points: n, CreatedAt: createdAt, GrantAt: grantAt, ExpireAt: expireAt}
 }
 
+// cstMidnight 取 t 所在 CST 自然日的零点。
+//
+// **不能用 t.Truncate(24*time.Hour)**：Truncate 按「纪元起的绝对纳秒」对齐，
+// 24h 边界落在 UTC 零点 = CST 08:00 —— 于是 CST 00:00–08:00 之间跑测试时，
+// 它给出的是**昨天** 08:00，pickTodayDailyGrant 按 GrantAt 判日就会判成今日无发放，
+// 三条签到用例集体变红（2026-11-04 00:22 实测复现）。
+func cstMidnight(t time.Time) time.Time {
+	l := t.In(cst)
+	return time.Date(l.Year(), l.Month(), l.Day(), 0, 0, 0, 0, cst)
+}
+
 // TestPickTodayDailyGrant 只认「今天、daily_grant、正数」，补发/昨天/清零行都不算。
 func TestPickTodayDailyGrant(t *testing.T) {
 	now := cstTime(2026, 10, 28, 15, 30, 0)
@@ -123,7 +134,7 @@ func fakeRaccoonAuth() *auth.Auth { return &auth.Auth{AccessToken: "at-test"} }
 func TestDailyCheckinReportClaimedWhenFresh(t *testing.T) {
 	now := time.Now().In(cst)
 	cs := &checkinServer{bills: []pointsBill{billJSON("daily_grant", "300",
-		now.Format(time.RFC3339), now.Truncate(24*time.Hour).Format(time.RFC3339), "2026-11-03T23:59:59+08:00")}}
+		now.Format(time.RFC3339), cstMidnight(now).Format(time.RFC3339), "2026-11-03T23:59:59+08:00")}}
 	c := newCheckinClient(cs.start(t))
 	rep, err := c.DailyCheckinReport(fakeRaccoonAuth())
 	if err != nil {
@@ -148,7 +159,7 @@ func TestDailyCheckinReportAlreadyWhenEarlier(t *testing.T) {
 	now := time.Now().In(cst)
 	early := now.Add(-6 * time.Hour).Format(time.RFC3339)
 	cs := &checkinServer{bills: []pointsBill{billJSON("daily_grant", "300", early,
-		now.Truncate(24*time.Hour).Format(time.RFC3339), "2026-11-03T23:59:59+08:00")}}
+		cstMidnight(now).Format(time.RFC3339), "2026-11-03T23:59:59+08:00")}}
 	c := newCheckinClient(cs.start(t))
 	rep, err := c.DailyCheckinReport(fakeRaccoonAuth())
 	if err != nil {
@@ -218,7 +229,7 @@ func TestDailyCheckinReportBillsFailure(t *testing.T) {
 func TestDailyCheckinDelegatesReport(t *testing.T) {
 	now := time.Now().In(cst)
 	cs := &checkinServer{bills: []pointsBill{billJSON("daily_grant", "300",
-		now.Add(-3*time.Hour).Format(time.RFC3339), now.Truncate(24*time.Hour).Format(time.RFC3339), "")}}
+		now.Add(-3*time.Hour).Format(time.RFC3339), cstMidnight(now).Format(time.RFC3339), "")}}
 	c := newCheckinClient(cs.start(t))
 	if err := c.DailyCheckin(fakeRaccoonAuth()); err != nil {
 		t.Fatalf("已发放时 DailyCheckin 应返回 nil: %v", err)

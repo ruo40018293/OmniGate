@@ -16,6 +16,7 @@ import (
 
 	"omnigate/internal/auth"
 	"omnigate/internal/capture"
+	"omnigate/internal/httpretry"
 	"omnigate/internal/idle"
 	"omnigate/internal/provider"
 )
@@ -343,12 +344,13 @@ func (c *Client) ChatStream(a *auth.Auth, body []byte) (rc io.ReadCloser, status
 	// 用户实际发送的消息；锚点只取 user 文本做哈希，脱敏不改语义，稳定性不受影响。
 	conv, turn := conversationAnchors(prepared)
 	ChatHeaders(req, a, conv, turn)
-	req, cancel := idle.WithCancel(req)
 	hc := c.HTTP
 	if c.StreamHTTP != nil {
 		hc = c.StreamHTTP
 	}
-	resp, err := hc.Do(req)
+	// R92：传输层瞬态错误（DNS/拨号超时/连接重置）同号原地重试。
+	resp, cancel, err := httpretry.Do(req, hc.Do, idle.WithCancel,
+		httpretry.LogRetry("workbuddy", a.UID))
 	if err != nil {
 		cancel()
 		log.Printf("chat_stream uid=%s: transport error: %v", a.UID, err)

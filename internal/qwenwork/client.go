@@ -19,6 +19,7 @@ import (
 
 	"omnigate/internal/auth"
 	"omnigate/internal/capture"
+	"omnigate/internal/httpretry"
 	"omnigate/internal/idle"
 	"omnigate/internal/provider"
 )
@@ -250,8 +251,10 @@ func (c *Client) ChatStream(a *auth.Auth, body []byte) (rc io.ReadCloser, status
 	}
 	req.Header.Set("x-model-key", modelKeyOf(prepared))
 
-	req, cancel := idle.WithCancel(req)
-	resp, err := c.httpForStream().Do(req)
+	// R92：传输层瞬态错误同号原地重试（本渠道只有 1 个账号，换号无处可换）。
+	cl := c.httpForStream()
+	resp, cancel, err := httpretry.Do(req, cl.Do, idle.WithCancel,
+		httpretry.LogRetry("qwenwork", a.UID))
 	if err != nil {
 		cancel()
 		log.Printf("qwenwork chat_stream uid=%s: transport error: %v", a.UID, err)

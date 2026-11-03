@@ -1,4 +1,4 @@
-# 决议全文（R1–R91）
+# 决议全文（R1–R92）
 
 > 本文件是 `AGENTS.md` 第 1 节的**完整原文**——每条决议「为什么这么做 / 踩过什么坑 / 边界在哪」都在这里。
 > `AGENTS.md` 只保留每条的一句话判据，随每次会话自动加载，用来提醒「别推翻什么」；
@@ -649,3 +649,77 @@ if !outerOK {
 ### 已知未做
 - `loopguard` 思考链死循环检测：真实缺口，但需嵌进四个渠道的 `streamAsOpenAI` 并调阈值，列 R92 候选。
 - `X-RACCOON-Turn-ID` 仍每请求新建（官方一轮共用一个 turn_id），属已知限制。
+
+## R92 — 传输层瞬态错误必须同号原地重试，且只在最终失败时留证
+
+### 触发
+2026-11-03 23:21:37 与 23:23:43 连续两次「任务停下来」，用户问「又是什么问题停止了」。
+
+### 取证
+- 23:21:37 `stream relay end platform=traework uid=1426544919845675 err=solo error code=3003 msg=http request failed`；
+  23:23:43 `traework chat_stream ... transport error: Post "https://trae-api-cn.mchost.guru/api/agent/v3/llm_utils_chat": dial tcp: lookup trae-api-cn.mchost.guru: no such host`，随后 `status=503 bytes=298 dur=112ms`。
+- `data/chat-capture/err-20261103-232343.287-traework-0-527031.json` 与 `err-20261103-210630.051-traework-0-401573.json` 均为
+  `status=0 / response="" / transport_error="... no such host"` ⇒ **请求根本没发出去**（不是流断了）。
+- `.tmp_tperr.py`：`app.log` 全量 `no such host` 324 条，按主机 `work.trae.cn` 100 / `trae-api-cn.mchost.guru` 77 / `api.trae.cn` 72 /
+  `copilot.tencent.com` 25 / `www.codebuddy.cn` 20 / `www.workbuddy.ai` 18 / qoder 系 12；**其中 chat 路径只有 15 条**（其余都是
+  `credit auto-refresh` / `models fetch` 等后台任务，不阻塞对话）。chat 路径 transport error 总数 21 条：
+  `no such host` 8、`timeout awaiting response headers` 9、`dial tcp ... i/o timeout` 3、`wsarecv ... did not properly respond` 1。
+- 现场探测：`nslookup trae-api-cn.mchost.guru` 连打 10 次 10/10 成功（324–481ms），`curl https://trae-api-cn.mchost.guru/` 0.89s 返 404
+  ⇒ 域名本身正常，是**间歇性解析失败**（家用 DNS 转发 + CDN 多 A/AAAA 记录）。`config.json` 的 `proxies=null`、环境代理变量全空。
+- `.tmp_speed.py`：逐条比对「失败后下一次 chat 成功的时间」，除 10-14 那组（当天 traework 渠道整体不可用）外**全部 1–16 秒内恢复**
+  （例：11-03 23:23:43 失败 → 23:23:47 就有一笔 `status=200`）⇒ 用户「过会又能用」实测是秒级。
+- `.tmp_accounts.py`：`auths/` 与 `data/state-*.json` 实测**每渠道 1 个账号**（workbuddy/workbuddyai/traework/qodercn/qodercom/qwenwork/glm/raccoon/minimax/cline 各 1，monkeycode 0）
+  ⇒ 传输失败时**无号可换**，`ErrClient` 轮转一次即耗尽。
+
+### 推翻的三个假设
+1. **「是不是一个模型不能多会话共用」**——不是。`grep -rn "semaphore|MaxConcurrent|limiter" internal/{server,gateway,pool}` 零命中，无全局并发限制；
+   23:00 后 95 个请求最大并发仅 2。当时的 23:11 那次是 `wsasend: An established connection was aborted by the software in your host machine`
+   = **客户端自己断开**（DSH 侧），性质与 DNS 完全不同。
+2. **「粘滞路由 + 3 次阈值放大了故障」**——不是。全日志 `sticky route` 0 次（只有 `session route` 19009 条），截断期间 `cooldown` 0 条 / `rotate` 0 条；
+   且每渠道只有 1 个号，粘滞只是「粘着唯一的号」。
+3. **「上游有通用传输层重试层可抄」**——没有。上游 `cmd/wild-work/transport.go` 只有 `applyBackupLink` 与 `wrapDumps`，
+   重试是逐渠道各写一份（`internal/workbuddyai/retry.go`）；R92 必须在本仓自建。
+
+### 实现
+新增 `internal/httpretry`：
+- `Do(req, do Doer, wrap Wrap, onRetry OnRetry) (*http.Response, context.CancelFunc, error)`：3 次尝试、`baseDelay = 400ms` 起指数退避 + ±40% 抖动。
+- `Retryable(err)`：nil/false；`errors.Is(err, context.Canceled)` → false（客户端已走，重试白烧配额）；
+  **先 `errors.As(&urlErr)` 拆包再判**——`url.Error` 自带 `net.Error` 接口，不拆会把 `invalid header field value` 这类本地错误当瞬态；
+  再排除 `x509`/`certificate`/`unsupported protocol`/`malformed`，再 `net.Error` → true，最后串清单
+  （`no such host`/`awaiting response headers`/`connection reset`/`connection refused`/`broken pipe`/`eof`/`timeout`/`empty reply`/
+  `wsarecv`/`forcibly closed`/`no route to host`/`network is unreachable`/`tls handshake timeout`/`server misbehaving`/`context deadline exceeded`）。
+- 重放：`req.GetBody()` + `req.Clone()`；`req.Body != nil && req.GetBody == nil` 时把 `max` 降到 1（**宁可一次失败也不发空 body**）；
+  无 body 的请求直接 `Clone`（`GetBody` 为 nil 但可重放）。
+- 失败返回 `nil, noopCancel, lastErr`——各渠道错误分支无条件调 `cancel()`，返回 nil 会 panic。
+- `LogRetry(channel, uid)`：`httpretry channel=%s uid=%s attempt=%d 传输层瞬态错误，%v 后原地重试: %s`（单行）。
+
+接线十处（全部把 `req, cancel := idle.WithCancel(req); resp, err := hc.Do(req)` 换成 `httpretry.Do`）：
+`internal/traework/client.go:208`、`internal/upstream/client.go`（workbuddy）、`internal/qoder/client.go`、`internal/qodercom/client.go`、
+`internal/qwenwork/client.go`、`internal/glm/chat.go`（这六家有 `idle.Monitor`，`wrap` 传 `idle.WithCancel`）；
+`internal/raccoon/client.go`、`internal/minimax/client.go`、`internal/loomy/client.go`、`internal/monkeycode/client.go`
+（这四家用 `provider.NewIdleReader`、本来就没有 ctx 包装，`wrap` 传 nil，否则凭空多一个永不 cancel 的 ctx）。
+`internal/cline` 走 `backuplink.Replay`（含地区限制改道），保留原样。
+
+### 顺带修掉的时间炸弹
+`internal/raccoon/checkin_test.go` 用 `now.Truncate(24*time.Hour)` 当「CST 当天零点」。`time.Truncate` 是按**纪元起的绝对纳秒**对齐，
+24h 边界落在 UTC 零点 = CST 08:00 —— 于是在 CST 00:00–08:00 之间跑测试，它给出的是**昨天 08:00**，
+`pickTodayDailyGrant` 按 `grant_at` 判自然日 ⇒ 判成「今天没发放」，三条签到用例集体变红（2026-11-04 00:22 实测复现，
+此前一直是绿的只是因为从没在凌晨跑过）。改 `cstMidnight(t)` 用 `time.Date(y,m,d,0,0,0,0,cst)`。
+
+### 边界
+- 只重试 `do` 返回 err 的情况。HTTP 4xx/5xx 不在此列（语义归各渠道 `Classify`；5xx 重试会把「上游真挂了」变成三倍流量）。
+- `retryMaxAttempts=3` 是上限，不是承诺：不可重放请求自动降为 1。
+- 重试期间 `capture.Save` 不落证；只有最终失败落一次，避免一次抖动产生 3 份重复记录挤掉 `maxFiles=500` 的真实证据。
+- 退避总量 400ms + 800ms ≈ 1.2s（含抖动），远小于实测 1–16 秒的自愈窗口。
+
+### 闸门与变异
+`go build ./... && go vet ./... && go test ./...` → **38 包全绿**。
+闸门：`internal/httpretry/httpretry_test.go`（9 例：DNS 第 2 次成功、body 重放、不可重放单次、证书不重试、`context.Canceled` 不重试、
+耗尽保留原错、退避递增且抖动、`Retryable` 15 例分类、日志单行）+ `internal/traework/r92_retry_test.go`（4 例：断连一次后成功 calls==2、
+证书错误 calls==1、三次全断 calls==3 且返回原错、失败返回的 cancel 非 nil 且可调用）。
+
+五处变异全部 RED：M1 `attempts = 3 → 1`；M2 `Retryable` 恒 false；M3 失败返回 nil cancel；M4 `backoff` 恒 0；M5 重放不换新 body。
+
+### 已知未做
+- DNS 抖动本身没治（没加自定义 `DialContext` 缓存/重解析）。实测重试就能吃掉，加缓存会引入「解析过期」这一新故障面。
+- `cline` 未接（它自己的 `backuplink.Replay` 已有改道重放，叠加会是两层重试）。

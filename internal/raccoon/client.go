@@ -16,6 +16,7 @@ import (
 
 	"omnigate/internal/auth"
 	"omnigate/internal/capture"
+	"omnigate/internal/httpretry"
 	"omnigate/internal/provider"
 	"omnigate/internal/sanitize"
 )
@@ -278,7 +279,10 @@ func (c *Client) ChatStream(a *auth.Auth, body []byte) (rc io.ReadCloser, status
 	log.Printf("raccoon session: uid=%s model=%q sid=%s new=%t", accountKey(a), modelOf(orig), sessID, sessNew)
 	ApplyHeaders(req, accessToken(a), "", gatewayOSVersion(), sessID, newTurnID())
 	// 用无总超时的 client：长思考请求不受整请求上限约束（见 Client.StreamHTTP）。
-	resp, err := c.streamClient().Do(req)
+	// R92：传输层瞬态错误同号原地重试（本渠道只有 1 个账号，换号无处可换）。
+	cl := c.streamClient()
+	resp, _, err := httpretry.Do(req, cl.Do, nil,
+		httpretry.LogRetry("raccoon", a.UID))
 	if err != nil {
 		// R54 异常取证：传输层失败也留证（截断/握手失败常是风控前置信号）。
 		capture.Save(capture.Record{

@@ -27,6 +27,7 @@ import (
 	"time"
 
 	"omnigate/internal/auth"
+	"omnigate/internal/httpretry"
 	"omnigate/internal/provider"
 	"omnigate/internal/upstream"
 )
@@ -150,7 +151,10 @@ func (c *Client) ChatStream(a *auth.Auth, body []byte) (io.ReadCloser, int, []by
 	// （协议 §2 明确列出，实测只带上述头即 HTTP 200）。
 	req.Header.Set("Accept", "text/event-stream")
 
-	resp, err := c.streamClient().Do(req)
+	// R92：传输层瞬态错误同号原地重试（本渠道只有 1 个账号，换号无处可换）。
+	cl := c.streamClient()
+	resp, _, err := httpretry.Do(req, cl.Do, nil,
+		httpretry.LogRetry("minimax", a.UID))
 	if err != nil {
 		return nil, 0, nil, err
 	}
