@@ -451,6 +451,12 @@ func (c *Client) FetchModels(a *auth.Auth) ([]provider.ModelInfo, error) {
 			SupportsImages:    m.Capabilities.Vision,
 			SupportsReasoning: m.Capabilities.Reasoning,
 			SupportsTools:     m.Capabilities.FunctionCalling,
+			// R89：档位表是上游 `/models` 的权威声明（reasoning_efforts /
+			// default_reasoning_effort），此前只用于出站投影 projectEffort，
+			// 没往 ModelInfo 传，导致 /v1/models 无法告诉客户端有哪些档可选。
+			// CleanEfforts 去空去重；全空返回 nil（= 上游未声明，不声明）。
+			ReasoningEfforts:       provider.CleanEfforts(m.ReasoningEfforts),
+			DefaultReasoningEffort: strings.TrimSpace(m.DefaultReasoningEffort),
 		}
 		out = append(out, info)
 	}

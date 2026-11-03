@@ -242,6 +242,10 @@ func toModelInfos(dyn []ModelEntry) []provider.ModelInfo {
 			mi.ContextWindow = m.MaxInputTokens
 			mi.ContextFromAPI = true
 		}
+		// R89：上游 context_config 的档位表原样声明给客户端（≥2 档才有选择意义）。
+		if len(m.AvailableWindows) > 1 {
+			mi.ContextWindows = append([]int64(nil), m.AvailableWindows...)
+		}
 		out = append(out, mi)
 	}
 	return out

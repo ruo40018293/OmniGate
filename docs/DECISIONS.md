@@ -1,4 +1,4 @@
-# 决议全文（R1–R88）
+# 决议全文（R1–R89）
 
 > 本文件是 `AGENTS.md` 第 1 节的**完整原文**——每条决议「为什么这么做 / 踩过什么坑 / 边界在哪」都在这里。
 > `AGENTS.md` 只保留每条的一句话判据，随每次会话自动加载，用来提醒「别推翻什么」；
@@ -483,3 +483,36 @@ if !c.knownModel(m) {
 **边界**：本条只管「本地判定」这一类。上游真实 404 仍按 `ErrNotFound` 短冷却 + 换号（那是合理语义）；
 `knownModel` 的冷启动放行（目录没拉到时全放行）保持不变 —— R42 的教训是校验过严会误拒上游新模型，
 现在误拒的代价从「拖垮整条渠道」降为「一个干净的 400」。
+
+## R89 — `/v1/models` 必须把上游声明过的思考档位 / 上下文档位声明出去
+
+**问题**：用户报「调用这些模型的时候好像没得选上下文的大小跟哪个思考等级，在他们客户端有的模型是可以设置的」。
+
+**审计（三层，全部有工具证据）**：
+
+1. **请求侧其实是通的，只是分散**。`internal/server/handler.go` 的模型改写只动 `model` 字段，其余字段原样到达渠道，由各渠道 body 构造器自己解析：
+   - qoder / qodercn / qodercom：`reasoning_effort` 或 `thinking.type=enabled` → 上游 `parameters.reasoning_effort` + `model_config.is_reasoning`；`context_length` / `context_window` → `model_config.max_input_tokens`（`parseContextWindowHint` 命中 `AvailableWindows` 档位才用请求值，否则落最大档，不传 = 最大档）。
+   - minimax：`reasoning_effort` → 协议决策表产 `thinking` + `output_config`（兼容 `thinking:{type}`）。
+   - loomy：`reasoning_effort` → 官方三件套 `{reasoning_effort, enable_thinking, chat_template_kwargs.enable_thinking}`，并按模型能力降档。
+   - monkeycode：`reasoning_effort` → Anthropic 面 `thinking` 开关。
+   - raccoon：**主动 delete**（实测上游默认即最深思考，low→rtok 0、high→142~331）。
+   - workbuddy / workbuddyai / qwenwork / traework / glm / cline：不解析，静默丢弃（qwenwork 的 1M 是网页 chat-modes 前端档位选择器上限，不是单次请求能力，故本来就不该暴露档位）。
+
+2. **声明侧全缺（这才是「没得选」的原因）**。实测 `GET /v1/models` 返回 212 个模型：`architecture` 212、`context_length` 77、`max_output_tokens` 62、`credit_rate` 104，而 `reasoning_efforts` / `default_reasoning_effort` / `can_disable_thinking` **各 0 条**。`provider.ModelInfo` 早就有这三个字段（minimax 在 `internal/minimax/models.go` 真的填了），`buildModelEntry` 只输出前四个 ⇒ 到出口就丢。
+
+3. **面板侧没有任何 UI**（`cmd/omnigate/web/index.html` 搜 reasoning/context 只有一行统计说明）。
+
+**改法（只补声明，不改请求行为 —— 用户裁决的范围 A）**：
+
+- `internal/provider/provider.go`：`ModelInfo` 新增 `ContextWindows []int64`。
+- `internal/server/handler.go` 的 `buildModelEntry` 新增四段：`reasoning_efforts`（len>0）、`default_reasoning_effort`（非空）、`can_disable_thinking`（指针非 nil，**false 也输出**）、`context_windows`（**len>1 才输出**）。
+- qoder / qodercn / qodercom 的 `toModelInfos` 把 `AvailableWindows` 拷进 `ContextWindows`（qoder 另抽了 `modelInfoOf` 便于单测）。
+- `internal/loomy/client.go` 的 `FetchModels` 把上游 `/models` 的 `reasoning_efforts` / `default_reasoning_effort` 带进 `ModelInfo`（此前只用于出站投影 `projectEffort`）。
+
+**为什么「不编造」是硬约束**：给 qoder 系补 `low/medium/high` 就是替上游做主 —— 它上游只声明 `is_reasoning` 一个 bool，档位是透传给上游的字符串，我们没有依据说它支持哪几档；编出来的档位用户一选就可能拿到上游未定义的行为。`nil`（未声明）与 `false`（明确不可关）也必须区分，否则客户端会把不可关的模型当可关。单档窗口不算「选择」，但仍以 `context_length` 声明事实。`ContextWindows` 必须拷贝，共享底层数组会让后续写入反向污染已缓存的模型表。
+
+**闸门**：`internal/server/r89_capability_declare_test.go`（四字段原样 / 未声明一个都不许出现 = 防造假闸门 / 单档不输出 / false 必须输出）、`internal/{qoder,qodercn,qodercom}/r89_context_windows_test.go`（多档保留、单档不写、无表不编造、切片不被 alias）、`internal/loomy/r89_reasoning_efforts_test.go`（档位透传、未声明留空、脏档清理）。
+
+**变异验证（五处全红）**：①去掉 `reasoning_efforts` 输出 → declares 测试红；②给未声明档位的渠道编造 low/medium/high → omit 测试红；③`context_windows` 的阈值从 `>1` 改 `>0` → 单档测试红；④档位表不拷贝（直接赋值）→ alias 测试红；⑤loomy 不把档位带进 `ModelInfo` → loomy 测试红。还原后 `go build/vet/test` 全绿（37 包），`dist/omnigate.exe` 已重建。
+
+**边界**：本条只改「声明」，不改任何渠道的出站请求形态，也不动 `compat.max_tokens_cap`（用户裁决保持 32000）。要真正在面板里给用户选，属于下一步的 UI 工作（本轮不做）。

@@ -547,6 +547,28 @@ func (h *Handler) buildModelEntry(k provider.Kind, mi provider.ModelInfo) map[st
 	if mi.MaxTokens > 0 {
 		entry["max_output_tokens"] = mi.MaxTokens
 	}
+	// R89 能力声明：只输出上游真的声明过的东西。
+	// 这一层是「客户端能不能把档位/窗口渲染成下拉框」的唯一数据源——
+	// 之前 provider.ModelInfo 已经装了档位表，却在出口处丢掉，
+	// 结果模型能接受 reasoning_effort，客户端却不知道有哪些档可选。
+	//
+	// 不编造是硬约束：nil/空 = 上游未声明，就不输出该字段。
+	// 典型误用：给 qoder 系补一组 low/medium/high —— 它上游只声明
+	// is_reasoning 一个 bool，档位是透传给上游的字符串，我们没有依据
+	// 说它支持哪几档，所以只能不声明。
+	if len(mi.ReasoningEfforts) > 0 {
+		entry["reasoning_efforts"] = mi.ReasoningEfforts
+	}
+	if mi.DefaultReasoningEffort != "" {
+		entry["default_reasoning_effort"] = mi.DefaultReasoningEffort
+	}
+	if mi.CanDisableThinking != nil {
+		entry["can_disable_thinking"] = *mi.CanDisableThinking
+	}
+	// 上下文档位表：至少两档才算「可选」，单档没有选择意义故不输出。
+	if len(mi.ContextWindows) > 1 {
+		entry["context_windows"] = mi.ContextWindows
+	}
 	entry["architecture"] = map[string]any{
 		"input_modalities": mi.InputModalities(),
 		"modality":         mi.Modality(),

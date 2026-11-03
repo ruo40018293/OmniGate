@@ -125,6 +125,7 @@
 | R86 | 脱敏链只覆盖 `internal/upstream`（CN 两段式）与 `internal/workbuddyai`（单段式），其余渠道原本全不在链上；CN 的 stage2 因 stage1 输出已无 feature 命中而**恒为 no-op**（改 `internal/sanitize` 的表对 CN 出站无影响）；R84 的「尾句裸奔」判据按 role 重算后证伪（workbuddy 14/15 带运行时上下文、system 漏 0；raccoon 8/8、traework 2/2 漏但零拒信）。raccoon/traework 已接入，traework 的脱敏必须早于协议转换；由 `internal/{raccoon,traework}/r86_sanitize_test.go` 守 |
 | R87 | CN 脱敏是**两段式且 stage1 是承重墙**：`PrepareBody = BodyFallback(Messages(prepareBodyInner(src)))`，而 `prepareBodyInner`（`internal/upstream/payload.go:65`）已用 upstream 表做过一遍 `sanitizeMessages`；stage1 生效后 stage2（`internal/sanitize` 表）的 `hasFingerprint` 预检不再命中 ⇒ **恒为 no-op**，CN 出站的实际改写形态由 upstream 表决定。两份表的**匹配键**已由 R84 对齐，**替换目标形态仍不同**（upstream 等价词 vs sanitize leetspeak）；删 stage1 会把 CN 出站字节改成从未在生产验证过的 leetspeak 形态，属未声明的行为变更。`internal/workbuddyai` 的 `prepareBodyInner` 没有 stage1，故国际版由 sanitize 表单独生效。由 `internal/upstream/r87_two_stage_test.go` 守（变异：`sanitizeMessages(msgs)` → `_ = msgs` 立刻红） |
 | R88 | 本地判定的请求错误不得用 404：`internal/cline` 的 `knownModel` 拒绝原先返回 404，被 `Classify` 归成 `ErrNotFound`（`Rotatable()`）⇒ handler 换号 + `NoteError`，客户端打错一个模型名就能把整条 cline 渠道拖进冷却（上级项目 2026-10-28 同类事故实记：两个号各记两笔后整渠道冷却）。改法两件必须同时做：状态码 400 + 响应体带专属文案命中 `badParamMarkers` ⇒ `ErrBadParams`（不轮换、不罚号、原文透传）；只改状态码不够——`ErrClient` 也在轮转白名单里。识图能力同时按实测表纠正：`sn-glm-5-3` 实测不支持 `image_url` 却带 vision 标签（误标），`raccoon-19b265`/`raccoon-405a1c` 漏标但能读图；静态表旧 ID `sn-deepseek-v4-1-flash` 按生产日志（1372 次全是 `-1017`）更正。闸门：`internal/cline/r88_local_model_test.go`、`internal/raccoon/r88_vision_test.go`（四处变异全红） |
+| R89 | `/v1/models` 必须把上游声明过的思考档位 / 上下文档位声明出去：审计发现渠道侧其实**能收** `reasoning_effort`（qoder 系、minimax、loomy、monkeycode），但声明侧一个字段都没有（实测 212 个模型：`reasoning_efforts`/`default_reasoning_effort`/`can_disable_thinking` 各 0 条）⇒ 客户端无法渲染下拉框，用户「没得选」。改法：`provider.ModelInfo` 新增 `ContextWindows`；`buildModelEntry` 输出 `reasoning_efforts`（len>0）、`default_reasoning_effort`（非空）、`can_disable_thinking`（指针非 nil，false 与 nil 不同义）、`context_windows`（**>1 才输出**，单档不算选择）；qoder/qodercn/qodercom 把 `context_config` 档位表拷进 `ContextWindows`，loomy 把 `/models` 的 `reasoning_efforts`/`default_reasoning_effort` 带进 `ModelInfo`。**不编造是硬约束**：给 qoder 补 low/medium/high 就是替上游做主。闸门：`internal/server/r89_capability_declare_test.go`、`internal/{qoder,qodercn,qodercom}/r89_context_windows_test.go`、`internal/loomy/r89_reasoning_efforts_test.go`（五处变异全红） |
 
 ## 2. 架构选型（依据）
 
@@ -377,6 +378,13 @@ POST /api/quit                     # 退出程序
 
 26. **本地判定的请求错误不得用 404，且必须落进不可轮转的 kind**：404 的语义是「上游说没这个资源」，而 `provider.ErrKind.Rotatable()` 把 `ErrNotFound` 当账号级错误（换号有价值）。本端校验（模型不在本地目录、参数越界、请求形态不接受）用 404 会产生**换号必然复现**的死循环，且每次轮换都 `NoteError` 一笔——客户端打错一个名字就能把整条渠道冷却。正确做法两件同时做：①状态码用 400/4xx 表示请求错误；②响应体带专属文案让 `Classify` 归到 `ErrBadParams`/`ErrPassthrough`/`ErrModelBlocked`（三者都不在轮转白名单）。只改状态码不够：`ErrClient` 同样可轮换。参照实现 `internal/loomy/client.go`，事故案例 `internal/cline/client.go`（R88）。
 
+27. **能力声明只许来自上游声明，nil ≠ false，单档不算选择**：`/v1/models` 是客户端渲染「思考等级 / 上下文大小」下拉框的**唯一**数据源，缺字段就是用户「没得选」。三条纪律：
+    - **不编造**：`ReasoningEfforts` 空 = 上游没给档位表（典型：qoder 系只声明 `is_reasoning` 一个 bool，档位是透传给上游的字符串），此时**不得**补 `low/medium/high`；给 qoder 补档就是替上游做主，客户端选了会拿到上游未定义的行为。
+    - **`nil ≠ false`**：`CanDisableThinking *bool` 为 nil 表示未声明、不输出；为 `false` 表示上游明确说「思考不可关」，**必须输出 false**——两者混同会让客户端把不可关的模型当可关。
+    - **单档不算选择**：`ContextWindows` 只在上游给出 ≥2 档（qoder 系 `context_config`）时输出 `context_windows`；单档仍以 `context_length` 声明事实。
+    另：`ContextWindows` 必须**拷贝**上游切片（`append([]int64(nil), ...)`），共享底层数组会让后续写入反向污染已缓存模型表。
+    闸门：`internal/server/r89_capability_declare_test.go`、`internal/{qoder,qodercn,qodercom}/r89_context_windows_test.go`、`internal/loomy/r89_reasoning_efforts_test.go`（五处变异全红）。
+
 ## 7. 平台能力差异表（internal/platform）
 
 | 能力 | Windows | macOS | Linux |
@@ -437,8 +445,8 @@ git tag vX.Y.Z && git push origin vX.Y.Z
 
 - [README.md](README.md) — 用户文档
 - [DEVELOPMENT.md](DEVELOPMENT.md) — 开发者文档（面向 AI Agent）
-- [AGENTS.md](AGENTS.md) — 本文件：决议项一句话判据（R1–R88）、架构选型、不变量
-- [docs/DECISIONS.md](docs/DECISIONS.md) — 决议全文（R1–R88）：每条决议的原始背景、踩坑记录与边界条件
+- [AGENTS.md](AGENTS.md) — 本文件：决议项一句话判据（R1–R89）、架构选型、不变量
+- [docs/DECISIONS.md](docs/DECISIONS.md) — 决议全文（R1–R89）：每条决议的原始背景、踩坑记录与边界条件
 - [docs/三接口兼容改造备忘.md](docs/三接口兼容改造备忘.md) — 三接口（Chat/Responses/Anthropic）兼容层架构决策、实施记录、验证清单、已知限制
 - [docs/用量积分流水记账备忘.md](docs/用量积分流水记账备忘.md) — 双流水统计（token/积分）架构、差分算法、实测验证、已知限制（R17）
 

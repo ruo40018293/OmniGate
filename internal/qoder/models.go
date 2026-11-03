@@ -193,27 +193,7 @@ func (c *Client) FetchModels(a *auth.Auth) ([]provider.ModelInfo, error) {
 		}
 		mm[name] = m.Key
 		entries[m.Key] = m
-		mi := provider.ModelInfo{
-			ID:            name,
-			Name:          m.DisplayName,
-			ContextWindow: 180000,
-			// is_vl 即上游的视觉能力声明；is_reasoning 为思考模式。
-			SupportsImages:    m.IsVL,
-			SupportsReasoning: m.IsReasoning,
-		}
-		// 上下文窗口：广告宁高勿低——max(档位表) > is_default 档 > max_input_tokens
-		// （与 resolveContextWindow 默认档一致，对齐 workbuddy2api 口径）
-		if n := len(m.AvailableWindows); n > 0 {
-			mi.ContextWindow = m.AvailableWindows[n-1]
-			mi.ContextFromAPI = true
-		} else if m.ContextWindow > 0 {
-			mi.ContextWindow = m.ContextWindow
-			mi.ContextFromAPI = true
-		} else if m.MaxInputTokens > 0 {
-			mi.ContextWindow = m.MaxInputTokens
-			mi.ContextFromAPI = true // 接口真实返回
-		}
-		out = append(out, mi)
+		out = append(out, modelInfoOf(m))
 	}
 	c.setModelMap(mm)
 	c.setModelEntries(entries)
@@ -221,6 +201,40 @@ func (c *Client) FetchModels(a *auth.Auth) ([]provider.ModelInfo, error) {
 		return nil, fmt.Errorf("models api returned empty list")
 	}
 	return out, nil
+}
+
+// modelInfoOf 单条动态模型 → provider.ModelInfo。
+// 上下文口径：广告宁高勿低——max(档位表) > is_default 档 > max_input_tokens
+// （与 resolveContextWindow 默认档一致，对齐 workbuddy2api 口径）。
+// R89：上游 context_config 的档位表另存一份到 ContextWindows（≥2 档才有选择意义），
+// 供 /v1/models 声明给客户端；广告值与档位表同源但不互推。
+func modelInfoOf(m DynamicModel) provider.ModelInfo {
+	name := NormalizeModelName(m.DisplayName)
+	if name == "" {
+		name = m.Key
+	}
+	mi := provider.ModelInfo{
+		ID:            name,
+		Name:          m.DisplayName,
+		ContextWindow: 180000,
+		// is_vl 即上游的视觉能力声明；is_reasoning 为思考模式。
+		SupportsImages:    m.IsVL,
+		SupportsReasoning: m.IsReasoning,
+	}
+	if n := len(m.AvailableWindows); n > 0 {
+		mi.ContextWindow = m.AvailableWindows[n-1]
+		mi.ContextFromAPI = true
+	} else if m.ContextWindow > 0 {
+		mi.ContextWindow = m.ContextWindow
+		mi.ContextFromAPI = true
+	} else if m.MaxInputTokens > 0 {
+		mi.ContextWindow = m.MaxInputTokens
+		mi.ContextFromAPI = true // 接口真实返回
+	}
+	if len(m.AvailableWindows) > 1 {
+		mi.ContextWindows = append([]int64(nil), m.AvailableWindows...)
+	}
+	return mi
 }
 
 // FetchModelPricing 实现 provider.Upstream：Qoder 模型带 price_factor，

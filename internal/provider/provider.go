@@ -148,6 +148,14 @@ type ModelInfo struct {
 	// ContextFromUser 标记上下文/能力字段是**用户在面板手填**的（自定义渠道专用）：
 	// 既不是上游声明，也不是本工具实测，但同样是「有人对它负责」的确定值。
 	ContextFromUser bool
+	// ContextWindows 上游声明的上下文档位表（升序，典型 200000 / 1000000）。
+	// 只有上游真的给出 context_config 这类档位表时才有值；空 = 只声明单一窗口
+	// （ContextWindow）或完全不声明。消费方不得自行编造档位——与 ReasoningEfforts
+	// 同一哲学：声明即事实，没声明就不许替上游做主。
+	//
+	// 与 ContextWindow 的关系：ContextWindow 是**广告值**（取最大档，宁高勿低），
+	// ContextWindows 是**可选项**；两者来自同一份上游数据，不互相推导。
+	ContextWindows []int64
 	// 以下能力字段均为「已确认为 true」才置 true；数据缺失时保持 false（未知）。
 	// 未知与「明确不支持」在语义上不同，但对消费方（/v1/models 声明、UI 图标）
 	// 的处理一致：不声明该能力。需要区分时由各渠道自行记录来源。
