@@ -114,6 +114,14 @@ type Config struct {
 	SessionTTL time.Duration
 	// SessionGCInterval 后台清理间隔（非正取默认 5m）。
 	SessionGCInterval time.Duration
+
+	// FirstContentTimeout 流式请求的「首内容截止」（R93）。<=0 表示关闭。
+	//
+	// 背景：Qoder 系渠道当日额度耗尽时，上游先发一帧 role 再完全沉默，直到约 180 秒
+	// 才自行断开（R90 实测 p50=180.1s，写给客户端的字节只有 81~513）。这段时间我们既不
+	// 报错也不换号，用户界面上只剩一个计时器。到点主动断流后，渠道会把
+	// upstream_timeout 帧写出去，等待时长从「上游自己的 180 秒」变成「我们设的上限」。
+	FirstContentTimeout time.Duration
 }
 
 // stickyEntry 粘性路由记录：记录上次路由账号及连续使用次数。
@@ -932,6 +940,32 @@ rotateLoop:
 			// 11 个渠道一并覆盖，不必逐个改动。
 			sw2 := newAcceptWriter(w)
 			w = sw2
+			// R93：首内容截止看门狗。上游可能只发一帧 role 就沉默（实测 180 秒后才自己断），
+			// 期间界面只有一个计时器。这里给「第一帧非空内容」设截止，到点直接断上游，
+			// 让渠道按 R90 的路径写出 upstream_timeout 帧，用户不必陪上游等满它自己的 180 秒。
+			cw := newContentWatcher(sw2)
+			watchDone := make(chan struct{})
+			if d := h.cfg.FirstContentTimeout; d > 0 {
+				// 毒化读取器：到点后先让所有 Read 立即返回 ErrFirstContentTimeout，
+				// 再关底流解除阻塞。直接关底流也能解除阻塞，但读取会拿到
+				// io.ErrClosedPipe 之类的底层错误串，原因就被盖掉了（R93 首次实测）。
+				fc := newFirstContentReader(rc)
+				rc = fc
+				go func() {
+					t := time.NewTimer(d)
+					defer t.Stop()
+					select {
+					case <-cw.Seen():
+					case <-watchDone:
+					case <-t.C:
+						log.Printf("first content timeout platform=%s uid=%s after=%s（上游只发首帧就沉默）",
+							rt.Kind, acct.UID, d)
+						statRow.Err = "首内容超时：上游 " + d.String() + " 内未产出任何内容"
+						fc.poison(provider.ErrFirstContentTimeout)
+					}
+				}()
+			}
+			defer close(watchDone)
 			// R56b：内容到达时刻单独回填面板（受理帧不算内容）。
 			markContent := func() {
 				if h.live != nil {
@@ -943,9 +977,9 @@ rotateLoop:
 			if cs, ok := rt.Upstream.(interface {
 				StreamContent(w http.ResponseWriter, r io.Reader, model string, once func()) (map[string]any, error)
 			}); ok {
-				usage, serr = cs.StreamContent(sw2, rc, clientModel, markContent)
+				usage, serr = cs.StreamContent(cw, rc, clientModel, markContent)
 			} else {
-				usage, serr = rt.Upstream.Stream(sw2, rc, clientModel)
+				usage, serr = rt.Upstream.Stream(cw, rc, clientModel)
 				markContent() // 无内容通知能力的渠道：退化为「流起来即有内容」
 			}
 			// 记 token 流水（成功请求口径；usage 缺失记 0 token 仅计请求数）。

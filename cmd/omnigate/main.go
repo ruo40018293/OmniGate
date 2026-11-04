@@ -580,6 +580,9 @@ func main() {
 		ErrThreshold:      cfg.Cooldown.ErrThresh,
 		ErrCooldown:       cfg.ErrCooldownDur,
 		MaxRotate:         cfg.MaxRotate,
+		// R93：流式「首内容截止」。上游发完首帧就沉默时主动断流，
+		// 别让客户端陪它等满自己那 180 秒。
+		FirstContentTimeout: cfg.StreamFirstContentDur,
 		// 入站请求体上限（0 = 默认 128MiB，见 server.DefaultMaxRequestBody）。
 		MaxRequestBody: int64(cfg.Server.MaxRequestBodyMB) << 20,
 		WebUI:          sub,

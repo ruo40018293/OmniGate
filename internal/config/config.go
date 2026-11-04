@@ -232,6 +232,13 @@ type Config struct {
 	// SessionStickyTTLDur / SessionStickyGCDur 会话粘性的时间参数（解析后）。
 	SessionStickyTTLDur time.Duration `json:"-"`
 	SessionStickyGCDur  time.Duration `json:"-"`
+
+	// StreamFirstContentSeconds 流式请求的「首内容截止」秒数（R93）：上游发完首帧
+	// 就沉默时，到点主动断流并写 upstream_timeout 帧，不让客户端陪它等 180 秒。
+	// 0/缺省 = 默认 90 秒；负数 = 关闭该看门狗。
+	StreamFirstContentSeconds int `json:"stream_first_content_seconds"`
+	// StreamFirstContentDur 解析后的首内容截止（归一化里钳到 [1s,10m]）。
+	StreamFirstContentDur time.Duration `json:"-"`
 }
 
 // Default 默认配置。
@@ -270,6 +277,7 @@ func Default() *Config {
 	c.SessionSticky = true
 	c.SessionStickyTTL = 30
 	c.SessionStickyGC = 5
+	c.StreamFirstContentSeconds = 90
 	return c
 }
 
@@ -572,6 +580,19 @@ func (c *Config) normalize() error {
 	}
 	c.SessionStickyTTLDur = time.Duration(c.SessionStickyTTL) * time.Minute
 	c.SessionStickyGCDur = time.Duration(c.SessionStickyGC) * time.Minute
+	// 首内容截止（R93）：0/缺省落默认 90 秒，负数关闭，上限钳到 10 分钟
+	// （再长就没意义了 —— 上游自己也在 180 秒左右放弃）。
+	if c.StreamFirstContentSeconds == 0 {
+		c.StreamFirstContentSeconds = 90
+	}
+	if c.StreamFirstContentSeconds < 0 {
+		c.StreamFirstContentDur = 0
+	} else {
+		if c.StreamFirstContentSeconds > 600 {
+			c.StreamFirstContentSeconds = 600
+		}
+		c.StreamFirstContentDur = time.Duration(c.StreamFirstContentSeconds) * time.Second
+	}
 	// 兼容旧版 checkin_hours；新版本统一规范化为 HH:MM。
 	if len(c.Schedule.CheckinTimes) == 0 {
 		c.Schedule.CheckinTimes = make([]string, 0, len(c.Schedule.CheckinHours))

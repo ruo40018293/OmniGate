@@ -81,6 +81,15 @@ func truncateRunes(s string, n int) string {
 // 流式渠道因此必须用无总超时的 client + 本看门狗兜底（见 AGENTS 不变量）。
 var ErrIdleTimeout = errors.New("upstream stream idle timeout")
 
+// ErrFirstContentTimeout 上游连上了、也发了首帧（如 role），但在截止时间内
+// 一个内容 token 都没产出（R93）。
+//
+// 与 ErrIdleTimeout 的区别是触发点与证据：ErrIdleTimeout 只说明「一段时间没字节」
+// （可能是长思考），而这个错误是 handler 层按**出站内容帧**判定的——role 首帧
+// 不算内容，所以「发了 role 就沉默」一定会命中，不会被误当成正常慢启动。
+// Qoder 系当日额度耗尽就是这一形态（R90 实测 p50=180s 才由上游自己断开）。
+var ErrFirstContentTimeout = errors.New("upstream produced no content before deadline")
+
 // IsIdleTimeout 报告错误是否为空闲超时（含被 IdleReader 包装后的形态）。
 //
 // 也识别 internal/idle 看门狗的那一族错误：它没有 ErrIdleTimeout 变量可比较，
@@ -92,7 +101,7 @@ var ErrIdleTimeout = errors.New("upstream stream idle timeout")
 // 排查 qoder 系截断时就卡在这里——77 条日志全是同一句固定串，分不清是上游
 // 额度耗尽挂死、还是我们自己的看门狗掐的。
 func IsIdleTimeout(err error) bool {
-	if errors.Is(err, ErrIdleTimeout) {
+	if errors.Is(err, ErrIdleTimeout) || errors.Is(err, ErrFirstContentTimeout) {
 		return true
 	}
 	return errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) ||

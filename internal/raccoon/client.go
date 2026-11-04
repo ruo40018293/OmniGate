@@ -721,7 +721,11 @@ func Classify(status int, body string) provider.ErrKind {
 var hardMarkers = []string{
 	"insufficient credit", "no credit", "credit exhausted", "out of credit",
 	"quota exceeded", "quota exhaust", "payment required", "credit not enough",
-	"not enough credit", "积分不足", "额度不足", "余额不足", "积分用完", "额度用尽",
+	// R93：日额度耗尽不是「请求错误」。2026-11-04 实测 qodercn 返回 403
+	// `Billing daily count exceeded`，此前落到 ErrClient（可轮转）——每个渠道只有
+	// 1 个号，换号必败，最后变成一个毫无信息量的 503。归到 ErrHardCredit 才对：
+	// 冷却到日重置，且不会为了换个号白跑一趟。
+	"not enough credit", "积分不足", "额度不足", "余额不足", "积分用完", "额度用尽", "billing daily count exceeded", "daily count exceeded", "次数已达上限",
 }
 
 // hasTag 判断 tags 是否含指定标签（大小写不敏感）。

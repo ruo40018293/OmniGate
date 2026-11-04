@@ -1,4 +1,4 @@
-# 决议全文（R1–R92）
+# 决议全文（R1–R93）
 
 > 本文件是 `AGENTS.md` 第 1 节的**完整原文**——每条决议「为什么这么做 / 踩过什么坑 / 边界在哪」都在这里。
 > `AGENTS.md` 只保留每条的一句话判据，随每次会话自动加载，用来提醒「别推翻什么」；
@@ -723,3 +723,61 @@ if !outerOK {
 ### 已知未做
 - DNS 抖动本身没治（没加自定义 `DialContext` 缓存/重解析）。实测重试就能吃掉，加缓存会引入「解析过期」这一新故障面。
 - `cline` 未接（它自己的 `backuplink.Replay` 已有改道重放，叠加会是两层重试）。
+
+## R93 — 流式请求必须给首内容设截止；日额度耗尽不是「请求错误」
+
+### 触发
+2026-11-04 用户连续两次报「任务停下来」「又是什么问题停止了」。查 `E:\陈焕生\workbuddy-api\data\app.log`：
+`stream relay end ... upstream stream truncated` 当天 12 次（qodercom 9 / qodercn 3），p50=180.1s；
+截断时写给客户端的字节只有 81~513。同时另有 1 次 `qodercn err=upstream 403: Billing daily count exceeded`。
+
+### 根因（两条，彼此独立）
+1. **没有首内容截止**。R56 的受理帧（`: omnigate request accepted`）只证明「请求已受理」，
+   不证明「上游在产出」。上游发完一帧 `role`（`content` 为空）就沉默 180 秒，期间 handler
+   既不报错也不换号 —— 用户看到的就是一个转了三分钟的计时器。
+2. **403 + 额度文案被当成请求级错误**。`internal/qodercn/client.go` 的 `Classify` 末尾
+   `return provider.ErrClient`，而 `ErrClient` 在 `ErrKind.Rotatable()` 白名单里 ⇒ handler
+   换号 + `NoteError` 记一笔。本机每个渠道只有 1 个账号 ⇒ 换号必败 ⇒ 最终 503。
+
+### 外部对照（不是照抄，是校准阈值）
+- sub2api：`client_first_message_timeout_seconds: 30`，并把 `403` 当 access/entitlement 失败处理。
+- grok2api：`requestRetry.holdTimeout: 30s`、`idleAccountCooldown: 15m`。
+两者与我们同一个思路：给「首条内容」设截止，别陪上游等满它自己的超时。
+
+### 做法
+1. `internal/server/contentwatch.go`（新增）
+   - `contentWatcher`：包在 `http.ResponseWriter` 外层，按**出站 SSE 帧**判定首帧非空内容。
+     判据：`"content":"` / `"reasoning_content":"` 之后不是 `"`（空串不算），或
+     `"tool_calls"` 后跟 `[{`（`[]` 与 `null` 不算）。`Flush` 必须转发，否则 SSE 退化成一次性返回。
+   - `firstContentReader`：`poison(err)` 先置位再关底流。只 `Close()` 的话读取方会拿到
+     `io.ErrClosedPipe` / `use of closed network connection`，被 R90 的 `TruncationCode`
+     归成 `upstream_truncated` —— 首内容超时与上游真断又同形（本决议第一次实测正是这个结果）。
+2. `internal/provider/stream.go`：新增 `ErrFirstContentTimeout`，并让 `IsIdleTimeout` 认得它
+   ⇒ 出口 code 落 `upstream_timeout`。
+3. `internal/server/handler.go`：流式分支在首内容前挂看门狗，到点 `poison` + 写统计行原因；
+   `Config.FirstContentTimeout` 由 `config.stream_first_content_seconds` 驱动
+   （缺省 90s、负数关闭、上限钳 600s）。
+4. 8 份平行 `hardMarkers` 同步补 `billing daily count exceeded` / `daily count exceeded` / `次数已达上限`。
+
+### 边界
+- 只对 `peek.Stream` 生效，非流式路径不受影响。
+- 判据只看**出站**帧：渠道内部怎么解析上游无关，11 个渠道一并覆盖，不必逐个改。
+- 90 秒是「首内容」上限，不是整条流上限；慢但一直在出字的请求不受影响（那是 `idle` 的 300s 地盘）。
+
+### 闸门
+- `internal/server/r93_contentwatch_test.go`：`hasContentFrame` 14 例；沉默上游端到端（role 首帧 →
+  阻塞 → 看门狗断流 → 响应含 `upstream_timeout` 且无 `[DONE]`）；内容按时到达不得误杀；关闭时不介入。
+- `internal/qodercn/r93_daily_quota_test.go`：4 例额度文案归 `ErrHardCredit` + 4 例邻接语义不回归
+  （403 空 body 仍 WAF、普通 403 仍 ErrClient、402/429 不变）。
+- `internal/provider/r93_quota_markers_test.go`：读 8 份源文件，任何一份漏改即红
+  （包内私有变量没有公共接口可断言，只能做源码一致性闸门）。
+
+### 变异（七处全红）
+M1 role 首帧被当成内容；M2 看门狗不介入；M3 毒化只关流不置原因；M4 `IsIdleTimeout` 不认新错误；
+M5 `tool_calls: []` 被当成内容；M6 qodercn 整段漏掉额度文案；M7 loomy 只漏一条（平行实现漂移）。
+
+### 已知未做
+- 没有实现「换号重试」：本机每渠道 1 个账号，无号可换；且受理帧已发出，协议上无法改状态码。
+- `traework` 的 `solo error code=3003/4008`（`http request failed` / `Your requests have exceeded the quota`）
+  语义未确认是「日额度」还是「窗口限流」，未改分类 —— 猜一个 12h 冷却可能反而丢一整天渠道。
+- 面板未加「首内容超时」的独立展示位，沿用 `statRow.Err` 文案。
