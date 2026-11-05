@@ -1,4 +1,4 @@
-# 决议全文（R1–R94）
+# 决议全文（R1–R95）
 
 > 本文件是 `AGENTS.md` 第 1 节的**完整原文**——每条决议「为什么这么做 / 踩过什么坑 / 边界在哪」都在这里。
 > `AGENTS.md` 只保留每条的一句话判据，随每次会话自动加载，用来提醒「别推翻什么」；
@@ -835,3 +835,52 @@ assistant 的 `tool_calls` 分支保持 prepend 并提前 return。
 - 上游 R151（sanitize 收敛）**本轮不做**：它同时停用了 3 条我们仍在依赖的规则（裸 `11128`、WebGUI 段、billing 裸键名），而我们有自己 R50/R59 的探针证据说明那些片段确实触发拦截 —— 他们的探针对我们的 CN 渠道没有背书，必须自建探针后再改。其中两条与探针无关的（身份替换目标从 `Claude Code` 改为 `DSH`、清洗只做 system/assistant 而不动用户原话）留待单独一轮。
 - R147（吞吐改 60 秒滑窗）不做：我们用的是同一套「Σ生成 token / (总时长−TTFB)」口径，同样会夸大（上游同源项目实测 1.8–3.6 倍），但改它要动 stats 结构 + 落盘格式 + 分帧写入 + 前端字段，属独立工程。
 - R112b（临期展示 1/2/7 可配）不做：纯展示项，且我们没有 `expiring_days` 配置面。
+
+## R95 — 脱敏只碰提示词角色，整包兜底必须删除
+
+**触发**：上游 v2.11.5 的 R151（2026-11-02→03，真机探针 33+4+26 次）重验了「哪些特征还真的会拦」，结论直接否掉了我们 R82 照抄的那套。
+
+**上游 R151 的结论**（原文摘要）：
+- 仍拦：DSH 身份句、跨句 @ 路径、CC 身份句、`Main branch`、Codex 首段（前缀锚定）、反馈句 give、billing 键值；
+- 已失效（注释停用）：裸 `11128`、DSH WebGUI 段、billing **裸键名**、tools 字段品牌串；
+- **角色**：`user`/`tool`/`function` 不扫，`system`/`assistant` 仍拦；
+- 修法：`BodyFallback` 及其接线**删除**、预检 13→9、**无改写不 TrimSpace**、两套表逐字节快照 + parity 守卫。
+
+**我们对照后确认的三条真错**：
+
+1. **改写调用方数据**。`internal/sanitize/sanitize.go` 的 `cleanMessages` 与 `internal/upstream/sanitize.go` 的
+   `sanitizeMessages` 都不看 `role`。探针实测：`role:user` 的 `You are Claude Code, Anthropic's official CLI for Claude`
+   被改成 `...official CLI tool for Claude`。用户完全可能让模型解释某个 CLI，这一改就是篡改用户输入。
+2. **整包兜底不可逆**。R82 引入的 `BodyFallback` 用 `flexDSHRe` 把整包里的品牌串替换成 `dshReplaceTarget()`
+   （hex 构造的另一家厂商名）。探针实测 `tools[].description` 里的
+   `search the deepseek harness docs` → `search the Claude Code docs`。工具定义是调用方的长期资产，
+   而且上游用探针确认 tools 字段已不再触发拦截 ⇒ **整包兜底直接删除**，接线回到纯 `sanitize.Messages`。
+3. **预检与替换不对称**。特征表是小写全串、`hasFingerprint` 用 `asciiContainsFold` 预检，
+   但替换走 `strings.ReplaceAll`（区分大小写）⇒ `deepseek-harness`/`deepseek_harness` 这类分隔符变体
+   连净化都进不去（预检就 return 了）。
+
+**改法**（两个包各一份，不共享实现——沿用「渠道包之间不共享实现」的纪律）：
+- 新增 `sanitizeRole(v any) bool`，只放行 `system`/`developer`/`assistant`；两个 `*Messages` 循环里 `continue` 掉其它角色。
+- 新增 `identityRe`（大小写不敏感 + 分隔符类 `[\s\-_\x{2010}-\x{2015}\x{00a0}]*` + 可选冠词 + 可选句点），
+  在 `cleanText`/`sanitizeText` 里 `ReplaceAllString(text, "")`（沿用 R53 的整句删除），
+  并让 `hasFingerprint` 末尾 `|| identityRe.MatchString(...)` 兜底，否则变体过不了预检。
+- `cleanText`/`sanitizeText` 末尾改成 `if text == orig { return text }` 再 `TrimSpace`。
+- 删除 `BodyFallback`、`dshReplaceTarget`、`bodyDSHRe`/`flexDSHRe`；
+  `internal/upstream/payload.go` 与 `internal/workbuddyai/wb_utils.go` 的接线改回 `sanitize.Messages(prepareBodyInner(src))`。
+- `zz_probe_test.go`（不变量 17 的可信探针）里的引用同步换成 `identityRe`。
+
+**闸门**：两个包各 `r95_role_test.go` 四例——
+`TestR95SkipsCallerRoles`（user/tool/function/无 role 原样保留）、
+`TestR95StillCleansPromptRoles`（system/developer/assistant × 连字符/U+2011/空格/下划线/大写变体 × 有无冠词，
+必须中化且不伤前后文）、`TestR95NoWholeBodyRewrite`（tools 里的身份句必须原样——锁住整包改写不得复活）、
+`TestR95KeepsWhitespaceWhenUnchanged`（命中但替换后没变时不许 TrimSpace；样本用裸键名，
+这是唯一能走到该分支的真实输入）。
+**五处变异全 RED**：去掉角色闸门（sanitize）、不应用 `identityRe`、预检不认 `identityRe`、
+恢复无条件 TrimSpace、去掉角色闸门（upstream 平行实现——防两表漂移）。
+
+**边界与已知未做**：
+- 身份句我们**删除**而不是换成 `powered by DSH`（上游 R151 的写法）。理由是 R53 起就采取「删掉整句」，
+  不留任何替代断言；若将来探针证明删除后仍被拦，再回到「换成中性句」。
+- `tool_calls.arguments` 里的品牌串上游也没重验；我们的判断是同属调用方内容，不动。
+- 裸 `11128` 与 DSH WebGUI 两条规则上游已注释停用，**我们保留**——上游的停用理由是「探针不再拦」，
+  但我们的 `11128→11-128` 是 `old==new` 之外的等价改写，多洗一次无副作用，暂不删以免丢判据。

@@ -43,8 +43,7 @@ func TestProbeUpstreamTableBytes(t *testing.T) {
 	fmt.Printf("PROBE regex sanitizeKvRe len=%d % x"+probeNL, len(sanitizeKvRe.String()), []byte(sanitizeKvRe.String()))
 	fmt.Printf("PROBE regex bodyDSHRe len=%d % x"+probeNL, len(bodyDSHRe.String()), []byte(bodyDSHRe.String()))
 
-	tgt := dshReplaceTarget()
-	fmt.Printf("PROBE dshReplaceTarget len=%d % x"+probeNL, len(tgt), tgt)
+	fmt.Printf("PROBE regex identityRe len=%d % x"+probeNL, len(identityRe.String()), []byte(identityRe.String()))
 	fmt.Printf("PROBE effective rewrites = %d/%d"+probeNL, effective, len(sanitizeRewrites))
 
 	// Guards below exist because a broken table still compiles and the rest of

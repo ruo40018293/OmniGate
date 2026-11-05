@@ -19,7 +19,7 @@ import (
 
 // PrepareBody 改写发往国际版上游的 chat 请求体（含脱敏）。
 func PrepareBody(src []byte) []byte {
-	return sanitize.BodyFallback(sanitize.Messages(prepareBodyInner(src)))
+	return sanitize.Messages(prepareBodyInner(src))
 }
 
 func prepareBodyInner(src []byte) []byte {

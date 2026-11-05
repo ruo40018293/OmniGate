@@ -43,8 +43,7 @@ func TestProbeTableBytes(t *testing.T) {
 	fmt.Printf("PROBE regex reKv len=%d % x"+probeNL, len(reKv.String()), []byte(reKv.String()))
 	fmt.Printf("PROBE regex flexDSHRe len=%d % x"+probeNL, len(flexDSHRe.String()), []byte(flexDSHRe.String()))
 
-	tgt := dshReplaceTarget()
-	fmt.Printf("PROBE dshReplaceTarget len=%d % x"+probeNL, len(tgt), tgt)
+	fmt.Printf("PROBE regex identityRe len=%d % x"+probeNL, len(identityRe.String()), []byte(identityRe.String()))
 	fmt.Printf("PROBE effective rewrites = %d/%d"+probeNL, effective, len(rewrites))
 
 	// Guards below exist because a broken table still compiles and the rest of

@@ -113,13 +113,14 @@ func hasFingerprint(s string) bool {
 		}
 	}
 	// 大小写变体 + 裸键名形态由正则兜底
-	return reBareHdr.MatchString(s)
+	return reBareHdr.MatchString(s) || identityRe.MatchString(s)
 }
 
 func cleanText(text string) string {
 	if !hasFingerprint(text) {
 		return text
 	}
+	orig := text
 	for _, rw := range rewrites {
 		text = strings.ReplaceAll(text, rw[0], rw[1])
 	}
@@ -134,6 +135,14 @@ func cleanText(text string) string {
 		}
 	}
 	text = reBareHdr.ReplaceAllString(text, "x-anthropic-billing-hdr")
+	// R95: 身份句用大小写不敏感的正则中和；
+	// 字符串表只写大写那一种，小写变体会漏过去。
+	text = identityRe.ReplaceAllString(text, "")
+	if text == orig {
+		return text
+	}
+	// R95: 只在真的改写过时才归一空白；
+	// 无改写时 TrimSpace 会吃掉调用方内容的首尾空白。
 	return strings.TrimSpace(text)
 }
 
@@ -195,6 +204,14 @@ func cleanMessages(msgs []any) bool {
 		if msg == nil {
 			continue
 		}
+		// R95: 只净化会被上游当「身份/系统提示」校验的角色。
+		// user/tool/function 是调用方与工具的真实内容——用户完全可能在正文里正常提到
+		// 这些词（例如让模型解释 DSH），改写它们等于篡改用户数据；上游 2026-11-02 的
+		// 33 次真机探针也确认只对 system/assistant 拦截（docs 上游 R151）。
+		// 角色缺失时一律跳过：不动没声明角色的内容。
+		if !sanitizeRole(msg["role"]) {
+			continue
+		}
 		if v, ok := msg["content"]; ok {
 			if nc, ch := cleanContent(v); ch {
 				msg["content"] = nc
@@ -252,24 +269,12 @@ func asciiContainsFold(s, f string) bool {
 	return false
 }
 
-// BodyFallback 整包兜底：覆盖结构化清洗（messages/content/tool_calls）摸不到的字段。
-// 典型场景：tools[] 定义里、metadata 里或 body 其它角落出现 DSH 身份词，
-// 走 messages 树是遍历不到的，必须整包替换一次。
+// identityRe 匹配 DSH 身份句整体（大小写、可选冠词 the、
+// 各种分隔符变体全覆盖）。`
 //
-// 设计约束（不变式 16）：预检不命中时零分配原样返回，绝不做语义变更。
-func BodyFallback(b []byte) []byte {
-	if !flexDSHRe.Match(b) {
-		return b
-	}
-	return flexDSHRe.ReplaceAll(b, dshReplaceTarget())
-}
-
-// dshReplaceTarget 返回 BodyFallback 的替换目标。
-// 用十六进制解码构造而非字符串字面量：本仓库的字面量曾被工具静默转写，
-// 而这个函数决定整包兜底替换成什么，写错会污染请求语义（见 AGENTS.md R82）。
-func dshReplaceTarget() []byte {
-	return []byte{0x43, 0x6c, 0x61, 0x75, 0x64, 0x65, 0x20, 0x43, 0x6f, 0x64, 0x65}
-}
+// R95 为何用正则而不用字符串替换：特征表里的是小写形态，
+// 而 strings.ReplaceAll 区分大小写——小写变体原来会直接漏过去。
+var identityRe = regexp.MustCompile(`(?i)you\s+are\s+an\s+ai\s+agent\s+powered\s+by\s+(?:the\s+)?deepseek[\s\-_\x{2010}-\x{2015}\x{00a0}]*harness\.?`)
 
 // looseHdrKeyExpr 构造宽松的 billing header 键名表达式。
 //
@@ -284,4 +289,15 @@ func looseHdrKeyExpr() string {
 	return "x" + sep + "anthropic" + sep + "billing" + sep +
 		"h" + sep + "(?:e" + sep + ")?" + "(?:a" + sep + ")?" +
 		"d" + sep + "(?:e" + sep + ")?" + "r"
+}
+
+// sanitizeRole 报告该角色要不要洗化：
+// system/developer/assistant 需要，user/tool/function 与未声明角色一律跳过。
+func sanitizeRole(v any) bool {
+	r, _ := v.(string)
+	switch r {
+	case "system", "developer", "assistant":
+		return true
+	}
+	return false
 }
