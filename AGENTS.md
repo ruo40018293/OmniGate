@@ -130,6 +130,7 @@
 | R91 | 渠道指纹与会话头必须按上游**真实语义**生成，不按「能过校验」生成：① [raccoon] chat 请求此前**完全不发 `User-Agent`**（Go 默认 `Go-http-client/1.1`），也没有 `x-client-*` 家族；上游 2026-10-31 反编译「小浣熊 1.0.38 → box-agent-acp」证实**对话请求走 Python 子进程**（不是 Electron 渲染层），真实头集 = `AsyncOpenAI/Python 2.8.0` + `X-Stainless-{Lang,Package-Version,OS,Arch,Runtime,Runtime-Version}` 六件 + `x-client-{name,platform,version,os-version,channel}`（`device_id` 官方从不赋值 ⇒ 不发）；并且「每请求新建 `sess-<hex>`」会让上游看到同一账号几分钟内冒出上百个新会话 —— **这是 429 的真正触发条件**（官方一个 ACP 会话跨 37 分钟、150+ 次调用都不换）⇒ `internal/raccoon/{headers,requestid,osversion_windows,osversion_linux,osversion_other}.go` 落地 `ApplyHeaders` + 24h 会话池（key = `账号|模型`，必须带账号否则会话跨号漂移）。② [workbuddy CN / WBAI] 两区的 `X-Conversation-ID` 此前也是每请求现生成，官方语义是三层：**会话级恒定 / 轮级（一次 user send）/ 调用级（每模型请求）** ⇒ `internal/upstream/convheaders.go` 与 `internal/workbuddyai/convheaders.go` **两份平行实现**（锚点 = 首条 user 文本 sha256 前 8 字节派生 conv、末条 user 指纹派生 turn，`maxAnchorBody = 8<<20` 超限退回随机），`newMessageID` 由时间戳派生升级为 crypto/rand。闸门：raccoon 10 个 + upstream 12 个 + WBAI 4 个测试；七处变异全红；顺带修掉上游 `randomUUIDv4` 的切片 bug（产出 4-4-4-4-16 畸形串，不是任何 UUID 形态） |
 | R92 | 传输层瞬态错误必须**同号原地重试**，且只在最终失败时留证：2026-11-03 23:21:37 与 23:23:43 两次「任务停下来」实测都落在 traework 的 `dial tcp: lookup trae-api-cn.mchost.guru: no such host`（`data/chat-capture/err-20261103-232343.287-traework-0-527031.json` 里 `status=0`/`response=""` ⇒ 请求根本没发出去）。全仓 12 个渠道的 chat `Do` 一次失败就放弃（唯一例外是 workbuddyai 的 `retry.go`）；而 `auths/` 实测**每渠道只有 1 个账号** ⇒ 传输失败时无号可换，只能同号重试。日志统计 chat 路径 transport error 共 21 条（`no such host` 8 / `timeout awaiting response headers` 9 / `dial tcp i/o timeout` 3 / `wsarecv` 1），逐条比对「失败后下一次成功的时间」除一次当天渠道不可用外**全部 1–16 秒内恢复** ⇒ 短退避重试即可吃掉这类抖动。新增 `internal/httpretry`（`Do(req, do, wrap, onRetry)` = 3 次尝试、400ms 起指数退避 ±40% 抖动、`Retryable` 判据先拆 `*url.Error` 再判，否则本地 `invalid header field value` 会被当成瞬态；用 `GetBody`+`Clone` 重放且**不可重放就只发一次**，绝不发空 body；失败返回 `noopCancel` 而非 nil，否则渠道侧错误分支的 `cancel()` 直接 panic），接进 traework / workbuddy(upstream) / qoder / qodercom / qwenwork / raccoon / minimax / loomy / monkeycode / glm 十处；顺带修掉一个**既有时间炸弹**：`internal/raccoon/checkin_test.go` 用 `now.Truncate(24*time.Hour)` 取「当天零点」，Truncate 按纪元纳秒对齐⇒ CST 00:00–08:00 之间它给的是**昨天** 08:00，三条签到用例在凌晨必然集体变红（2026-11-04 00:22 实测复现），改 `cstMidnight`。闸门：`internal/httpretry/httpretry_test.go`（9 例）+ `internal/traework/r92_retry_test.go`（4 例），五处变异全红 |
 | R93 | 流式请求必须给**首内容**设截止；日额度耗尽不是「请求错误」：2026-11-04 生产日志实测 qodercn `403 Billing daily count exceeded` 一天 1 次，而 12 次 `upstream stream truncated`（qodercom 9 / qodercn 3）全部是「上游只发一帧 role 就沉默、约 180 秒后自己断开」（R90 实测 p50=180.1s，写给客户端的字节只有 81~513）⇒ 用户在界面上干等三分钟，体感就是「卡住了」。两处根因：①没有首内容截止，`newAcceptWriter` 的受理帧让人以为在跑；②`403` + 非空 body 落到 `ErrClient`（在 `Rotatable()` 白名单里）⇒ 单号渠道换号必败 ⇒ 最后只剩一个无信息量的 503。改法：①`internal/server/contentwatch.go` 新增 `contentWatcher`（按**出站 SSE 帧**识别首帧非空内容，`content:""` 的 role 首帧不算内容；`content` / `reasoning_content` / `tool_calls` 三种形态都算，`[]`/`null` 不算；`Flush` 必须转发否则 SSE 退化）+ `firstContentReader`（到点先**毒化**再关底流，否则读取方拿到 `io.ErrClosedPipe`，首内容超时又和上游真断同形）；handler 在 `FirstContentTimeout`（`config.stream_first_content_seconds`，缺省 90s、负数关闭、上限 600s）到点断流，渠道按 R90 路径写 `upstream_timeout` 帧；新增 `provider.ErrFirstContentTimeout` 并让 `IsIdleTimeout` 认得它。②8 份平行 `hardMarkers`（qodercn/qoder/qodercom/qwenwork/upstream/workbuddyai/raccoon/loomy）统一补 `billing daily count exceeded` / `daily count exceeded` / `次数已达上限` ⇒ 日额度耗尽归 `ErrHardCredit` 冷却到日重置。闸门：`internal/server/r93_contentwatch_test.go`（4 例含沉默上游端到端）+ `internal/qodercn/r93_daily_quota_test.go`（8 例）+ `internal/provider/r93_quota_markers_test.go`（8 份表一致性，读源文件——包内私有变量无公共接口可断言），七处变异全红
+| R94 | 渠道语义不能被全局设置覆盖：上游 v2.11.1→v2.11.5 盘点后逐条对着我们的代码核，三条是**逐字同型**的真 bug。① [Anthropic 入站工具有序性] `internal/gateway/anthropic.go` 把文本/图片 **prepend** 到 tool 结果之前，出站顺序变成 `user(文本) → tool → tool`，违反「`assistant.tool_calls` 之后必须紧跟同批 `role:tool`」；上游 workbuddy 回 `11148 tool calls and tool results do not match`，qoder 系只回信封 `Error in upstream response`（无信息量）。触发是常态：Claude Code 在工具执行完、用户又追一句时，把 `tool_result` 与新文本放在同一条 user 消息里。改法：文本/图片 `append` 到结果**之后**，纯工具结果不再凭空补一条空 user。② [签到三根因] `cmd/omnigate/web/app.js` 先判 `last_checkin_at` 再看 `noCheckin` ⇒ 无签到渠道的灰色分支**永远不可达**（巡检每轮都写时间戳）；`internal/app/app.go` 的 `SetCheckinTimes` 无条件给**所有**渠道 `SetCheckinMinutes` ⇒ Qoder 双区（固定 10:00 开放）与 MiniMax（00:00 重置积分）的固定窗口被面板时刻覆盖，**当天直接漏领**；`internal/scheduler/scheduler.go` 的 `finishCheckin` 没有「本渠道没有签到任务」闸门 ⇒ 无签到渠道每天落一条失败记录。改法：`scheduler.Config.FollowGlobalCheckin` + `FollowsGlobalCheckin()`，面板时刻只推白名单（workbuddy/traework/workbuddyai/raccoon/glm）；`finishCheckin` 在 `len(CheckinMinutes())==0` 时既不落盘也不上报；前端先判 `noCheckin`。③ [Loomy 到期] `importLoomy` 写 `updatedAt + 14d`，而 `auth.NeedsRefreshLocked` **只看 ExpiresAt、不看 refreshToken** ⇒ 第 15 天起恒真 ⇒ `loomy.RefreshToken` 恒 `ErrSessionDead` ⇒ 面板红字 + 该号被跳过 + 每 10 分钟一次必然失败的刷新。上游实测反证：某号 `expiresAt` 已 2026-10-27 过期，10-30 仍 `POST /api/account/resource_detail` 200（remain=17518）⇒ 14 天估算模型不成立，真实失效只能靠 401 兜底。改法：写 50 年哨兵（与同文件 `importMonkeyCode` 同一约定）+ `healLoomyExpiry()` 启动自愈（幂等、只改 `auth.expiresAt`、坏文件跳过不阻断启动）。闸门：`internal/gateway/r94_anthropic_tool_order_test.go`(4) + `internal/scheduler/r94_checkin_test.go`(4) + `internal/app/r94_checkin_push_test.go`(2) + `internal/app/r94_loomy_heal_test.go`(4) + `internal/app/r94_main_wiring_test.go`(1，源码级白名单闸门：谁被加上 `FollowGlobalCheckin` 就转红)；六处变异全红。**未做**：R151 sanitize 收敛（上游停用 3 条我们仍靠着的规则，必须自建探针才能判）、R147 吞吐 60s 滑窗、R112b 临期展示 1/2/7 可配 |
 
 ## 2. 架构选型（依据）
 
@@ -248,8 +249,9 @@ POST /api/quit                     # 退出程序
 > 接口结构整理：`xxhhlk/raccoon2api`（MIT）。
 > **Loomy（`loomy/*`）**：导入型渠道 —— 凭据由面板「从本机客户端导入」读
 > `C:\Users\Public\Loomy\<hash>\userData\auth-session.json`。上游**无 refresh 端点**，
-> session 约 14 天，到期需重新导入；故 `RefreshToken` 留空、定时任务全关（保活会被
-> 按「无 refresh token」跳过，但每天仍空跑一次并记失败）。鉴权失败是 **HTTP 200 +
+> 客户端声称 session 约 14 天，但**实测过期后仍可用**（某号 `expiresAt` 已过期 3 天，
+> `POST /api/account/resource_detail` 仍返 200），故到期时刻写**远期哨兵**（R94），真实失效
+> 只能靠 401 / 业务码兜底；`RefreshToken` 留空、定时任务全关（无签到任务 ⇒ 不再每天落一条失败）。鉴权失败是 **HTTP 200 +
 > 业务码 `100002`**（不是 401），业务码判定必须排在状态码判定之前。
 > 接口结构整理：`xxhhlk/loomy2api`（MIT）。
 > **智谱清言（`glm/*`）**：网页版私有接口（**非**开放平台 open.bigmodel.cn），凭据是浏览器 Cookie 里的
@@ -409,6 +411,11 @@ POST /api/quit                     # 退出程序
 	①`FirstContentTimeout`（缺省 90s）是**首帧非空内容**的截止，不是首字节截止——`role` 首帧、空 `content`、空 `tool_calls` 都不算内容。上游发完首帧就沉默是 Qoder 系额度耗尽的典型形态，「继续等」只会把 180 秒的锅甩给用户。
 	②到点必须走 `firstContentReader.poison()` 而不是裸 `Close()`：Close 让读取方拿到底层错误串（`io.ErrClosedPipe` / `use of closed network connection`），R90 的 `TruncationCode` 就会把它归成 `upstream_truncated`，首内容超时与上游真断又同形了。
 	③`403` / `402` 上的额度文案必须归 `ErrHardCredit`。`ErrClient` 在 `Rotatable()` 白名单里，而本机每渠道只有 1 个账号 ⇒ 换号必败，唯一结果是「多记一笔账号错误 + 503」。新增额度文案时**8 份 hardMarkers 要同步改**，`internal/provider/r93_quota_markers_test.go` 会在漏改时转红。
+
+31. **签到时刻的归属与签到状态必须由渠道语义决定，不能由全局设置决定**：R94 的三条硬约束。
+	①「面板上的签到时间」只是**全局默认**，不是所有权。Qoder 双区固定在 10:00 开放、MiniMax 在 00:00 重置积分，这些时刻是上游语义；被用户随便改的时间覆盖就当天漏领，且没有任何报错。新增渠道时：用全局时刻的加 `FollowGlobalCheckin: true`，固定窗口或无签到的**不要加**——`internal/app/r94_main_wiring_test.go` 会按白名单双向校验。
+	②「这个渠道没有签到任务」必须显式表达为 `CheckinMinutes: []int{}`，且 `finishCheckin` 在这种渠道上**不落盘也不上报**。否则调度器每天空跑一次、面板每天多一条失败，用户会以为渠道坏了。
+	③无 refresh 端点的渠道（loomy / monkeycode）到期时刻一律写远期哨兵，**不要**按「客户端声称的有效期」估算。`NeedsRefreshLocked` 只看 ExpiresAt，写短期值等于给该渠道定时埋一个恒真刷新失败；真实失效只能靠 401 兜底。
 ## 7. 平台能力差异表（internal/platform）
 
 | 能力 | Windows | macOS | Linux |
@@ -469,8 +476,8 @@ git tag vX.Y.Z && git push origin vX.Y.Z
 
 - [README.md](README.md) — 用户文档
 - [DEVELOPMENT.md](DEVELOPMENT.md) — 开发者文档（面向 AI Agent）
-- [AGENTS.md](AGENTS.md) — 本文件：决议项一句话判据（R1–R93）、架构选型、不变量
-- [docs/DECISIONS.md](docs/DECISIONS.md) — 决议全文（R1–R93）：每条决议的原始背景、踩坑记录与边界条件
+- [AGENTS.md](AGENTS.md) — 本文件：决议项一句话判据（R1–R94）、架构选型、不变量
+- [docs/DECISIONS.md](docs/DECISIONS.md) — 决议全文（R1–R94）：每条决议的原始背景、踩坑记录与边界条件
 - [docs/三接口兼容改造备忘.md](docs/三接口兼容改造备忘.md) — 三接口（Chat/Responses/Anthropic）兼容层架构决策、实施记录、验证清单、已知限制
 - [docs/用量积分流水记账备忘.md](docs/用量积分流水记账备忘.md) — 双流水统计（token/积分）架构、差分算法、实测验证、已知限制（R17）
 

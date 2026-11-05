@@ -233,22 +233,30 @@ func convertAnthropicMessage(role string, content any, idx int) ([]any, error) {
 	if len(toolCalls) > 0 {
 		msg := map[string]any{"role": "assistant", "tool_calls": toolCalls}
 		msg["content"] = strings.Join(texts, "\n") // 工具调用与文本可并存
-		out = append([]any{msg}, out...)           // assistant 消息必须排在 tool 结果之前
-	} else if len(texts) > 0 || len(imgBlocks) > 0 {
-		var content any
-		if len(imgBlocks) > 0 {
-			blocks := make([]any, 0, len(texts)+len(imgBlocks))
-			for _, t := range texts {
-				blocks = append(blocks, map[string]any{"type": "text", "text": t})
-			}
-			blocks = append(blocks, imgBlocks...)
-			content = blocks
-		} else {
-			content = strings.Join(texts, "\n")
-		}
-		out = append([]any{map[string]any{"role": base, "content": content}}, out...)
+		// assistant 消息必须排在 tool 结果之前，故用 prepend。
+		return append([]any{msg}, out...), nil
 	}
-	return out, nil
+	// R94：纯工具结果时不再凭空补一条空 user（Chat 侧 content 为空的 user 无意义）。
+	if len(texts) == 0 && len(imgBlocks) == 0 {
+		return out, nil
+	}
+	var textContent any
+	if len(imgBlocks) > 0 {
+		blocks := make([]any, 0, len(texts)+len(imgBlocks))
+		for _, t := range texts {
+			blocks = append(blocks, map[string]any{"type": "text", "text": t})
+		}
+		blocks = append(blocks, imgBlocks...)
+		textContent = blocks
+	} else {
+		textContent = strings.Join(texts, "\n")
+	}
+	// R94：文本/图片必须**追加到 tool 结果之后**。此前是 prepend，出站顺序变成
+	// user(文本) → tool → tool，违反「assistant.tool_calls 之后必须紧跟同批
+	// role:tool」，上游回 11148 tool calls and tool results do not match。
+	// 触发场景是常态：Claude Code 在工具执行完、用户又发指令时，把 tool_result
+	// 与新文本放在同一条 user 消息里。
+	return append(out, map[string]any{"role": base, "content": textContent}), nil
 }
 
 // normalizeAnthropicRole 把 Anthropic 角色归一化为 Chat 角色。

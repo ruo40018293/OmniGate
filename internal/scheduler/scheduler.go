@@ -64,6 +64,14 @@ type Config struct {
 	// WorkBuddy 国际版使用该模式。
 	ActivitiesOnly bool
 
+	// FollowGlobalCheckin 表示本渠道的签到时刻跟随面板的全局设置。
+	//
+	// R94：面板改签到时间时必须**只推给声明跟随的渠道**。此前是无条件推给所有
+	// 渠道，后果不只是无签到渠道开始每天空跑 —— 更严重的是 Qoder 双区
+	// （固定在 10:00 开放）与 MiniMax（积分 00:00 重置）的固定窗口会被全局时刻
+	// 覆盖，一旦覆盖当天就直接漏领。这些时刻不是我们随便定的，是上游语义。
+	FollowGlobalCheckin bool
+
 	// ExpiringThreshold 临期阈值（config.schedule.expiring_threshold_hours）。
 	// 0 = 24h 兜底。用于签到后计算临期额度（Pick() 的第一排序键）。
 	ExpiringThreshold time.Duration
@@ -581,12 +589,24 @@ func (s *Scheduler) CheckinAccount(uid string) (CheckinResult, error) {
 // finishCheckin 统一收尾：记录签到状态并上报观察者。
 // ActivitiesOnly 渠道跳过这两步（无签到语义，且需对用户透明）。
 func (s *Scheduler) finishCheckin(uid string, r CheckinResult) CheckinResult {
+	// R94：本渠道没有签到任务（CheckinMinutes 被显式置为空切片）时，既不落盘
+	// 也不上报。否则面板会把「每次必然失败的调用」显示成一条条签到失败记录，
+	// 用户以为渠道坏了，而事实是这个渠道根本没有签到活动。
+	if len(s.CheckinMinutes()) == 0 {
+		return r
+	}
 	if !s.cfg.ActivitiesOnly {
 		s.cfg.Pool.RecordCheckin(uid, r.OK, r.Msg)
 		s.notifyCheckin(r)
 	}
 	return r
 }
+
+// FollowsGlobalCheckin 本渠道的签到时刻是否跟随面板全局设置。
+//
+// 面板改时间时只有返回 true 的渠道会被推送新时刻；固定窗口渠道
+// （Qoder 双区 10:00、MiniMax 00:05）与无签到渠道必须返回 false。
+func (s *Scheduler) FollowsGlobalCheckin() bool { return s.cfg.FollowGlobalCheckin }
 
 // checkinOne 单账号签到 + 余额刷新 + 解冻 + 记录签到状态。
 //

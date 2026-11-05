@@ -1,4 +1,4 @@
-# 决议全文（R1–R93）
+# 决议全文（R1–R94）
 
 > 本文件是 `AGENTS.md` 第 1 节的**完整原文**——每条决议「为什么这么做 / 踩过什么坑 / 边界在哪」都在这里。
 > `AGENTS.md` 只保留每条的一句话判据，随每次会话自动加载，用来提醒「别推翻什么」；
@@ -781,3 +781,57 @@ M5 `tool_calls: []` 被当成内容；M6 qodercn 整段漏掉额度文案；M7 l
 - `traework` 的 `solo error code=3003/4008`（`http request failed` / `Your requests have exceeded the quota`）
   语义未确认是「日额度」还是「窗口限流」，未改分类 —— 猜一个 12h 冷却可能反而丢一整天渠道。
 - 面板未加「首内容超时」的独立展示位，沿用 `statRow.Err` 文案。
+
+## R94 — 渠道语义不能被全局设置覆盖
+
+**触发**：上游 `rockswang/wild-work` 从 v2.11.1（2026-10-30）走到 v2.11.5（2026-11-04），中间 v2.11.2 / v2.11.4 / v2.11.5 共 14 个内容提交。逐条对着我们的代码核，三条是**逐字同型**：R143 的 Anthropic 入站工具顺序、R150 的「无签到渠道被渲染成签到失败」、以及 loomy 远期到期时刻。其余条目（CodeArts 三项、oczen TLS 指纹、R146 粘性让位临期号）判定不适用或低价值 —— 我们没有那两个渠道，且每个渠道只有一个账号，没有可让位的对象。
+
+**① Anthropic 入站工具结果顺序**
+
+改动前 `internal/gateway/anthropic.go` 的转换尾巴：
+
+```go
+} else if len(texts) > 0 || len(imgBlocks) > 0 {
+    ...
+    out = append([]any{map[string]any{"role": base, "content": content}}, out...)
+}
+```
+
+`out` 此前已经装了 `role=tool` 消息，这一行又把文本 **prepend** 到前面，出站顺序是 `user(文本) → tool → tool`。Chat 协议要求 `assistant.tool_calls` 之后紧跟同一批 `role:tool`，中间插一条 user 就被拒。
+触发场景是常态而不是边界：Claude Code 在工具执行完、用户又发指令时，把 `tool_result` 与新文本放在同一条 user 消息里。
+后果分渠道不同：workbuddy 明确回 `11148 tool calls and tool results do not match`；qoder 系只回信封 `Error in upstream response`（正是我们 R90 见过的那种无信息量 502/503）。
+
+改法：文本/图片 `append` 到 `out` **之后**；纯工具结果（没有文本也没有图片）直接返回，不再凭空补一条 `content` 为空的 user。
+assistant 的 `tool_calls` 分支保持 prepend 并提前 return。
+
+**② 签到三根因**
+
+1. 前端顺序反了：`cmd/omnigate/web/app.js` 里 `a.last_checkin_at ? ... : (noCheckin ? 无签到 : 未签到)`。巡检每轮都会写 `last_checkin_at`，所以「无签到」这个灰色分支**永远不可达** —— 用户从没点过签到，却看到一条条成功/失败标签。
+2. 全局时刻被无条件推给所有渠道：`internal/app/app.go` 的 `SetCheckinTimes` 遍历 `a.runtimes` 全量调用 `SetCheckinMinutes`。危险的不只是无签到渠道开始每天空跑，而是 **Qoder 双区（固定 10:00 开放）与 MiniMax（00:00 重置积分）的固定窗口会被面板时刻覆盖**，一旦覆盖当天就漏领。
+3. 调度器没有「本渠道没有签到任务」闸门：`internal/scheduler/scheduler.go` 的 `finishCheckin` 只有 `ActivitiesOnly` 一个条件。
+
+改法：`scheduler.Config.FollowGlobalCheckin bool` + `FollowsGlobalCheckin() bool`；`SetCheckinTimes` 只推给返回 true 的渠道；`finishCheckin` 在 `len(CheckinMinutes())==0` 时既不落盘也不上报；前端先判 `noCheckin`。
+白名单（写死在 `cmd/omnigate/main.go`）：跟随全局的是 workbuddy / traework / workbuddyai / raccoon / glm；**绝不跟随**的是 qodercn / qodercom（固定 10:00）、minimax（固定 00:05）、以及无签到的 qoder / qwenwork / monkeycode / loomy / cline。
+
+**③ Loomy 远期到期时刻**
+
+`internal/app/import_local.go` 的 `importLoomy` 原先写 `ExpiresAt: updatedAt + 14*24*3600`，注释还说「避免 NeedsRefreshLocked 因 ExpiresAt<=0 恒真」。问题在于 `internal/auth/auth.go` 的 `NeedsRefreshLocked` **只看 ExpiresAt、不看 refreshToken**：14 天一到它就恒真，而 `internal/loomy/client.go` 的 `RefreshToken` 恒返回 `ErrSessionDead` ⇒ 面板红字「token refresh failed」+ 该号被跳过 + 每 10 分钟一次必然失败的刷新。
+
+同一个文件里 `importMonkeyCode` 早就用了 `time.Now().AddDate(50, 0, 0).Unix()` 哨兵 —— loomy 漏了这条约定。上游的反证是实测的：某号 `expiresAt` 已于 2026-10-27 过期，2026-10-30 仍 `POST /api/account/resource_detail` 返回 200（`remain=17518`）⇒ 「14 天有效期」是客户端侧估算，真实失效只能靠 401 兜底。
+
+改法：导入时写远期哨兵；新增 `internal/app/heal_loomy.go` 的 `healLoomyExpiry()` 启动自愈（在 `New` 里紧跟 `healRaccoonProtocol()` 调用），把历史版本留下的短期到期时刻一次性归一：只改 `auth.expiresAt` 一个字段（token 是加密串，重写会毁掉凭据）、已是哨兵（> 10 年）的不改写（幂等）、解析失败的跳过并留一行日志（不阻断启动）。
+
+**闸门与验证**
+
+- `internal/gateway/r94_anthropic_tool_order_test.go`：tool_result+文本的顺序、纯工具结果不补空 user、assistant tool_calls 对照、字符串简写回归。
+- `internal/scheduler/r94_checkin_test.go`：`FollowsGlobalCheckin` 默认 false（固定窗口渠道依赖这个默认值）、无签到渠道 `finishCheckin` 不落盘、有签到渠道照常落盘（对照，防止闸门写成「永不记录」）。
+- `internal/app/r94_checkin_push_test.go`：面板改时间只推给白名单渠道，且全局时刻仍写进配置。
+- `internal/app/r94_loomy_heal_test.go`：14 天到期被归一、幂等、`expiresAt=0` 也修、坏 JSON 不 panic 且不改文件。
+- `internal/app/r94_main_wiring_test.go`：**源码级白名单闸门**，解析 `cmd/omnigate/main.go` 的每个 `scheduler.Config` 字面量，双向校验五个跟随、八个不跟随。这条约束的表达位置就是装配代码，行为测试要把整个 `main()` 搬进测试，代价远大于收益；而一旦误给 qodercn 加上 `FollowGlobalCheckin`，后果是当天静默漏领、单测不会红 —— 正是必须用闸门锁住的类型。
+- 六处变异全部 RED：文本改回 prepend / 删空内容闸门 / 删 `finishCheckin` 闸门 / 去掉 `FollowsGlobalCheckin` 过滤 / 给 qodercn 加标记 / Loomy 阈值失效。
+
+**边界与已知未做**
+
+- 上游 R151（sanitize 收敛）**本轮不做**：它同时停用了 3 条我们仍在依赖的规则（裸 `11128`、WebGUI 段、billing 裸键名），而我们有自己 R50/R59 的探针证据说明那些片段确实触发拦截 —— 他们的探针对我们的 CN 渠道没有背书，必须自建探针后再改。其中两条与探针无关的（身份替换目标从 `Claude Code` 改为 `DSH`、清洗只做 system/assistant 而不动用户原话）留待单独一轮。
+- R147（吞吐改 60 秒滑窗）不做：我们用的是同一套「Σ生成 token / (总时长−TTFB)」口径，同样会夸大（上游同源项目实测 1.8–3.6 倍），但改它要动 stats 结构 + 落盘格式 + 分帧写入 + 前端字段，属独立工程。
+- R112b（临期展示 1/2/7 可配）不做：纯展示项，且我们没有 `expiring_days` 配置面。

@@ -416,6 +416,7 @@ func main() {
 		Pool: wbPool, Upstream: wbUp, Name: "workbuddy",
 		CheckinMinutes: checkinMinutes, KeepaliveHours: cfg.Schedule.KeepaliveHours,
 		ExpiringThreshold: expiringThreshold, Ledger: lg,
+		FollowGlobalCheckin:  true,
 		GrowthRedeemStreak:   cfg.Schedule.GrowthRedeemStreak,
 		GrowthTravel:         cfg.Schedule.GrowthTravel,
 		GrowthTravelLocation: cfg.Schedule.GrowthTravelLocation,
@@ -429,7 +430,7 @@ func main() {
 	// 持续更久。若不安排延迟重试，本时段不会标记完成，只能干等到下一个签到
 	// 时刻（默认 21:00）—— 当天就这么丢了（当天 09:00 撞限流，14:26 手动才补领）。
 	// TraeWork 是唯一有账号级限流的渠道，故只在此打开。
-	trSch := scheduler.New(scheduler.Config{Pool: trPool, Upstream: trUp, Name: "traework", CheckinMinutes: checkinMinutes, KeepaliveHours: cfg.Schedule.KeepaliveHours, ExpiringThreshold: expiringThreshold, Ledger: lg, RetryOnFailure: true})
+	trSch := scheduler.New(scheduler.Config{Pool: trPool, Upstream: trUp, Name: "traework", CheckinMinutes: checkinMinutes, FollowGlobalCheckin: true, KeepaliveHours: cfg.Schedule.KeepaliveHours, ExpiringThreshold: expiringThreshold, Ledger: lg, RetryOnFailure: true})
 	// Qoder 无签到活动：调度器只做 token keepalive（每日 refresh 保活）。
 	// CheckinMinutes 用显式空切片关闭（传 nil 会被 scheduler.New 补成默认 9:00/21:00）。
 	qdSch := scheduler.New(scheduler.Config{Pool: qdPool, Upstream: qdUp, Name: "qoder", CheckinMinutes: []int{}, KeepaliveHours: cfg.Schedule.KeepaliveHours, ExpiringThreshold: expiringThreshold, Ledger: lg})
@@ -439,7 +440,7 @@ func main() {
 	// Keepalive 关闭（token 有效期 365 天，无需每日刷新），用显式空切片关闭
 	// （传 nil 会被 scheduler.New 补成默认 22:00）。
 	wbaSch := scheduler.New(scheduler.Config{Pool: wbaPool, Upstream: wbaUp, Name: "workbuddyai",
-		CheckinMinutes: checkinMinutes, KeepaliveHours: []int{}, ActivitiesOnly: true, ExpiringThreshold: expiringThreshold, Ledger: lg})
+		CheckinMinutes: checkinMinutes, KeepaliveHours: []int{}, ActivitiesOnly: true, ExpiringThreshold: expiringThreshold, Ledger: lg, FollowGlobalCheckin: true})
 	// 千问办公：无签到活动（每日积分服务端被动发放，无需保活/领取）；
 	// CheckinMinutes + KeepaliveHours 均为显式空切片，本渠道没有任何定时任务
 	// （token 由 deviceToken/refresh 按需轮换，定时保活反而会与千问办公 App
@@ -465,7 +466,7 @@ func main() {
 	// 故保活比其它渠道更密（每 4 小时一次）以减少「请求先 401 再刷新」的额外往返；
 	// 请求路径上的 refreshIfSessionDead 仍会兜底自愈。
 	rcSch := scheduler.New(scheduler.Config{Pool: rcPool, Upstream: rcUp, Name: "raccoon",
-		CheckinMinutes: checkinMinutes, KeepaliveHours: []int{1, 5, 9, 13, 17, 21}, ExpiringThreshold: expiringThreshold, Ledger: lg})
+		CheckinMinutes: checkinMinutes, KeepaliveHours: []int{1, 5, 9, 13, 17, 21}, ExpiringThreshold: expiringThreshold, Ledger: lg, FollowGlobalCheckin: true})
 	// Loomy：无签到，且**上游无 refresh 端点**（session 14 天，到期需重新导入）；
 	// 定时任务全部关闭（显式空切片）：refreshToken 为空，保活虽会按「无 refresh token」
 	// 跳过、不会误禁用账号，但每天仍空跑一次并记录失败，故直接关掉。
@@ -487,7 +488,7 @@ func main() {
 		CheckinMinutes: []int{}, KeepaliveHours: []int{}, ExpiringThreshold: expiringThreshold, Ledger: lg})
 	glmSch := scheduler.New(scheduler.Config{Pool: glmPool, Upstream: glmUp, Name: "glm",
 		CheckinMinutes: checkinMinutes, KeepaliveHours: cfg.Schedule.KeepaliveHours,
-		ExpiringThreshold: expiringThreshold, Ledger: lg})
+		ExpiringThreshold: expiringThreshold, Ledger: lg, FollowGlobalCheckin: true})
 
 	runtimes := map[provider.Kind]*server.Runtime{
 		provider.WorkBuddy: {Kind: provider.WorkBuddy, Pool: wbPool, Upstream: wbUp, StaticModels: server.WorkBuddyStaticModels()},

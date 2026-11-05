@@ -579,9 +579,14 @@ function renderAccounts() {
       ? "无需手动签到：定时自动对话保活并领取日活奖励"
       : `${groupName} 不支持手动签到`;
 
-    const checkinTag = a.last_checkin_at
-      ? `<span class="tag ${a.last_checkin_ok ? "ok" : "bad"}">${a.last_checkin_ok ? "签到成功" : "签到失败"}</span>`
-      : (noCheckin ? `<span class="tag neutral" title="${esc(noCheckinTitle)}">${noCheckinText(a.group)}</span>` : '<span class="tag neutral">未签到</span>');
+    // R94：先判「本渠道有没有签到任务」，再看时间戳。此前顺序反了——巡检每轮
+    // 都会写 last_checkin_at，于是无签到渠道的灰色「无签到」分支永远不可达，
+    // 用户看到的是自己从没点过、却一条条成功/失败的签到标签。
+    const checkinTag = noCheckin
+      ? `<span class="tag neutral" title="${esc(noCheckinTitle)}">${noCheckinText(a.group)}</span>`
+      : (a.last_checkin_at
+        ? `<span class="tag ${a.last_checkin_ok ? "ok" : "bad"}">${a.last_checkin_ok ? "签到成功" : "签到失败"}</span>`
+        : '<span class="tag neutral">未签到</span>');
 
     const disabledClass = a.disabled ? " disabled" : "";
     const disableIcon = a.disabled ? "▶" : "⏸";

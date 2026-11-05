@@ -343,22 +343,22 @@ func (a *App) importLoomy() (*ImportLocalResult, error) {
 	if uid == "" {
 		uid = "default"
 	}
-	// Loomy 无 refresh 端点，且 session 是客户端登录时申请 14 天有效期的短期凭据。
-	// 用 updatedAt + 14d 估算到期时刻：避免 NeedsRefreshLocked 因 ExpiresAt<=0 恒真
-	// 而触发一个必然失败的刷新。
-	base := payload.UpdatedAt
-	if base > 1e12 { // 毫秒 → 秒
-		base /= 1000
-	}
-	if base <= 0 {
-		base = time.Now().Unix()
-	}
+	// Loomy 无 refresh 端点，refreshToken 留空；到期时刻写**远期哨兵**而不是
+	// updatedAt + 14 天。
+	//
+	// R94：14 天估算是错的。实测某账号 expiresAt 已于 2026-10-27 过期，
+	// 2026-10-30 仍 POST /api/account/resource_detail 返回 200（remain=17518）
+	// —— 上游根本没有按这个时刻失效，真实失效只能靠 401 兜底。
+	// 而 auth.NeedsRefreshLocked 只看 ExpiresAt、不看 refreshToken，所以写 14 天
+	// 会让第 15 天起 NeedsRefresh 恒真 → loomy.RefreshToken 恒返回 ErrSessionDead
+	// → 面板红字「token refresh failed」+ 该号被跳过 + 每 10 分钟一次必然失败的刷新。
+	// 与同文件 monkeycode（importMonkeyCode）用的是同一条约定。
 	doc := authDoc{
 		Auth: authSection{
 			AccessToken: session,
 			// 故意留空：scheduler 对 refreshToken 为空的账号会跳过保活（不会产生无意义失败）。
 			RefreshToken: "",
-			ExpiresAt:    base + 14*24*3600,
+			ExpiresAt:    time.Now().AddDate(50, 0, 0).Unix(),
 			Domain:       "/api/v1",
 			ApiHost:      "https://loomyad.xunfei.cn",
 		},
@@ -372,7 +372,7 @@ func (a *App) importLoomy() (*ImportLocalResult, error) {
 	a.afterAccountAdded(provider.Loomy)
 	return &ImportLocalResult{
 		Channel: "loomy", UID: uid, File: filepath.Base(file),
-		Note: "Loomy 无 refresh 端点（session 约 14 天），到期后需在客户端重新登录并再次导入",
+		Note: "Loomy 无 refresh 端点：session 由上游按需失效（实测过期后仍可用），真实失效时面板会提示重新从客户端导入",
 	}, nil
 }
 

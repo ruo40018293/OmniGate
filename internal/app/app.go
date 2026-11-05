@@ -216,6 +216,7 @@ func New(opts Options) (*App, error) {
 	log.SetOutput(&logWriter{app: a})
 	a.loadPricingCache()
 	a.healRaccoonProtocol()
+	a.healLoomyExpiry()
 	return a, nil
 }
 
@@ -1780,7 +1781,9 @@ func (a *App) SetCheckinTimes(times []string) error {
 		return err
 	}
 	for _, rt := range a.runtimes {
-		if rt != nil && rt.Scheduler != nil {
+		// R94：只推给声明跟随全局时刻的渠道。固定窗口渠道（Qoder 双区 10:00
+		// 开放、MiniMax 00:00 重置积分）与无签到渠道一旦被覆盖，当天直接漏领。
+		if rt != nil && rt.Scheduler != nil && rt.Scheduler.FollowsGlobalCheckin() {
 			rt.Scheduler.SetCheckinMinutes(clean)
 		}
 	}
