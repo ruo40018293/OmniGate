@@ -168,26 +168,26 @@ func TestApplyLedgerExpireReplaceAndNormalize(t *testing.T) {
 	day := todayKey(now)
 
 	// 首轮：workbuddy 100 + traecode 50（应归一为 traework）+ 空渠道归 unknown 7
-	s.ApplyLedgerExpire(day, map[string]int64{"workbuddy": 100, "traecode": 50, "": 7})
+	s.ApplyLedgerExpire(day, []LedgerExpire{{Channel: "workbuddy", Amount: 100}, {Channel: "traecode", Amount: 50}, {Channel: "", Amount: 7}})
 	snap := s.Snapshot(now)
 	if snap.CreditExpired != 157 {
 		t.Fatalf("credit_expired = %d, want 157（100+50+7）", snap.CreditExpired)
 	}
 
 	// 次轮全量替换（非累加）：只报 workbuddy 30，旧值必须被整体替换为 30
-	s.ApplyLedgerExpire(day, map[string]int64{"workbuddy": 30})
+	s.ApplyLedgerExpire(day, []LedgerExpire{{Channel: "workbuddy", Amount: 30}})
 	if snap := s.Snapshot(now); snap.CreditExpired != 30 {
 		t.Fatalf("全量替换语义破坏: credit_expired = %d, want 30", snap.CreditExpired)
 	}
 
 	// 空 map = 今日无作废 → 清零（不是保留旧值）
-	s.ApplyLedgerExpire(day, map[string]int64{})
+	s.ApplyLedgerExpire(day, []LedgerExpire{})
 	if snap := s.Snapshot(now); snap.CreditExpired != 0 {
 		t.Fatalf("空 map 应清零: credit_expired = %d, want 0", snap.CreditExpired)
 	}
 
 	// v<=0 值跳过：负数与 0 不是合法作废额
-	s.ApplyLedgerExpire(day, map[string]int64{"workbuddy": -5, "traework": 0})
+	s.ApplyLedgerExpire(day, []LedgerExpire{{Channel: "workbuddy", Amount: -5}, {Channel: "traework", Amount: 0}})
 	if snap := s.Snapshot(now); snap.CreditExpired != 0 {
 		t.Fatalf("非正值应跳过: credit_expired = %d, want 0", snap.CreditExpired)
 	}
@@ -198,19 +198,19 @@ func TestApplyLedgerExpireReplaceAndNormalize(t *testing.T) {
 func TestApplyLedgerExpireDayGuard(t *testing.T) {
 	s := newTestStats(t)
 	now := time.Now()
-	s.ApplyLedgerExpire(todayKey(now), map[string]int64{"workbuddy": 100})
+	s.ApplyLedgerExpire(todayKey(now), []LedgerExpire{{Channel: "workbuddy", Amount: 100}})
 	if s.Snapshot(now).CreditExpired != 100 {
 		t.Fatalf("前置失败")
 	}
 
 	// 空 day：调用方失败时不应调用，即便误调也不清零（保留旧值）
-	s.ApplyLedgerExpire("", map[string]int64{"workbuddy": 999})
+	s.ApplyLedgerExpire("", []LedgerExpire{{Channel: "workbuddy", Amount: 999}})
 	if got := s.Snapshot(now).CreditExpired; got != 100 {
 		t.Fatalf("空 day 不应覆盖: credit_expired = %d, want 100", got)
 	}
 
 	// 昨日 day：整批丢弃
-	s.ApplyLedgerExpire(todayKey(now.Add(-24*time.Hour)), map[string]int64{"workbuddy": 50})
+	s.ApplyLedgerExpire(todayKey(now.Add(-24*time.Hour)), []LedgerExpire{{Channel: "workbuddy", Amount: 50}})
 	if got := s.Snapshot(now).CreditExpired; got != 100 {
 		t.Fatalf("昨日 day 应整批丢弃: credit_expired = %d, want 100", got)
 	}
@@ -234,7 +234,7 @@ func TestPlatformRowsNetAndClamp(t *testing.T) {
 		{UID: "tw", Group: "traework", Credits: 470},  // −30
 		{UID: "qw", Group: "qwenwork", Credits: 490},  // −10
 	}, now.Add(time.Minute))
-	s.ApplyLedgerExpire(day, map[string]int64{"workbuddy": 110, "qwenwork": 40})
+	s.ApplyLedgerExpire(day, []LedgerExpire{{Channel: "workbuddy", Amount: 110}, {Channel: "qwenwork", Amount: 40}})
 
 	snap := s.Snapshot(now)
 	byGroup := map[string]PlatformRow{}
@@ -260,7 +260,7 @@ func TestPlatformRowsNetAndClamp(t *testing.T) {
 func TestLedgerExpireDayRoll(t *testing.T) {
 	s := newTestStats(t)
 	day1 := time.Now()
-	s.ApplyLedgerExpire(todayKey(day1), map[string]int64{"workbuddy": 200})
+	s.ApplyLedgerExpire(todayKey(day1), []LedgerExpire{{Channel: "workbuddy", Amount: 200}})
 	if s.Snapshot(day1).CreditExpired != 200 {
 		t.Fatalf("前置失败")
 	}
@@ -277,7 +277,7 @@ func TestLedgerExpireOrphanChannel(t *testing.T) {
 	now := time.Now()
 	s.ApplyPoll([]Account{{UID: "wb", Group: "workbuddy", Credits: 500}}, now)
 	s.ApplyPoll([]Account{{UID: "wb", Group: "workbuddy", Credits: 460}}, now.Add(time.Minute)) // 消耗 40
-	s.ApplyLedgerExpire(todayKey(now), map[string]int64{"ghost": 66})
+	s.ApplyLedgerExpire(todayKey(now), []LedgerExpire{{Channel: "ghost", Amount: 66}})
 
 	snap := s.Snapshot(now)
 	var ghostRow *PlatformRow
@@ -305,7 +305,7 @@ func TestTraeAllocationDeductsExpire(t *testing.T) {
 	s.AddUsage("traework/b", 500, 500, 0, 0, 0, now)                                           // 1000 token
 
 	// trae 系作废 100（traecode 键也应归一计入）→ 分摊基数 300−100=200
-	s.ApplyLedgerExpire(todayKey(now), map[string]int64{"traecode": 100})
+	s.ApplyLedgerExpire(todayKey(now), []LedgerExpire{{Channel: "traecode", Amount: 100}})
 	byName := map[string]ModelStat{}
 	for _, m := range s.Snapshot(now).Models {
 		byName[m.Model] = m
@@ -318,7 +318,7 @@ func TestTraeAllocationDeductsExpire(t *testing.T) {
 	}
 
 	// 作废 350 > 差值 300 → 基数 0，不做分摊（保持 0，不出现负数）
-	s.ApplyLedgerExpire(todayKey(now), map[string]int64{"traework": 350})
+	s.ApplyLedgerExpire(todayKey(now), []LedgerExpire{{Channel: "traework", Amount: 350}})
 	for _, m := range s.Snapshot(now).Models {
 		if m.Credit < 0 {
 			t.Fatalf("%s 超额作废时不应出现负积分，实际 %v", m.Model, m.Credit)

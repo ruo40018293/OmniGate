@@ -134,7 +134,13 @@ const FAKE_STATS = {
     credit_expired: 100, credit_used: 50, tokens: 12345, expire_7d: 300, expire_today: 100, expire_tomorrow: 0,
   }],
   models: [{ model: "traework/DeepSeek-V4", reqs: 3, tokens: 5000, credit: 12.5, avg_ttfb_ms: 800, avg_tok_per_sec: 45.2, perf_samples: 3 }],
-  expiry: [{ uid: "4298452267967801", nickname: "健康号", group: "traework", expire_at: "2026-10-08", days_left: 2, amount: 100, today_out: 30, burn_forecast: 45, risk: true }],
+  // R97：① 健康号 today_out=30 里含 10 分到期作废 ⇒ 花费 20 · 今日已废 10；
+  // ② 远期号故意不写 today_spent/today_expired（老后端形态）⇒ 必须退回 today_out=7。
+  expiry: [
+    { uid: "4298452267967801", nickname: "健康号", group: "traework", expire_at: "2026-10-08", days_left: 2, amount: 100, today_out: 30, today_spent: 20, today_expired: 10, burn_forecast: 45, risk: true },
+    { uid: "4298452267967802", nickname: "闲置号", group: "qwenwork", expire_at: "2026-10-09", days_left: 3, amount: 100, today_out: 0, today_spent: 0, today_expired: 0, burn_forecast: -1, risk: true },
+    { uid: "4298452267967803", nickname: "老后端号", group: "traework", expire_at: "2026-10-10", days_left: 4, amount: 100, today_out: 7, burn_forecast: 45, risk: false },
+  ],
   rotation: [{
     group: "traework",
     current: { uid: "1606848467182378", nickname: "中招号", group: "traework", credits: 2050, expiring: 0, sticky: "12/50" },
@@ -170,7 +176,14 @@ check("接棒顺序含 ① 候补", stRotation.includes("① 健康号"));
 const stExpiry = document.getElementById("stExpiry").innerHTML;
 check("临期风险行高亮（st-risk）", stExpiry.includes("st-ex-row st-risk"));
 check("临期剩余天数文案", stExpiry.includes("2 天后到期"));
-check("预计作废量 = 额度−外推消耗（55分）", stExpiry.includes("预计作废 55分"));
+check("到期前还会废量 = 额度−外推消耗（55分）", stExpiry.includes("到期前还会废 55分"));
+check("到期前还会废不为负（forecast<0 按全部额度）",
+  stExpiry.includes("到期前还会废 100分") && !/到期前还会废\s*-\d/.test(stExpiry));
+check("今日花费取净花费而非差值（花费 20，非 30）",
+  stExpiry.includes("花费 20") && !stExpiry.includes("花费 30"));
+check("今日作废额带批次限定词（今日已废 10）", stExpiry.includes("今日已废 10"));
+check("老后端无 today_spent 时退回差值（花费 7）",
+  stExpiry.includes("花费 7") && !stExpiry.includes("NaN"));
 
 const stModels = document.getElementById("stModels").innerHTML;
 check("Trae 系模型积分为估算（≈ 前缀）", stModels.includes("≈12.50"));

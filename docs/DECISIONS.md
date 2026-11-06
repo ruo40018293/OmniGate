@@ -1,4 +1,4 @@
-# 决议全文（R1–R96）
+# 决议全文（R1–R97）
 
 > 本文件是 `AGENTS.md` 第 1 节的**完整原文**——每条决议「为什么这么做 / 踩过什么坑 / 边界在哪」都在这里。
 > `AGENTS.md` 只保留每条的一句话判据，随每次会话自动加载，用来提醒「别推翻什么」；
@@ -962,3 +962,26 @@ if rate <= 0 && !explicit && m.ID != "auto" {
   这是两个独立的面，不能混为一谈。
 - 本次未做：面板对「显式免费」给独立的视觉分区（目前只靠 `✦ Free` 徽标 +
   `(0.00x)` 后缀）；`allUnpriced` 的默认显示策略未改（R65 定的规则仍然成立）。
+
+
+## R97 — 临期「花费」必须是净花费，到期作废不得当成消耗速度
+
+**触发**：2026-11-06 增量盘点上游 wild-work，v2.11.5（2026-11-04T10:52Z）之后无新 tag / 无新 release / AGENTS.md 决议表仍停在 R155，只有 5 个提交，全是 PR #217「临期预测（expiry forecast）」同一个 bug 的修复（`dffbc6437` merge / `c865a5c29` merge with legacy snapshot guard / `cda5c2bb6` 文案补批次限定词 / `2bfea53c8` 复审 / `9ea337871` 主修）。对过我们代码，**逐字同型**，故吸收。
+
+**上游 bug**：`creditOut` 是余额下降差值，不区分「花掉」与「到期作废」。实测场景：昨领 300 分今晨 00:06 整包作废（一分未用）、07:15 又领新 300 ⇒ `creditOut=300` 全是作废、真实花费 0，旧口径外推出「已耗 300 · 预计作废 264」——都花完了还能作废一半，自相矛盾。
+
+**推翻的三个假设**：①「today_out 就是今日花费」——它是差值，含作废；②「ledger 的 expire 按渠道汇总就够」——渠道维度只够平台表扣分，临期行要按**账号**扣；③「InfoOnly 条目不过差分也无妨」——monkeycode「每日 Token 额度」单位是 token 不是分，参与差分会产出巨额假 expire/spend 被临期列当「今日作废」。
+
+**做法（4 段，适配我们较旧的结构）**：
+1. `internal/stats/stats.go`：`Version` "1"→"2"；`ExpiryRow` 加 `TodaySpent`/`TodayExpired`（`today_out` 收窄为兼容字段）；`Stats` 加 `expiredByUID map[string]int64`（`New` 初始化、`rollDayLocked` 重置）；新增 `type LedgerExpire struct{ Channel string; UID string; Amount int64 }`，`ApplyLedgerExpire(day string, items []LedgerExpire)` 按 Channel 归组（供平台表）+ 按 UID 累加（供临期行），空 UID 不进 uid 维度，仍是**全量替换**与 day 守卫；新增 `netSpentLocked(a) = max(0, a.creditOut − expiredByUID[a.uid])`；`burnForecastLocked` 用 `spent := s.netSpentLocked(a)` 且 `spent <= 0` 返回 -1，外推用 spent；`expiryRowsLocked` 填两字段。
+2. `internal/app/stats_feed.go` `feedLedgerExpire`：`byGroup map[string]int64` → `items []statsEngine.LedgerExpire`，逐条 `{Channel: e.Channel, UID: e.UID, Amount: -e.Amount}`。**保留 `if q := a.ledger.Query(1, nil); q != nil` nil 守卫**（上游删了，但那是 review nit，我们 Query 可能返 nil）。
+3. `internal/ledger/credit.go` `DiffCredits`：先用本次 `cur` 里 `InfoOnly` 项的 `itemKey` 建 `infoKeys`，遍历 `prev` 时跳过这些 key（清掉旧版误存）；`for _, it := range cur` 改 `if !it.Usable || it.InfoOnly { continue }`。`provider.ResourceItem.InfoOnly` 本就存在，`Summarize`/`Expiring` 早已跳过，只差这一处。
+4. `cmd/omnigate/web/app.js` `renderExpiry`：表头「额度 · 今日已耗」→「额度 · 今日花费」+ 长 title 说明三数口径不同；`spent = today_spent 有效 ? today_spent : today_out`（老后端退回，不至空白/NaN）；`expired = today_expired || 0`；`expiredTxt = expired > 0 ? " · 今日已废 N" : ""`；`burn` 文案「预计作废」→「**到期前还会废**」并 `burn_forecast < 0` 时按全部额度兜底（不出负数）；行内「已耗」→「花费」。**配色维持 risk-based**（上游改 urgency，我们无该字段）。`scripts/ui-static-check.mjs` 夹具扩成 3 行（健康号 `today_out=30`/`today_spent=20`/`today_expired=10`、闲置号 `forecast=-1`、老后端号无 `today_spent` 退回 7），闸门 5 条（花费 20 非 30 / 今日已废 10 / 到期前还会废 55分与 100分 / 无负数 / 退回花费 7 无 NaN）。
+
+**契约边界**：`internal/stats/usage.go:226` 与 `PlatformRows` 里的 `CreditUsed = CreditOut − CreditExpired` 是**渠道维度**口径，本轮保持不动；`internal/stats/views_test.go` 12 处 `ApplyLedgerExpire(..., map[string]int64{...})` 全部同步为 `[]LedgerExpire{{Channel:...,Amount:...}}`；`expiredByUID` 与轮询是两条链路，作废可能落在差值抓不到的窗口，倒挂一律钳 0；「今日已废」与「到期前还会废」是**不同的包**（前者账号今天已清零的，后者本行这批到期前的预估），文案必须带批次限定词。
+
+**闸门**：`internal/stats/r97_netspent_test.go` 5 例（净值拆分 / 全量替换+跨天清零 / 空 UID 只进渠道 / `TestR97BurnForecastUsesNetSpent` 1h 观测差值 100 作废 40 净 60 距到期 83h ⇒ forecast **4980**，退回 `creditOut` 会算 8300 / Version==2）；`internal/ledger/r97_infoonly_test.go` 2 例（InfoOnly 不产流水 / 旧快照残留清理不产巨额 expire）；`node scripts/ui-static-check.mjs` 5 条 R97 闸门全绿。
+
+**变异验证（6 处全红）**：M1 `netSpentLocked` 不扣作废；M2 `burnForecastLocked` 退回 `creditOut`；M3 `expiredByUID` 漏跨天重置；M4 `DiffCredits` 不过滤 `InfoOnly`；M5 旧快照 InfoOnly 残留不清理；M6 前端不取 `today_spent` 而用差值。M2 一度 GREEN(BAD)：净值用例观测仅 1min < `burnMinObserve`(0.5h) 走不到外推分支，补 1h 观测用例后转红。
+
+**已知未做**：上游 Urgency/HoursLeft/精确时刻配色重构（我们 `ExpiryRow` 无这些字段，属另一功能）；`scripts/ui-static-check.mjs` 上游还改了 FAKE_STATS 配色断言，不在本轮范围。上游把 `feedLedgerExpire` 的 nil 守卫删了，我们保留（无收益的改动不跟）。

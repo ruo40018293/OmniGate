@@ -143,8 +143,9 @@ func channelBooksUsage(snapAll snapshots, ch string) bool {
 // DiffCredits 余额刷新后差分记账：cur 为本次 UserResourceDetail 拿到的条目，
 // balance 为本次可消耗余额（事件后的 balance_after）。
 // 与快照逐条目对比，产生 0..n 条流水并更新快照；返回事件数。
-// 只统计 Usable=true 的条目——不可消耗池（如 TraeWork ep=1）本工具动不到，
-// 其变动与路由无关，混入会污染 earn/spend 口径。
+// 只统计 Usable=true 且非 InfoOnly 的条目——不可消耗池（如 TraeWork ep=1）本工具动不到，
+// 纯展示条目（InfoOnly，如 monkeycode「每日 Token 额度」单位是 token 不是分）混进来
+// 会把 token 数当成积分差分，产出假的 expire/spend 污染临期口径（R97）。
 func (l *Ledger) DiffCredits(ch, uid string, balance int64, cur []provider.ResourceItem) int {
 	now := time.Now()
 	sk := ch + "/" + uid
@@ -156,7 +157,17 @@ func (l *Ledger) DiffCredits(ch, uid string, balance int64, cur []provider.Resou
 	// 两个来源取并：① 快照里的 "@ch" 保留键（历年累积的渠道级事实）；
 	// ② 本账号旧快照里留下的 used>0（无 "@ch" 标记时代的铁证，向后兼容）。
 	booksUsage := channelBooksUsage(snapAll, ch)
+	// R97：旧快照不记录 InfoOnly；用本次展示条目的 key 识别并丢弃旧版误存的条目。
+	infoKeys := map[string]bool{}
+	for _, it := range cur {
+		if it.InfoOnly {
+			infoKeys[itemKey(it)] = true
+		}
+	}
 	for _, p := range prev {
+		if infoKeys[p.Key] {
+			continue
+		}
 		prevMap[p.Key] = p
 		if p.Used > 0 {
 			booksUsage = true
@@ -176,7 +187,7 @@ func (l *Ledger) DiffCredits(ch, uid string, balance int64, cur []provider.Resou
 	agg := map[string]*aggEnt{} // key → 聚合条目
 	var order []string          // 首现顺序遍历，事件输出稳定可测
 	for _, it := range cur {
-		if !it.Usable {
+		if !it.Usable || it.InfoOnly {
 			continue
 		}
 		k := itemKey(it)

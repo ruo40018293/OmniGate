@@ -2665,7 +2665,11 @@ function renderRotation(rot) {
   $("stRotation").className = "st-rotation st-block";
 }
 
-// 最近临期：到期日升序；risk=按今日速度花不完 → 给预计作废量（额度−外推消耗）
+// 最近临期：到期日升序；risk=按今日净花费速度花不完 → 给到期前还会废量。
+// R97：额度格三件事分开——额度 / 今日花费 / 作废。旧文案「已耗 today_out」是余额
+// 差值，把到期作废也算成消耗，于是出现「300分 · 已耗 300 · 预计作废 264分」这种
+// 都花完了还能作废一半的自相矛盾。today_spent = max(0, 差值 − 今日已作废) 是估算，
+// today_expired = 账本已作废；两条链路无法逐笔对齐，预测只按估算花费速度外推。
 function renderExpiry(ex) {
   if (!ex.length) { $("stExpiry").innerHTML = ""; $("stExpiry").className = "st-expiry"; return; }
   let html = `<div class="st-block-title">最近临期<span class="st-hint">按到期日升序 · ${ex.length} 个账号</span></div>` +
@@ -2676,18 +2680,26 @@ function renderExpiry(ex) {
     `<span class="st-ex-name">账号</span>` +
     `<span class="st-ex-date">到期日</span>` +
     `<span class="st-ex-days">剩余</span>` +
-    `<span class="st-ex-amt">额度 · 今日已耗</span>` +
+    `<span class="st-ex-amt" title="额度 = 本行这批包的待作废额度；花费 ≈ max(0, 今日余额下降差值 − 今日已作废)，发放与作废相抵时可能低估；今日已废 = 该账号今天已清零的全部包，不一定是本行这批；到期前还会废 = 按今日估算花费速度外推、本行这批到期前花不完的量。三者口径不同，不必相加相等">额度 · 今日花费</span>` +
     `</div>`;
   ex.forEach((r, i) => {
     const dayTxt = r.days_left <= 0 ? "今日到期" : (r.days_left === 1 ? "明日到期" : `${r.days_left} 天后到期`);
-    const burn = r.risk ? ` · 预计作废 ${fmtCredits(r.amount - r.burn_forecast)}分` : "";
+    // R97：老后端无 today_spent 时退回差值，不至空白/NaN。
+    const spent = r.today_spent != null && Number.isFinite(Number(r.today_spent)) ? Number(r.today_spent) : Number(r.today_out);
+    const expired = Number(r.today_expired) || 0;
+    // 「今日已废」与「到期前还会废」是**不同的包**：前者是账号今天已清零的（往往凌晨那批），
+    // 后者是本行这批到期前的预估；不加限定会被读成「废了两次」。
+    const expiredTxt = expired > 0 ? ` · 今日已废 ${fmtCredits(expired)}` : "";
+    const burn = r.risk
+      ? ` · 到期前还会废 ${fmtCredits(r.burn_forecast < 0 ? r.amount : r.amount - r.burn_forecast)}分`
+      : "";
     html += `<div class="st-ex-row${r.risk ? " st-risk" : ""}">` +
       `<span class="st-ex-tag">${i + 1}</span>` +
       `<span class="st-ex-plat-slot"><span class="badge ${chClass(r.group)}">${esc(chLabel(r.group))}</span></span>` +
       `<span class="st-ex-name" title="${esc(r.uid)}">${esc(r.nickname || r.uid)}</span>` +
       `<span class="st-ex-date">${esc(r.expire_at)}</span>` +
       `<span class="st-ex-days">${esc(dayTxt)}</span>` +
-      `<span class="st-ex-amt">${fmtCredits(r.amount)}分 · 已耗 ${fmtCredits(r.today_out)}${burn}</span>` +
+      `<span class="st-ex-amt">${fmtCredits(r.amount)}分 · 花费 ${fmtCredits(spent)}${expiredTxt}${burn}</span>` +
       `</div>`;
   });
   html += `</div>`;
