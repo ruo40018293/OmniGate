@@ -1,4 +1,4 @@
-# 决议全文（R1–R95）
+# 决议全文（R1–R96）
 
 > 本文件是 `AGENTS.md` 第 1 节的**完整原文**——每条决议「为什么这么做 / 踩过什么坑 / 边界在哪」都在这里。
 > `AGENTS.md` 只保留每条的一句话判据，随每次会话自动加载，用来提醒「别推翻什么」；
@@ -884,3 +884,81 @@ assistant 的 `tool_calls` 分支保持 prepend 并提前 return。
 - `tool_calls.arguments` 里的品牌串上游也没重验；我们的判断是同属调用方内容，不动。
 - 裸 `11128` 与 DSH WebGUI 两条规则上游已注释停用，**我们保留**——上游的停用理由是「探针不再拦」，
   但我们的 `11128→11-128` 是 `old==new` 之外的等价改写，多洗一次无副作用，暂不删以免丢判据。
+
+
+## R96 — 「倍率 0」有两种，显式 x0.00 是定价信息，不许丢
+
+### 触发
+
+用户报告：官网模型列表里能看到 **Hy4 限时免费**，但网关的模型列表里选不到。
+
+### 取证
+
+1. 网关 `GET /v1/models` 实际返回 **207** 个模型，**包含** `workbuddy/hy4free`
+   （但**没有** `(0.00x)` 后缀），同组的 `workbuddy/hy4std` 有 `(0.29x)`。
+2. 直接调用可成功：`POST /v1/chat/completions` 用 `workbuddy/hy4free` → HTTP 200，
+   响应 `model` 字段为 `hy4-free`，返回 `reasoning_content`。元数据
+   `context_length=960000`、`max_output_tokens=64000`。
+3. 解 DPAPI 凭据后直发上游目录接口 `https://copilot.tencent.com/console/enterprises/personal/models`
+   （HTTP 200、`code=0`、34 个模型），真值：
+   - `hy4free`：`credits = "x0.00 credits"`，`tags = ["craft", "badge:限时免费:#FF0000"]`
+   - `hy3`：同形（x0.00 + 限时免费）
+   - `hy4std`：`credits = "x0.29 credits"`
+   - `auto`：**没有** `credits` 字段
+4. 面板 `GET /api/fees` 的 workbuddy 组 16 行中，`hy4free`/`hy3`/`auto` 三条
+   `priced=false, rate=0`；前端过滤条件是 `m.priced || allUnpriced || showAllModels()`，
+   而 workbuddy 有 13 条已定价 ⇒ `allUnpriced=false` ⇒ 这三条**默认隐藏**，
+   需点「显示隐藏模型」。
+
+### 根因
+
+`internal/upstream/client.go` 的 `FetchModelPricing` 用 `if rate <= 0 && m.ID != "auto" { continue }`
+一刀切，把两件完全不同的事混成一个：
+
+| 上游形态 | 含义 | 正确处置 |
+|---|---|---|
+| `credits` 字段缺失 | 压根不计费的内部模型（`hunyuan-chat` 等） | 跳过（它不属于可售模型） |
+| `credits = "x0.00 credits"` | **显式定价为 0**（限时免费促销） | **保留，且标记 Explicit** |
+
+后果是三重丢失：费率表里没有这条 → `/v1/models` 少了 `(0.00x)` 后缀 →
+面板按「上游未返回倍率」默认隐藏。用户在网关侧完全看不出哪个模型免费。
+
+下游其实**早就准备好了**：`internal/app/app.go` 的
+`row.Priced = p.IsExplicit()`、`row.Free = p.IsExplicit() && p.Rate == 0`，
+前端 `rateCell` 对 `m.free` 渲染 `✦ Free`，`provider.RateSuffixFormat(0, true)` 就是 `" (0.00x)"`。
+缺的只是入口这一层的区分。
+
+### 改法
+
+```go
+explicit := strings.TrimSpace(m.Credits) != ""
+if rate <= 0 && !explicit && m.ID != "auto" {
+    continue
+}
+```
+
+（删掉后面重复的 `explicit` 声明，并补一段 R96 注释说明两种 0 的区别。）
+
+### 闸门
+
+`internal/upstream/r96_free_pricing_test.go`：
+
+- `TestFetchModelPricingKeepsExplicitFreeModels`：假上游返回 hy4free / hy3（显式 0）、
+  hy4std（0.29）、hunyuan-chat（无 credits）、auto（无 credits），断言
+  免费两条保留且 `IsExplicit()==true`、note 透出「限时免费」、color `#FF0000`、
+  hy4std 为 0.29、hunyuan-chat 被跳过、auto 保留但不显式。
+- `TestFreeModelGetsZeroRateSuffix`：`RateSuffixFormat(0, true) == " (0.00x)"`。
+
+变异：把过滤改回 `if rate <= 0 && m.ID != "auto"` ⇒ 立刻红，错误文案直接指出
+「hy4free 被丢弃了（R96：显式 x0.00 必须保留…）」。
+
+### 边界与已知未做
+
+- `auto` 仍然特殊对待：它没有 `credits` 字段，但是上游的自动路由入口，
+  必须保留（这条豁免在改动前就存在，不动）。
+- **DSH 侧不实时拉 `/v1/models`**：它的模型清单写死在
+  `~/.dsh/profiles/desktop/cordis.patch.yml` 的 `llm-pi-ai.config.providers.chs.models`。
+  也就是说网关修好了、DSH 里如果没登记这条，用户在选择器里依然看不到 ——
+  这是两个独立的面，不能混为一谈。
+- 本次未做：面板对「显式免费」给独立的视觉分区（目前只靠 `✦ Free` 徽标 +
+  `(0.00x)` 后缀）；`allUnpriced` 的默认显示策略未改（R65 定的规则仍然成立）。

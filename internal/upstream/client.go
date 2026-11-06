@@ -731,13 +731,19 @@ func (c *Client) FetchModelPricing(a *auth.Auth) ([]provider.ModelPricing, error
 	out := make([]provider.ModelPricing, 0, len(env.Data.Models))
 	for _, m := range env.Data.Models {
 		rate := parseCredits(m.Credits)
-		if rate <= 0 && m.ID != "auto" {
-			continue // hunyuan-chat 等非计费模型
+		// 必须区分两种「倍率 0」，否则免费模型会被静默丢掉：
+		//   credits 字段缺失（hunyuan-chat 等不计费内部模型）→ 没有定价信息，跳过；
+		//   显式 "x0.00 credits"（hy4free / hy3 的限时免费）→ **这就是定价信息**，保留。
+		// R96：以前一律按 rate<=0 丢弃，后果是免费模型从费率表消失、/v1/models
+		// 少了 "(0.00x)" 后缀、面板把它当「上游未返回倍率」默认隐藏 —— 用户在网关侧
+		// 根本看不出哪个模型免费，只能去官网才看到「限时免费」标签。
+		explicit := strings.TrimSpace(m.Credits) != ""
+		if rate <= 0 && !explicit && m.ID != "auto" {
+			continue
 		}
 		note, color := parseBadge(m.Tags)
 		// auto 调度器无 credits 字段：标记为非显式倍率，
 		// 避免费率面板把「缺失→0」误显示为 Free。
-		explicit := strings.TrimSpace(m.Credits) != ""
 		out = append(out, provider.ModelPricing{
 			Model:    m.ID,
 			Channel:  "workbuddy",
