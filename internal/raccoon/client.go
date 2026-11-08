@@ -140,6 +140,31 @@ func accessToken(a *auth.Auth) string { return strings.TrimSpace(a.AccessTokenVa
 // do 发一次带 Bearer 的请求（body 为 nil 时视为无请求体）。
 // 只用于非流式调用；流式（ChatStream）需要保留 resp.Body，另行实现。
 func (c *Client) do(method, url string, a *auth.Auth, body []byte) (*http.Response, []byte, error) {
+	return c.doWithHeaders(method, url, a, body, func(req *http.Request) {
+		if body != nil {
+			req.Header.Set("Content-Type", "application/json")
+		}
+		req.Header.Set("Accept", "application/json")
+		req.Header.Set("Authorization", "Bearer "+accessToken(a))
+	})
+}
+
+// doOfficial 与 do 同形，但出站头走 ApplyHeaders（官方 box-agent 形态，R91）。
+//
+// R98：setting_info 是「网页工作台业务 API」，官方由桌面端 box-agent 发起，带完整
+// 指纹头与按账号分桶的会话 ID（sessionKeyOf(a,"web")，不带模型）。上游 R148 把 do()
+// 也统一到了这套头；我们 R91 只接了 ChatStream 那一半，这里给签到补齐。
+//
+// 只给 setting_info 用，其余非流式调用（刷新/目录/余额/流水）保持 do() 的精简三头：
+// 一次性改掉整包请求面爆炸半径太大，且这些端点从未因缺指纹头出问题。
+func (c *Client) doOfficial(method, url string, a *auth.Auth, body []byte) (*http.Response, []byte, error) {
+	return c.doWithHeaders(method, url, a, body, func(req *http.Request) {
+		ApplyHeaders(req, accessToken(a), "", gatewayOSVersion(), sessionFor(sessionKeyOf(a, "web")), newTurnID())
+	})
+}
+
+// doWithHeaders 是 do / doOfficial 共用的发送+读体路径，避免两份重复的 http.Client 调用。
+func (c *Client) doWithHeaders(method, url string, a *auth.Auth, body []byte, headers func(*http.Request)) (*http.Response, []byte, error) {
 	var rdr io.Reader
 	if body != nil {
 		rdr = bytes.NewReader(body)
@@ -148,11 +173,7 @@ func (c *Client) do(method, url string, a *auth.Auth, body []byte) (*http.Respon
 	if err != nil {
 		return nil, nil, err
 	}
-	if body != nil {
-		req.Header.Set("Content-Type", "application/json")
-	}
-	req.Header.Set("Accept", "application/json")
-	req.Header.Set("Authorization", "Bearer "+accessToken(a))
+	headers(req)
 	resp, err := c.httpClient().Do(req)
 	if err != nil {
 		return nil, nil, err
@@ -634,11 +655,12 @@ func parsePointsBalance(d pointsBalanceData) (int64, []provider.ResourceItem) {
 	return d.AvailablePoints, items
 }
 
-// DailyCheckin 实现 provider.Upstream：签到的实质见 checkin.go（R61）。
+// DailyCheckin 实现 provider.Upstream：签到的实质见 checkin.go（R98）。
 //
-// 小浣熊没有「点击领取」的签到接口 —— 每日 300 积分由服务端在当天首次触达
-// 积分服务时**懒发放**（流水 biz_type=daily_grant）。因此这里的「签到」=
-// 主动摸一次积分服务并核对当日流水；报告口径由 DailyCheckinReport 提供，
+// 小浣熊没有「点击领取」的签到接口 —— 每日 300 积分由服务端在当天首次访问
+// 工作台业务接口（GET /api/web/office/v3/setting_info）时**懒发放**，响应里的
+// point_grant_popups 是本次发放的直接回执（R61 误以为 balance/bills 能触发，
+// 导致 2026-10-29 起签到天天空转）。报告口径由 DailyCheckinReport 提供，
 // 调度器优先走它，本方法仅为接口兼容保留。
 func (c *Client) DailyCheckin(a *auth.Auth) error {
 	rep, err := c.DailyCheckinReport(a)

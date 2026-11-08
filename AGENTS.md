@@ -97,7 +97,7 @@
 | R58 | qodercn 排队保活上限压回 5 分钟，熔断窗必须严格小于它 |
 | R59 | CN workbuddy 渠道 11128 复发：DSH 运行时上下文的 @path 说明句被上游当渠道校验特征 |
 | R60 | 平台表每轨必须有 min 地板（裸 1fr/auto 必错）、末列 ≥84px；宁可横滚，不裁字 |
-| R61 | raccoon 无领取端点：每日 300 分靠「当天首次触达」懒发放，签到 = 摸一次余额 + 核对当日流水 |
+| R61 | ~~raccoon 无领取端点：每日 300 分靠「当天首次触达」懒发放，签到 = 摸一次余额 + 核对当日流水~~ **已被 R98 推翻**：balance/bills 只读、根本不触发发放，真正触发点是 `setting_info`，见 R98 |
 | R62 | 启动时绑端口失败必须直接退出，不得留空壳进程 |
 | R63 | MiniMax/Cline 两渠道移植自 wild-work（MIT），七处接线缺一即「面板正常但某处整组缺失」 |
 | R64 | usage 数值类型必须走 asInt64（覆盖 float/整型/json.Number），只认 float64 会把 int64 静默记成 0 |
@@ -134,6 +134,7 @@
 | R95 | 脱敏按角色收敛、整包兜底删除：照上游 v2.11.5 的 R151（2026-11-02→03，真机探针 33+4+26 次）重验我们的判据，我们三条都做错了。① [篡改用户数据] `cleanMessages`/`sanitizeMessages` **不分角色**，`role:user` 的内容照样被改写（实测 `You are Claude Code, Anthropic's official CLI for Claude` → `...official CLI tool for Claude`）；上游结论是 **user/tool/function 不扫，system/developer/assistant 仍拦**——用户完全可能正常提到这些词，改写等于篡改调用方数据。② [整包兜底不可逆] R82 照抄的 `BodyFallback` 用整包正则替换，实测把 `tools[].description` 里的品牌串改成**另一家厂商的名字**（`search the deepseek harness docs` → `search the Claude Code docs`），而工具定义是调用方的长期资产，这种改写不可逆；上游 R151 用探针确认 tools 字段已不再触发拦截，**整包兜底直接删除**。③ [预检不敏感但替换敏感] 特征表是小写全串、`hasFingerprint` 用 `asciiContainsFold` 预检，但替换走 `strings.ReplaceAll`（大小写敏感）⇒ 分隔符变体（`deepseek-harness`/`deepseek_harness`）连净化都进不去。改法：两个包各自新增 `sanitizeRole` 角色闸门 + `identityRe`（`(?i)you\s+are\s+an\s+ai\s+agent\s+powered\s+by\s+(?:the\s+)?deepseek[\s\-_\x{2010}-\x{2015}\x{00a0}]*harness\.?`）并让 `hasFingerprint` 认它；`cleanText`/`sanitizeText` 改成**命中才 TrimSpace**（无改写不吃首尾空白）；删 `BodyFallback`+`dshReplaceTarget`，两处接线（`internal/upstream/payload.go`、`internal/workbuddyai/wb_utils.go`）回到纯 `sanitize.Messages`。闸门：两个包各 `r95_role_test.go`（4 例：调用方角色原样保留 / 提示词角色全变体中化且不伤前后文 / 整包改写不得复活 / 命中未改不吃空白），五处变异全红（含 upstream 平行实现那一处，防两表漂移）。**未做**：R151 把身份句换成 `powered by DSH`，我们沿用 R53 的**整句删除**（不留替代断言，更干净）；`tool_calls.arguments` 内的品牌串上游也未重验 |
 | R96 | 「倍率 0」有两种，显式 `x0.00` 是**定价信息**，不许丢：`internal/upstream/client.go` 的 `FetchModelPricing` 原先按 `rate<=0` 一刀切跳过，把上游显式 `"x0.00 credits"`（`hy4free` / `hy3` 的「限时免费」）与「压根没有 credits 字段的不计费内部模型」（`hunyuan-chat` 等）混成一件事 ⇒ 免费模型从费率表消失、`/v1/models` 少了 `(0.00x)` 后缀、面板按「上游未返回倍率」默认隐藏，用户在网关侧根本看不出哪个模型免费（只能在官网看到「限时免费」）。改法：`explicit := strings.TrimSpace(m.Credits) != ""`，只跳过 `rate<=0 && !explicit && id != "auto"`；下游 `FeesInfo` 的 `Free = IsExplicit() && Rate == 0`、前端 `rate-free → ✦ Free`、`RateSuffixFormat(0,true) = " (0.00x)"` 都已就位，缺的只是入口这一层。闸门：`internal/upstream/r96_free_pricing_test.go`（显式 0 保留 / 缺字段跳过 / auto 非显式 / 后缀形态），变异回 `rate<=0` 立刻红 |
 | R97 | 临期「花费」必须是**净花费**，且「到期作废」与「消耗速度」必须分开：上游 PR #217 修复的逐字同型缺陷——`creditOut` 是余额下降差值，不区分花掉与到期作废，昨领 300 今晨整包作废、白天又领 300 时 `creditOut=300` 全是作废、真实花费 0，旧口径外推出「已耗 300 · 预计作废 264」自相矛盾。改法：`internal/stats/stats.go` Version→2，`ExpiryRow` 加 `today_spent`/`today_expired`，新增 `expiredByUID` 与 `netSpentLocked`（`max(0, creditOut − 今日该 uid 作废)`），`burnForecastLocked` 改用净花费；`ApplyLedgerExpire` 签名由 `map[string]int64` 改 `[]LedgerExpire`（逐条带 Channel/UID，空 UID 只进渠道维度），`internal/app/stats_feed.go` 逐条喂入并保留 nil 守卫；`internal/ledger/credit.go` 的 `DiffCredits` 跳过 `InfoOnly`（monkeycode「每日 Token 额度」单位是 token，参与差分会产出假 expire），并用本次 InfoOnly 的 key 清掉旧快照误存条目；前端 `renderExpiry` 表头改「额度 · 今日花费」，`spent` 优先 `today_spent`（老后端退回 `today_out`），新增「今日已废」，预测文案「预计作废」改「到期前还会废」并带批次限定词；`scripts/ui-static-check.mjs` 夹具扩成 3 行、闸门 5 条。不移植上游 Urgency/HoursLeft 配色重构（我们结构较旧，属另一功能）。闸门：`internal/stats/r97_netspent_test.go`（5 例，含 1h 观测外推 4980）、`internal/ledger/r97_infoonly_test.go`（2 例）、`views_test.go` 12 处调用同步、UI 静态检查 5 条；六处变异全红；38 包全绿。 |
+| R98 | raccoon 签到必须由 `setting_info` 触发，不能用只读端点冒充：R61 用真实浏览器取证时把「打开工作台」触发的懒发放错记到 `GET /api/web/points/v1/balance` 头上，导致 2026-10-29 起用户不再开网页后，每日两次签到共 20 条全部 `msg=上游今日每日积分尚未发放（当日窗口内可重试）` 空转，300 分以 `daily_makeup` 当日即清零补发、余额长期不涨。上游 `internal/raccoon/checkin.go`（fork 点之前就存在，diff 视角永远看不见）实测：`GET /api/web/office/v3/setting_info` 的 `data.point_grant_popups[]` 才是发放触发点，`chat/completions` 只扣 -2、`balance`/`bills`/`user_info`/`iam/confirm` 全部只读不入账，同日重复幂等。改法：新增 `EpOfficeSettingInfo` + `FetchSettingInfo`（走 `doOfficial`，补 R91 的官方指纹头并按账号分桶会话），`DailyCheckinReport` 以 popups 累加 `granted>0` 判 claimed、popups 空则用 bills 交叉核对判 already / `NoCampaign`（反静默空转闸门）、bills 失败保守判 already，所有分支保留 `raccoon checkin setting_info uid=...` 日志形状；`do()` 拆成共享 `doWithHeaders`，普通调用维持精简三头、仅 web 端点走官方套件。八处变异全红。 |
 
 ## 2. 架构选型（依据）
 
@@ -427,6 +428,7 @@ POST /api/quit                     # 退出程序
 	① 上游 `credits` 字段缺失 = 不计费的内部模型（hunyuan-chat 等），跳过；`credits` 显式为 `"x0.00 credits"` = **免费**（限时免费促销），必须保留且 `Explicit=true`。按 `rate<=0` 一刀切会把免费模型从费率表、`/v1/models` 的 `(0.00x)` 后缀、面板「✦ Free」里全部抹掉，用户只能去官网才知道哪个模型免费。
 	② 「面板隐藏无倍率模型」只对**真的没有倍率**的模型成立；一个模型「未定价」和「定价为 0」在下游必须能区分（`provider.ModelPricing.IsExplicit()` + `feesModelRow.Free`）。
 34. **「到期作废」不是「消耗速度」，净花费必须扣作废且只在 uid 维度拆**：R97 的硬约束。①`today_spent = max(0, creditOut − expiredByUID[uid])`，`burnForecast` 必须用净花费外推，净花费≤0 不外推；②`expiredByUID` 与 `expiredByGroup` 同源但不同维度，全量替换、跨天清零、空 UID 只进渠道维度；③`InfoOnly` 纯展示条目量纲可能不是「分」，严禁参与 `DiffCredits` 差分，旧快照残留要用本次 InfoOnly key 清掉；④前端「今日花费」/「今日已废」/「到期前还会废」三数口径不同不必相加相等，老后端无 `today_spent` 退回差值，预测负数要按全部额度兜底。
+35. **「懒发放」类签到必须先打触发端点、再读判据，只读端点永远不能算签到**：R98 的硬约束。①判据必须是「触发端点返回的发放凭证」（raccoon = `point_grant_popups[]`），不是「余额/流水里碰巧有一条发放记录」——后者是观察结果，观察本身不产生发放；②触发端点必须带与官方客户端一致的指纹头（R91 `ApplyHeaders`），精简三头可能被判定为非官方调用而不发放；③「触发了但上游今日没发」必须报可重试状态（`NoCampaign`），严禁谎报 already 造成静默空转；④流水只作交叉核对/兜底，核对失败保守判 already 并带「核对失败」字样，不能升级成 error 让调度器无谓重试。
 
 ## 7. 平台能力差异表（internal/platform）
 
@@ -488,8 +490,8 @@ git tag vX.Y.Z && git push origin vX.Y.Z
 
 - [README.md](README.md) — 用户文档
 - [DEVELOPMENT.md](DEVELOPMENT.md) — 开发者文档（面向 AI Agent）
-- [AGENTS.md](AGENTS.md) — 本文件：决议项一句话判据（R1–R97）、架构选型、不变量
-- [docs/DECISIONS.md](docs/DECISIONS.md) — 决议全文（R1–R97）：每条决议的原始背景、踩坑记录与边界条件
+- [AGENTS.md](AGENTS.md) — 本文件：决议项一句话判据（R1–R98）、架构选型、不变量
+- [docs/DECISIONS.md](docs/DECISIONS.md) — 决议全文（R1–R98）：每条决议的原始背景、踩坑记录与边界条件
 - [docs/三接口兼容改造备忘.md](docs/三接口兼容改造备忘.md) — 三接口（Chat/Responses/Anthropic）兼容层架构决策、实施记录、验证清单、已知限制
 - [docs/用量积分流水记账备忘.md](docs/用量积分流水记账备忘.md) — 双流水统计（token/积分）架构、差分算法、实测验证、已知限制（R17）
 

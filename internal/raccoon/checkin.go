@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log"
 	"net/http"
 	"time"
 
@@ -12,35 +13,64 @@ import (
 )
 
 // ---------------------------------------------------------------------------
-// 每日积分「签到」（R61）
+// 每日积分「签到」（R98，2026-11-08 修正 R61 的错误结论）
 // ---------------------------------------------------------------------------
 //
-// 结论（2026-10-28 真实账号取证，勿凭直觉改）：
+// R61 的结论是「当天首次触达积分服务即懒发放」，于是签到 = 摸 balance + 核对 bills。
+// 这是**错的**：2026-10-29 之后用户不再开网页，调度器每天 09:00/21:00 都去摸
+// balance/bills，20 次全部返回「上游今日每日积分尚未发放」；积分以 daily_makeup
+// 形式补发且当日 24:00 清零，余额长期不涨（2026-11-08 生产日志取证）。
 //
-//  1. 小浣熊**没有**「点击领取」的签到接口。官方前端的 points 客户端只有
-//     `getBalance()`（/api/web/points/v1/balance）与 `getBills()`
-//     （/api/web/points/v2/bills），没有 sign/checkin/claim 之类的方法；
-//     整个前端主包也搜不到「签到」字样。
-//  2. 每日积分由服务端**懒发放**：当天首次触达积分服务时补写一条流水
-//     `biz_type="daily_grant"`、`event_name="每日积分发放"`、`points=300`、
-//     `grant_at` 为当天 00:00、`created_at` 才是真正落账时刻（实测 14:57:44 /
-//     16:27:39 / 23:04:58 —— 都等于当天第一次用它的时间，不是定时任务时间）。
-//  3. 每日积分**有有效期**（实测约 7 天，`expire_at` 落账日+6 天 23:59:59），
-//     到期由 `biz_type="daily_expire"` 清零 ⇒ 漏一天就真少 300，必须每天领。
+// 上游 internal/raccoon/checkin.go（2026-10-15 就存在，fork 点之前，所以此前
+// 基于 commit/diff 的盘点一直没看见）给出了真实机制：
 //
-// 所以本渠道的「签到」= 每天主动摸一次积分服务，再核对当日流水是否已发放。
-// 两个动作都是 GET，幂等、不消耗额度、不会重复领取（服务端按天去重）。
+//   - **触发点是 GET /api/web/office/v3/setting_info**（工作台设置），其响应
+//     `data.point_grant_popups[]` 是「本次调用刚触发的发放」的直接回执。
+//   - POST /api/web/llm/v2/chat/completions 只扣分，不入账；
+//     GET /api/web/points/v1/balance、/api/web/points/v2/bills **只读，不入账**；
+//     GET /api/web/auth/v1/user_info、POST /api/web/auth/v1/iam/confirm 也不入账。
+//   - 幂等：当天重复调 setting_info 不重复发放（第二次 popups 为空数组）。
+//   - 网页文案：「每日积分每天 00:00 发放，默认当日 24:00 清零，当天登录后
+//     有效期延长至 7 天。」
+//
+// 所以本渠道的「签到」= 主动打一次 setting_info（等价于替用户打开一次网页），
+// 再用 popups 判本次是否真的领到。bills 保留为**交叉核对**：popups 为空时用它
+// 区分「今天早就领过」与「今天根本没发」（后者必须可重试，否则又变成天天静默空转）。
+//
+// 出站头走 ApplyHeaders（官方 box-agent 形态）：上游 R148 把 do() 也统一到了这套头，
+// 我们 R91 只接了 ChatStream 那一半，R98 在 setting_info 上补齐（见 doOfficial）。
 
 // cst 上游业务时区（所有流水时间戳都是 +08:00，与运行机器时区无关）。
 var cst = time.FixedZone("CST", 8*3600)
 
-// billLookback 读流水条数。日常用量下一天几十条，取 30 足够覆盖到当天的
-// daily_grant（它在流水里按 created_at 排序，落账即靠前）。
+// billLookback 交叉核对时读的流水条数。
 const billLookback = 30
 
-// claimedWindow 判定「本次领取」的时间窗：流水的 created_at 落在
-// [本次调用开始-该窗, 现在] 内，说明是这次调用把当日积分摸出来的。
-const claimedWindow = 90 * time.Second
+// settingInfoResp /api/web/office/v3/setting_info 的响应。
+// 只解析签到关心的两个字段；其余（空间配额/功能开关/ab_tests 等）不建模，
+// 上游增删这些字段不应影响签到。
+type settingInfoResp struct {
+	Code int `json:"code"`
+	Data struct {
+		AvailablePoints int64 `json:"available_points"`
+		// PointGrantPopups 本次调用**刚刚触发**的发放提示列表。
+		// 非空 ⇔ 本次触发了新发放；空 ⇔ 今天已经领过（幂等语义的判据）。
+		PointGrantPopups []struct {
+			Source      string `json:"source"`
+			DisplayName string `json:"display_name"`
+			Points      int64  `json:"points"`
+			ExpireAt    string `json:"expire_at"`
+		} `json:"point_grant_popups"`
+	} `json:"data"`
+}
+
+// GrantPopup 一次发放提示（setting_info 的 point_grant_popups 条目）。
+type GrantPopup struct {
+	Source      string `json:"source"`
+	DisplayName string `json:"display_name"`
+	Points      int64  `json:"points"`
+	ExpireAt    string `json:"expire_at"`
+}
 
 // pointsBill 是 /api/web/points/v2/bills 的单条流水（字段取自实测响应）。
 type pointsBill struct {
@@ -67,47 +97,121 @@ type pointsBillsResp struct {
 	Data    pointsBillsData `json:"data"`
 }
 
-// DailyCheckinReport 实现 provider.CheckinReporter：摸一次积分服务 + 核对当日流水。
+// FetchSettingInfo 拉取工作台设置（副作用：触发当日每日积分落账，幂等）。
 //
-// 状态映射：
-//   - 当日有 daily_grant 且落账时间在本次调用窗口内 → CheckinClaimed（本次摸出来的）
-//   - 当日有 daily_grant 但落账更早                   → CheckinAlready（今天早就发过了）
-//   - 当日没有 daily_grant                             → CheckinNoCampaign（可重试：
-//     上游可能还没跑到补发逻辑，窗口内再摸一次往往就有了）
-//   - 余额/流水接口失败                                → CheckinNoToken（401/403）或 CheckinError
-func (c *Client) DailyCheckinReport(a *auth.Auth) (provider.CheckinReport, error) {
-	start := time.Now()
-	// ① 触达积分服务：服务端在此补写当天的 daily_grant（懒发放）。
-	if _, _, err := c.UserResourceDetail(a); err != nil {
-		return provider.CheckinReport{Status: reportStatusFor(err), Msg: shortText(err.Error())}, err
-	}
-	// ② 读流水核对：签到是否真的到账，只认 daily_grant 这一行，不看 HTTP 200。
-	bills, err := c.fetchBills(a, billLookback)
+// 这是本渠道「签到」的**实质动作**——上游没有独立领取端点，发放靠这次访问触发。
+// 返回 (可用余额, 本次发放的积分列表)。
+func (c *Client) FetchSettingInfo(a *auth.Auth) (int64, []GrantPopup, error) {
+	resp, raw, err := c.doOfficial(http.MethodGet, c.siteBase()+EpOfficeSettingInfo, a, nil)
 	if err != nil {
-		return provider.CheckinReport{Status: reportStatusFor(err), Msg: "流水查询失败：" + shortText(err.Error())}, err
+		return 0, nil, err
 	}
-	row, ok := pickTodayDailyGrant(bills, time.Now())
-	if !ok {
-		return provider.CheckinReport{
-			Status: provider.CheckinNoCampaign,
-			Msg:    "上游今日每日积分尚未发放（当日窗口内可重试）",
-		}, nil
+	if resp.StatusCode != http.StatusOK {
+		return 0, nil, &provider.Error{
+			Kind: Classify(resp.StatusCode, string(raw)), Status: resp.StatusCode, Msg: truncate(string(raw), 300),
+		}
 	}
-	// 两种「今天已有」必须能一眼分清，否则用户无法判断是「这次摸出来了」还是
-	// 「今天早些时候已经发过」——面板只有 Msg 一个通道，不能都写成 "+300"。
-	status := provider.CheckinAlready
-	msg := fmt.Sprintf("今日已发放 %d（不是本次触发）", row.Points)
-	if created, perr := time.Parse(time.RFC3339, row.CreatedAt); perr == nil && !created.Before(start.Add(-claimedWindow)) {
-		status = provider.CheckinClaimed
-		msg = fmt.Sprintf("每日积分 +%d", row.Points)
+	var out settingInfoResp
+	if err := json.Unmarshal(raw, &out); err != nil {
+		return 0, nil, fmt.Errorf("raccoon setting_info 响应解析失败: %w (%s)", err, truncate(string(raw), 200))
 	}
-	if exp := expireDay(row.ExpireAt); exp != "" {
-		msg += "（" + exp + " 到期）"
+	if out.Code != 0 {
+		// 业务码非 0 视为失败（与 points 服务同口径：只有 HTTP 状态码能判会话失效）。
+		return 0, nil, &provider.Error{
+			Kind: provider.ErrClient, Status: resp.StatusCode, Msg: truncate(string(raw), 300),
+		}
 	}
-	return provider.CheckinReport{Status: status, Msg: msg, Amount: row.Points}, nil
+	popups := make([]GrantPopup, 0, len(out.Data.PointGrantPopups))
+	for _, p := range out.Data.PointGrantPopups {
+		popups = append(popups, GrantPopup{
+			Source: p.Source, DisplayName: p.DisplayName, Points: p.Points, ExpireAt: p.ExpireAt,
+		})
+	}
+	return out.Data.AvailablePoints, popups, nil
 }
 
-// fetchBills 拉最近 limit 条流水（type=all）。
+// DailyCheckinReport 实现 provider.CheckinReporter：打一次 setting_info 触发发放，
+// 用 point_grant_popups 判本次是否领到；popups 为空时用流水交叉核对。
+//
+// 状态映射：
+//   - popups 含正数积分                 → CheckinClaimed（本次真正领到，不可重试）
+//   - popups 空 + 今日已有 daily_grant  → CheckinAlready（今天早就领过，不可重试）
+//   - popups 空 + 今日无 daily_grant    → CheckinNoCampaign（可重试：触发没生效，
+//     不能谎报「已领取」，否则就回到 R61 那种天天静默空转）
+//   - popups 空 + 流水查询失败          → CheckinAlready（setting_info 本身成功，
+//     保守不把成功改成错误，但 msg 标注未能核对）
+//   - setting_info 失败                → CheckinNoToken（401/403）或 CheckinError
+//
+// 日志形状与上游同构（本仓 stats 并不解析 raccoon 行，保留形状只为日后对齐）。
+func (c *Client) DailyCheckinReport(a *auth.Auth) (provider.CheckinReport, error) {
+	remain, popups, err := c.FetchSettingInfo(a)
+	if err != nil {
+		rep := provider.CheckinReport{Status: reportStatusFor(err), Msg: shortText(err.Error())}
+		log.Printf("raccoon checkin setting_info uid=%s status=%s claimed=false amount=0 msg=%s err=%v",
+			a.UID, rep.Status, rep.Msg, err)
+		return rep, err
+	}
+
+	var granted int64
+	var name string
+	var exp string
+	for _, p := range popups {
+		if p.Points <= 0 {
+			continue
+		}
+		granted += p.Points
+		if name == "" && p.DisplayName != "" {
+			name = p.DisplayName
+		}
+		if exp == "" && p.ExpireAt != "" {
+			exp = expireDay(p.ExpireAt)
+		}
+	}
+	if granted > 0 {
+		msg := fmt.Sprintf("签到成功 +%d", granted)
+		if name != "" {
+			msg += "（" + name + "）"
+		}
+		if exp != "" {
+			msg += "（" + exp + " 到期）"
+		}
+		rep := provider.CheckinReport{Status: provider.CheckinClaimed, Msg: msg, Amount: granted}
+		log.Printf("raccoon checkin setting_info uid=%s status=%s claimed=true amount=%d msg=%s err=%v remain=%d",
+			a.UID, rep.Status, granted, rep.Msg, nil, remain)
+		return rep, nil
+	}
+
+	// popups 为空：用流水交叉核对，区分「今天已领过」与「今天根本没发」。
+	bills, berr := c.fetchBills(a, billLookback)
+	if berr != nil {
+		rep := provider.CheckinReport{
+			Status: provider.CheckinAlready,
+			Msg:    "今日已领取（流水核对失败，仅按 setting_info 判定）",
+		}
+		log.Printf("raccoon checkin setting_info uid=%s status=%s claimed=false amount=0 msg=%s err=%v remain=%d",
+			a.UID, rep.Status, rep.Msg, berr, remain)
+		return rep, nil
+	}
+	if row, ok := pickTodayDailyGrant(bills, time.Now()); ok {
+		msg := "今日已领取"
+		if d := expireDay(row.ExpireAt); d != "" {
+			msg += "（" + d + " 到期）"
+		}
+		rep := provider.CheckinReport{Status: provider.CheckinAlready, Msg: msg}
+		log.Printf("raccoon checkin setting_info uid=%s status=%s claimed=false amount=0 msg=%s err=%v remain=%d",
+			a.UID, rep.Status, rep.Msg, nil, remain)
+		return rep, nil
+	}
+	rep := provider.CheckinReport{
+		Status: provider.CheckinNoCampaign,
+		Msg:    "签到已触发但上游今日未发放每日积分（当日窗口内可重试）",
+	}
+	log.Printf("raccoon checkin setting_info uid=%s status=%s claimed=false amount=0 msg=%s err=%v remain=%d",
+		a.UID, rep.Status, rep.Msg, nil, remain)
+	return rep, nil
+}
+
+// fetchBills 拉最近 limit 条流水（type=all）——R98 起只作交叉核对，不再作触发动作。
 //
 // 参数口径取自官方前端 points 客户端：`paging.limit=<n>&type=all`；
 // 缺 type 会被上游按 all 处理，但显式传更稳妥（type 取非法值会 400/100002）。

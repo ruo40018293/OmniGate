@@ -39,6 +39,12 @@ const (
 	// `biz_type="daily_grant"` 即「每日积分发放」——当日签到是否到账只看这一行。
 	EpPointsBillsV2 = "/api/web/points/v2/bills"
 
+	// EpOfficeSettingInfo 工作台设置（R98 签到的实质触发端点）。
+	// 2026-11-08 取证：GET 此端点会触发当日每日积分落账，响应 data.point_grant_popups
+	// 是「本次触发的发放」的直接回执；balance/bills 只读，不触发发放。
+	// 路径取自上游 internal/raccoon/constants.go（2026-10-15 三账号对照实测）。
+	EpOfficeSettingInfo = "/api/web/office/v3/setting_info"
+
 	// EpAuthRefresh 桌面端刷新端点（客户端 env: NEXT_PUBLIC_AUTH_API_PREFIX = /api/electron/auth/v1）。
 	EpAuthRefresh = "/api/electron/auth/v1/refresh"
 	// EpAuthRefreshWeb 客户端**优先**使用的远端前缀（env: NEXT_PUBLIC_DESKTOP_REMOTE_AUTH_API_PREFIX

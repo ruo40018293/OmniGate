@@ -1,4 +1,4 @@
-# 决议全文（R1–R97）
+# 决议全文（R1–R98）
 
 > 本文件是 `AGENTS.md` 第 1 节的**完整原文**——每条决议「为什么这么做 / 踩过什么坑 / 边界在哪」都在这里。
 > `AGENTS.md` 只保留每条的一句话判据，随每次会话自动加载，用来提醒「别推翻什么」；
@@ -985,3 +985,81 @@ if rate <= 0 && !explicit && m.ID != "auto" {
 **变异验证（6 处全红）**：M1 `netSpentLocked` 不扣作废；M2 `burnForecastLocked` 退回 `creditOut`；M3 `expiredByUID` 漏跨天重置；M4 `DiffCredits` 不过滤 `InfoOnly`；M5 旧快照 InfoOnly 残留不清理；M6 前端不取 `today_spent` 而用差值。M2 一度 GREEN(BAD)：净值用例观测仅 1min < `burnMinObserve`(0.5h) 走不到外推分支，补 1h 观测用例后转红。
 
 **已知未做**：上游 Urgency/HoursLeft/精确时刻配色重构（我们 `ExpiryRow` 无这些字段，属另一功能）；`scripts/ui-static-check.mjs` 上游还改了 FAKE_STATS 配色断言，不在本轮范围。上游把 `feedLedgerExpire` 的 nil 守卫删了，我们保留（无收益的改动不跟）。
+
+
+## R98 — raccoon 签到必须由 setting_info 触发，只读端点不能冒充签到
+
+**触发**：2026-11-08 用户「小浣熊的签到好像没用了呀。看下上游有更新吗」。两问：①上游 wild-work 有无新更新；
+②本地 raccoon 签到为何失效。
+
+**上游盘点结论**：tag 仍 v2.11.5（afb4f3f99, 2026-11-04T10:52:26Z），最近 release v2.11.5
+（2026-11-04T10:54:53Z）；v2.11.5 之后只有 5 个 PR #217「临期预测」提交（R97 已吸收）。
+`commits?path=internal/raccoon` 最新 = fcb7546fa（2026-10-31 R148 头套件，R91 已吸收）；
+`path=internal/scheduler` 最新 = edbc788da（11-04 R112b）。⇒ **上游没有 raccoon 签到的新改动**。
+
+**file-level 差集盲区再次命中**：上游 `internal/raccoon/checkin.go` 是 2026-10-15 就存在的文件，
+不在任何 v2.11.x 提交的变更集里 ⇒ 只看 commit/diff 永远看不到。这已经是继 R91、R95 之后第三次同型教训，
+再次确认「审计上游必须做 file-level 结构差集」。
+
+**R61 错在哪（取证）**：当初用真实浏览器打开 `https://xiaohuanxiong.com/work` 观察每日 300 分入账，
+把功劳错记到随后调的 `GET /api/web/points/v1/balance` 上，得出「无领取端点、懒发放、当天首次触达即
+materialize」的结论并写进 `DailyCheckinReport`（只调 balance + bills + `pickTodayDailyGrant`）。
+上游文件头 2026-10-15 三账号对照实测把因果钉死了：
+- `GET /api/web/office/v3/setting_info` → 三账号各入账 300（`point_grant_popups` 非空）；
+- `POST /api/web/llm/v2/chat/completions` 只扣「桌面端 LLM 对话消耗 -2」，不入账；
+- `GET /api/web/points/v1/balance`、`GET /api/web/points/v2/bills` 只读，不入账；
+- `GET /api/web/auth/v1/user_info`、`POST /api/web/auth/v1/iam/confirm` 均不入账；
+- 同日重复调 setting_info 幂等（第二次 popups 为空数组）。
+网页文案：「每日积分每天 00:00 发放，默认当日 24:00 清零，当天登录后有效期延长至 7 天。」
+
+**本地空转证据**（`E:\陈焕生\workbuddy-api\data\app.log`）：2026-10-29 09:00 → 2026-11-08 09:00，
+raccoon 签到每天 09:00/21:00 两次共 20 条**全部** `ok=false retryable=true
+ msg=上游今日每日积分尚未发放（当日窗口内可重试）`；唯一「成功」是 11-08 用户 17:16 手动登录流程触发的
+`今日已发放 300（不是本次触发）（2026-11-14 到期）`。`credit auto-refresh` 每 30 分钟成功、remain 稳定
+⇒ 账号与积分服务都正常，只是签到动作没打触发端点。
+
+**真实凭据实探**（DPAPI 解 `auths/raccoon-default.json` 的 accessToken）：
+- `balance` → `available_points=6453, daily_points=300, reward_points=6153`；
+- `bills?paging.limit=30&type=all` → 30 条，`desktop 26 / daily_grant 2 / daily_expire 2`；
+  今日行 `daily_grant 300, grant_at=2026-11-08T00:00:00+08:00, expire_at=2026-11-14T23:59:59+08:00`
+  （17:17 登录触发、7 天期）；11-07 是 `daily_makeup:...:20261107:free:300:grant`，
+  `created_at=grant_at=2026-11-07T00:00:00+08:00`、`expire_at=2026-11-07T23:59:59+08:00`（**补发当日即清零**）
+  ⇒ 与「默认当日 24:00 清零、当天登录后延长至 7 天」完全吻合，解释了余额长期不涨。
+- `setting_info` → `code=0, data.available_points=6453, data.point_grant_popups=[]`（今日已领过，幂等），
+  端点存在可用。
+
+**推翻三个假设**：
+1. 「上游有签到改动可抄」——没有；答案在 fork 点之前的旧文件里。
+2. 「balance/bills 会触发发放」——只读，R61 的因果是错的。
+3. 「日志形状不能改否则面板收入归零」——这是上游自己的约束；本地 `internal/stats/events.go` 的
+   `platformDefaultAmount` 只有 workbuddy/traework，`reCheckinShape` 也不认 raccoon，raccoon 签到收入实际靠
+   `Ledger.DiffCredits` 差分 ⇒ 改文案不破坏统计。但为与上游同构仍保留 `raccoon checkin setting_info ...` 形状。
+
+**做法**：
+1. `internal/raccoon/constants.go` 新增 `EpOfficeSettingInfo = "/api/web/office/v3/setting_info"`。
+2. 重写 `internal/raccoon/checkin.go`：`settingInfoResp`/`GrantPopup`；
+   `FetchSettingInfo(a) (int64, []GrantPopup, error)` 走 `doOfficial`；
+   `DailyCheckinReport` 先打 setting_info，popups 累加 `granted` → `granted>0` 判 `CheckinClaimed`
+   （msg「签到成功 +N（display_name）（到期日）」、Amount=granted），popups 空则用 `fetchBills` 交叉核对
+   （今日有 daily_grant → `CheckinAlready`；无 → `CheckinNoCampaign` 反静默空转；bills 失败 → 保守
+   `CheckinAlready` + 「核对失败」）；`fetchBills`/`pickTodayDailyGrant`/`expireDay`/`reportStatusFor` 保留。
+3. `internal/raccoon/client.go`：`do()` 拆成共享 `doWithHeaders(method,url,a,body,headers func(*http.Request))`；
+   普通 `do()` 维持精简三头；新增 `doOfficial()` 走 R91 的
+   `ApplyHeaders(req, accessToken(a), "", gatewayOSVersion(), sessionFor(sessionKeyOf(a,"web")), newTurnID())`
+   （orgCode 空、web 会话按账号分桶不带模型），让触发端点带官方指纹。
+4. 重写 `internal/raccoon/checkin_test.go`：假上游三分路（setting_info/bills/balance）+ 计数 + 抓头；
+   9 个 R98 用例（官方头、popups→claimed、bills 兜底 already、无发放 NoCampaign、401→no_token、
+   setting 失败→error、bills 失败→保守 already、0 分 popups 忽略、DailyCheckin 委托）。
+
+**契约边界**：`DailyCheckin` 仍委托 `DailyCheckinReport`，`Status.Retryable()` 时包装成 error；
+scheduler `dailyCheckin` 只读 Status/Msg（不读 Amount）；`CheckinNoCampaign` 保持可重试，让调度器在当日窗口内继续摸。
+`balance` 仅供 `UserResourceDetail` 查余额（scheduler 无论成败都会调），不再作为签到触发。
+
+**闸门与变异**：`go build/vet/test ./...` 38 包全绿；`.tmp_mutate_r98.py` 八处全红——
+M1 setting_info 退回 do()、M2 `granted>0` 恒假、M3 NoCampaign→Already、M4 `granted += p.Points+1`、
+M5 bills 失败改 Error、M6 401 不映射 no_token、M7 DailyCheckin 不对可重试报错、M8 触发端点退回 balance。
+`.tmp_r98_check.py` 复核无残留（`client.go` 的 `EpPointsBalance` 是 UserResourceDetail 合法调用，不算残留）。
+
+**已知未做**：setting_info 的 `data.point_grant_popups[].source` 未细分（只按 points 累加）；
+上游 `DailyCheckin` 无 bills 兜底、我们有（更保守）；未给 web 端点单独配超时（沿用 `do` 的 180s）。
+部署后需重启托盘进程才生效。
