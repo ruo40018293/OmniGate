@@ -135,6 +135,7 @@
 | R96 | 「倍率 0」有两种，显式 `x0.00` 是**定价信息**，不许丢：`internal/upstream/client.go` 的 `FetchModelPricing` 原先按 `rate<=0` 一刀切跳过，把上游显式 `"x0.00 credits"`（`hy4free` / `hy3` 的「限时免费」）与「压根没有 credits 字段的不计费内部模型」（`hunyuan-chat` 等）混成一件事 ⇒ 免费模型从费率表消失、`/v1/models` 少了 `(0.00x)` 后缀、面板按「上游未返回倍率」默认隐藏，用户在网关侧根本看不出哪个模型免费（只能在官网看到「限时免费」）。改法：`explicit := strings.TrimSpace(m.Credits) != ""`，只跳过 `rate<=0 && !explicit && id != "auto"`；下游 `FeesInfo` 的 `Free = IsExplicit() && Rate == 0`、前端 `rate-free → ✦ Free`、`RateSuffixFormat(0,true) = " (0.00x)"` 都已就位，缺的只是入口这一层。闸门：`internal/upstream/r96_free_pricing_test.go`（显式 0 保留 / 缺字段跳过 / auto 非显式 / 后缀形态），变异回 `rate<=0` 立刻红 |
 | R97 | 临期「花费」必须是**净花费**，且「到期作废」与「消耗速度」必须分开：上游 PR #217 修复的逐字同型缺陷——`creditOut` 是余额下降差值，不区分花掉与到期作废，昨领 300 今晨整包作废、白天又领 300 时 `creditOut=300` 全是作废、真实花费 0，旧口径外推出「已耗 300 · 预计作废 264」自相矛盾。改法：`internal/stats/stats.go` Version→2，`ExpiryRow` 加 `today_spent`/`today_expired`，新增 `expiredByUID` 与 `netSpentLocked`（`max(0, creditOut − 今日该 uid 作废)`），`burnForecastLocked` 改用净花费；`ApplyLedgerExpire` 签名由 `map[string]int64` 改 `[]LedgerExpire`（逐条带 Channel/UID，空 UID 只进渠道维度），`internal/app/stats_feed.go` 逐条喂入并保留 nil 守卫；`internal/ledger/credit.go` 的 `DiffCredits` 跳过 `InfoOnly`（monkeycode「每日 Token 额度」单位是 token，参与差分会产出假 expire），并用本次 InfoOnly 的 key 清掉旧快照误存条目；前端 `renderExpiry` 表头改「额度 · 今日花费」，`spent` 优先 `today_spent`（老后端退回 `today_out`），新增「今日已废」，预测文案「预计作废」改「到期前还会废」并带批次限定词；`scripts/ui-static-check.mjs` 夹具扩成 3 行、闸门 5 条。不移植上游 Urgency/HoursLeft 配色重构（我们结构较旧，属另一功能）。闸门：`internal/stats/r97_netspent_test.go`（5 例，含 1h 观测外推 4980）、`internal/ledger/r97_infoonly_test.go`（2 例）、`views_test.go` 12 处调用同步、UI 静态检查 5 条；六处变异全红；38 包全绿。 |
 | R98 | raccoon 签到必须由 `setting_info` 触发，不能用只读端点冒充：R61 用真实浏览器取证时把「打开工作台」触发的懒发放错记到 `GET /api/web/points/v1/balance` 头上，导致 2026-10-29 起用户不再开网页后，每日两次签到共 20 条全部 `msg=上游今日每日积分尚未发放（当日窗口内可重试）` 空转，300 分以 `daily_makeup` 当日即清零补发、余额长期不涨。上游 `internal/raccoon/checkin.go`（fork 点之前就存在，diff 视角永远看不见）实测：`GET /api/web/office/v3/setting_info` 的 `data.point_grant_popups[]` 才是发放触发点，`chat/completions` 只扣 -2、`balance`/`bills`/`user_info`/`iam/confirm` 全部只读不入账，同日重复幂等。改法：新增 `EpOfficeSettingInfo` + `FetchSettingInfo`（走 `doOfficial`，补 R91 的官方指纹头并按账号分桶会话），`DailyCheckinReport` 以 popups 累加 `granted>0` 判 claimed、popups 空则用 bills 交叉核对判 already / `NoCampaign`（反静默空转闸门）、bills 失败保守判 already，所有分支保留 `raccoon checkin setting_info uid=...` 日志形状；`do()` 拆成共享 `doWithHeaders`，普通调用维持精简三头、仅 web 端点走官方套件。八处变异全红。 |
+| R99 | 签到与猫猫旅行必须能「今日漏跑就补跑」：`growthDoneDay`/`checkinDone` 都是纯内存、重启即丢，`runGrowthOncePerDay` 只在配置时刻的**整分**被调用 ⇒ 进程没在那个分钟活着（关机、休眠、晚启动）就整天不跑；而 `GrowthTravelOnce` 一个方法内含「派出」与「到站领取」两个分支（按 TravelStatus 状态机推进），只跑一次的结果是派出成功、到站那 10 分要用户手点（2026-11-08 生产日志：09:00:01 自动派出 → 17:16:07 用户手点才 `到站领取 +10`）。改法：新增 `internal/scheduler/catchup.go`，`Run()` 每轮循环首行调 `catchUpToday(now)`，一天只判定一次（`catchupDoneDay`，重启后重置 = 允许再补）；签到侧读**已持久化**的 `Pool.Status.LastCheckinAt/LastCheckinOK` 判「今日是否已成功」，未成功且已过首个配置时刻 +2 分钟保护期才 `runCheckin(first)`；成长侧同规则调 `runGrowthOncePerDay`/`runGrowthTasksOncePerDay`，靠上游 `daily_limit_reached` 保证幂等。`ActivitiesOnly` 渠道（workbuddyai 保活）与无签到任务的渠道一律跳过，避免每分钟空打上游。六处变异全红。 |
 
 ## 2. 架构选型（依据）
 
@@ -430,6 +431,8 @@ POST /api/quit                     # 退出程序
 34. **「到期作废」不是「消耗速度」，净花费必须扣作废且只在 uid 维度拆**：R97 的硬约束。①`today_spent = max(0, creditOut − expiredByUID[uid])`，`burnForecast` 必须用净花费外推，净花费≤0 不外推；②`expiredByUID` 与 `expiredByGroup` 同源但不同维度，全量替换、跨天清零、空 UID 只进渠道维度；③`InfoOnly` 纯展示条目量纲可能不是「分」，严禁参与 `DiffCredits` 差分，旧快照残留要用本次 InfoOnly key 清掉；④前端「今日花费」/「今日已废」/「到期前还会废」三数口径不同不必相加相等，老后端无 `today_spent` 退回差值，预测负数要按全部额度兜底。
 35. **「懒发放」类签到必须先打触发端点、再读判据，只读端点永远不能算签到**：R98 的硬约束。①判据必须是「触发端点返回的发放凭证」（raccoon = `point_grant_popups[]`），不是「余额/流水里碰巧有一条发放记录」——后者是观察结果，观察本身不产生发放；②触发端点必须带与官方客户端一致的指纹头（R91 `ApplyHeaders`），精简三头可能被判定为非官方调用而不发放；③「触发了但上游今日没发」必须报可重试状态（`NoCampaign`），严禁谎报 already 造成静默空转；④流水只作交叉核对/兜底，核对失败保守判 already 并带「核对失败」字样，不能升级成 error 让调度器无谓重试。
 
+36. **漏跑要能补跑，但不能多打上游**：R99 的硬约束。①判据读**持久化**状态（`Pool.Status.LastCheckinAt/LastCheckinOK`），不许用内存日标记当唯一依据——重启即丢，正是漏跑的成因；②补跑必须比正常调度**更保守**：已过首个时刻 + 保护期、今日无成功记录、且渠道确有该任务（`len(CheckinMinutes)>0`、非 `ActivitiesOnly`）三条同时成立；③一天最多判定一次（`catchupDoneDay`），失败也不当天反复重试——交给既有的窗口重试；④成长自动化的多道开关闸门（catchup 开关 / `runGrowthOncePerDay` / `RunGrowthNow` / `runGrowthFor` 的 `o.travel`）是**互为冗余**的，变异时必须**同时**拆全部才能观测到行为变化，只拆一层属等价变异。
+
 ## 7. 平台能力差异表（internal/platform）
 
 | 能力 | Windows | macOS | Linux |
@@ -490,8 +493,8 @@ git tag vX.Y.Z && git push origin vX.Y.Z
 
 - [README.md](README.md) — 用户文档
 - [DEVELOPMENT.md](DEVELOPMENT.md) — 开发者文档（面向 AI Agent）
-- [AGENTS.md](AGENTS.md) — 本文件：决议项一句话判据（R1–R98）、架构选型、不变量
-- [docs/DECISIONS.md](docs/DECISIONS.md) — 决议全文（R1–R98）：每条决议的原始背景、踩坑记录与边界条件
+- [AGENTS.md](AGENTS.md) — 本文件：决议项一句话判据（R1–R99）、架构选型、不变量
+- [docs/DECISIONS.md](docs/DECISIONS.md) — 决议全文（R1–R99）：每条决议的原始背景、踩坑记录与边界条件
 - [docs/三接口兼容改造备忘.md](docs/三接口兼容改造备忘.md) — 三接口（Chat/Responses/Anthropic）兼容层架构决策、实施记录、验证清单、已知限制
 - [docs/用量积分流水记账备忘.md](docs/用量积分流水记账备忘.md) — 双流水统计（token/积分）架构、差分算法、实测验证、已知限制（R17）
 

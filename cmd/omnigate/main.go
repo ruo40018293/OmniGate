@@ -459,9 +459,9 @@ func main() {
 	// 9:00/21:00 签到与 22:00 保活，每天产生两次必然失败的调用与失败日志。
 	mcSch := scheduler.New(scheduler.Config{Pool: mcPool, Upstream: mcUp, Name: "monkeycode",
 		CheckinMinutes: []int{}, KeepaliveHours: []int{}, ExpiringThreshold: expiringThreshold, Ledger: lg})
-	// 小浣熊：**有签到**（R61）—— 每日 300 积分由服务端懒发放：当天首次触达积分服务
-	// 时补写流水 biz_type=daily_grant，且 7 天后到期清零 ⇒ 漏一天真少 300。
-	// 故按全局签到时段跑（摸余额 + 核对流水，两个都幂等、不重复领取）。
+	// 小浣熊：**有签到**（R61 引入、R98 修正触发方式）—— 每日 300 积分的领取
+	// 端点不是 balance/bills（那两个是只读，摸它们不会发放），而是 POST setting_info；
+	// 见 internal/raccoon/checkin.go。签到按全局时段跑即可，重复调用会被服务端判「今日已发放」。
 	// 另：access_token 实测仅 ≈2h，而 refresh_token ≈30 天，
 	// 故保活比其它渠道更密（每 4 小时一次）以减少「请求先 401 再刷新」的额外往返；
 	// 请求路径上的 refreshIfSessionDead 仍会兜底自愈。

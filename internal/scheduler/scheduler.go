@@ -136,6 +136,11 @@ type Scheduler struct {
 	// 共用标记会让先触发的一方吃掉另一方的执行机会。
 	growthTasksDoneDay string
 
+	// catchupDoneDay 「今日漏跑补跑」的当日已判定标记（"YYYY-MM-DD"）。
+	// 与 checkinDone 共用 retryMu。只保证每天判定一次，不表示「补跑成功」——
+	// 补跑结果由各账号持久化的签到状态体现（见 catchup.go）。
+	catchupDoneDay string
+
 	// growthMu 保护 growth 开关（面板可热更新，同时被定时循环读取）。
 	growthMu sync.RWMutex
 	growth   growthOpts
@@ -367,6 +372,11 @@ func nextFireMinutes(now time.Time, minutes []int) time.Time {
 func (s *Scheduler) Run(ctx context.Context) {
 	for {
 		ch, kh := s.schedule()
+		// R99：每次进入等待前检查「今天有没有该做而没做的事」，缺则补跑。
+		// 放在这里而不是只在启动时调用：进程可能整天不休眠地跨零点，
+		// 也可能刚睡醒就撞上一个已过去的配置时刻 —— 两种都由这一句覆盖。
+		// 内部有当日标记，重复调用的开销只是几次 map 查询。
+		s.catchUpToday(time.Now())
 		// 该渠道没有任何定时任务（CheckinMinutes/KeepaliveHours 均为显式空切片）：
 		// 直接阻塞等取消或配置变更。此时 nextFireMinutes 返回零值，靠下面的
 		// IsZero 兜底会变成每分钟唤醒一次的空转。

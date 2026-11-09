@@ -1,4 +1,4 @@
-# 决议全文（R1–R98）
+# 决议全文（R1–R99）
 
 > 本文件是 `AGENTS.md` 第 1 节的**完整原文**——每条决议「为什么这么做 / 踩过什么坑 / 边界在哪」都在这里。
 > `AGENTS.md` 只保留每条的一句话判据，随每次会话自动加载，用来提醒「别推翻什么」；
@@ -1063,3 +1063,66 @@ M5 bills 失败改 Error、M6 401 不映射 no_token、M7 DailyCheckin 不对可
 **已知未做**：setting_info 的 `data.point_grant_popups[].source` 未细分（只按 points 累加）；
 上游 `DailyCheckin` 无 bills 兜底、我们有（更保守）；未给 web 端点单独配超时（沿用 `do` 的 180s）。
 部署后需重启托盘进程才生效。
+
+## R99 — 签到与猫猫旅行的「今日漏跑就补跑」
+
+**触发（2026-11-08 用户原话）**：「签到还有这个旅行的搞个自动的，检查今日有没执行过没有自动执行呗」
+
+### 一、先取证，别猜
+
+生产日志 `E:\陈焕生\workbuddy-api\data\app.log`，2026-11-08 含 growth 的行共 11 条：
+
+```
+09:00:01.450268 growth tasks batch start platform=workbuddy accounts=1 include_mp=false
+09:00:01.482907 growth batch start platform=workbuddy accounts=1 redeem=true travel=true
+09:00:02.103116 growth travel ok platform=workbuddy uid=196316fc-... msg=已派出
+17:16:07.137989 growth travel manual ok platform=workbuddy uid=196316fc-... loc=1 msg=到站领取 +10
+17:16:10.164010 growth travel manual ok platform=workbuddy uid=196316fc-... loc=1 msg=今日已派出
+```
+
+结论两条：
+1. **旅行「派出」是自动的，到站领取不是**。`GrowthTravelOnce` 是同一个方法里的两个分支（按上游 TravelStatus 状态机推进），09:00 那次上游状态是「可派出」，派完就结束；到站的 10 分要等用户手点（17:16 那两条）。
+2. **签到当天其实都成功了**。`data/state-*.json` 实况：glm 21:00:05 / minimax 17:16:15 / qodercn 17:16:13 / qodercom 17:16:13 / raccoon 21:00:01 / traework 21:00:00 / workbuddy 21:00:01，全部 `ok=True` 且是当天。用户「签到好像没跑了」的体感来自「旅行没自动领」。
+
+### 二、为什么漏跑
+
+`internal/scheduler/growth.go` 的 `runGrowthOncePerDay` 只有两个调用点：`scheduler.Run` 的 `exactSlot(ch, minute)` 分支（配置时刻的**整分**）与 `catchup` 新增的这个。而 `growthDoneDay` 是**纯内存**字段：
+
+- daemon 没在那个分钟活着（关机、休眠、晚启动、重启）⇒ 整天不跑；
+- 重启即丢标记 ⇒ 同一天可能重复跑（上游 `daily_limit_reached` 兜住了，但重复打请求本身不好）。
+
+签到侧同构：`checkinDone map[string]bool` 也是内存态，键为 `YYYY-MM-DD@起始分钟`。不过签到有 `CheckinRetryUntil` 窗口重试（每 60 秒一次），所以单时段渠道的容错比成长高；成长没有任何窗口。
+
+### 三、做法
+
+新增 `internal/scheduler/catchup.go`（127 行），`Run()` 每轮循环首行调 `catchUpToday(time.Now())`：
+
+1. **一天只判定一次**：`catchupDoneDay`（retryMu 保护）。重启后重置 ⇒ 允许再补一次，正是需求想要的。
+2. **签到补跑**：`len(CheckinMinutes())==0 || ActivitiesOnly` 直接跳过（无任务 / 保活型渠道不该打签到端点）；已过首个配置时刻 + `catchupGrace = 2min` 才动；判据读**持久化**的 `Pool.Status.LastCheckinAt/LastCheckinOK`——今天有任一账号 `OK=true` 就不补，今天试过但失败也不补（交给窗口重试与按账号限流延迟），只有「今天完全没成功过」才补。
+3. **成长补跑**：同一套时刻判断，调 `runGrowthOncePerDay` + `runGrowthTasksOncePerDay`。幂等由上游保证（每日仅能派出一次）。
+
+### 四、四道成长闸门是冗余的
+
+排查 M4 变异时踩了一个坑，记在这里：成长自动化有四道开关判断——
+
+```
+catchUpGrowth: if !s.growthEnabled() && !s.growthTasksEnabled() { return }
+runGrowthOncePerDay: if !s.growthEnabled() { return }
+RunGrowthNow: if !s.growthEnabled() { return }
+runGrowthFor: if o.travel { ... }
+```
+
+只拆一层是**等价变异**（行为不变，另一层照样拦住）。要观测到行为变化必须**同时**拆全部四道。变异脚本第一次跑 M4 是 GREEN(BAD)，根因不是代码而是**脚本 bug**：同一文件的多条编辑各自 `pristine.replace()` 后写盘，后一条把前一条静默冲掉。改成累积暂存（`staged[path] = cur.replace(...)`）后立刻转红。
+
+### 五、闸门与变异
+
+`internal/scheduler/catchup_test.go` 12 例（今日已成功 / 今日失败过 / 未到时刻 / 保护期内 / 无签到任务 / ActivitiesOnly / 旅行补跑 / 开关全关 / 幂等 / 失败不重试 等）。
+
+六处变异全部 RED：M1 漏「今天已成功」闸门 / M2 漏 ActivitiesOnly / M3 漏保护期 / M4 四道成长闸门全拆 / M5 `catchupDoneDay` 不置位 / M6 `anyCheckinSucceededToday` 恒真。
+
+### 六、边界（明确的「不做」）
+
+- **不新增持久化字段**：签到判据复用既有的 `LastCheckinAt/LastCheckinOK`（`pool.stateVersion` 不动，纯附加字段不该碰这个常量）。成长的 `catchupDoneDay` 保持内存态——重启再补一次是**想要**的行为，不是缺陷。
+- **失败不当天反复重试**：`catchupDoneDay` 置位与成败无关。反复补跑会让「上游真挂了」变成每分钟三倍流量。
+- **不碰 `runCheckin(-1)`（手动/单账号入口）** 与面板的「立即执行」按钮（R76 的解耦语义）。
+- **不改上游签到窗口**：qoder 双区固定 10:00、minimax 00:00 重置，这些是 R94 的 `FollowGlobalCheckin` 白名单范畴，补跑只在「配置时刻已过」时判定。
