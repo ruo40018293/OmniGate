@@ -422,6 +422,19 @@ func Classify(status int, body string) provider.ErrKind {
 			strings.Contains(lower, "unsupported content type") {
 			return provider.ErrBadParams
 		}
+		// R100：上下文超窗是**请求级**错误，不是账号问题。上游原文
+		// `invalid params, context window exceeds limit (2013)` 里的 2013 只出现在
+		// message 文本中、不是 `"code":2013` 字段形态，上面的 CodeMarker 看不见它。
+		// 没有这条分支时会落到 ErrClient，而 ErrClient 在 Rotatable 白名单里：
+		// handler 会白白轮转一次（本机每渠道只有 1 个号，必然失败），并把它记成
+		// `kind=client`——读起来像「这个号坏了」，真相是「这个请求对该模型的窗口
+		// 来说太大了」。归 ErrPromptTooLong 后 handler 直接原文透传，不罚号不轮转。
+		if strings.Contains(lower, "context window exceed") ||
+			strings.Contains(lower, "context_length_exceeded") ||
+			strings.Contains(lower, "context length exceeded") ||
+			strings.Contains(lower, "maximum context length") {
+			return provider.ErrPromptTooLong
+		}
 		// 其余 4xx：按语义归 ErrClient（可能挂在账号权益上，允许换号一次）。
 		return provider.ErrClient
 	default:

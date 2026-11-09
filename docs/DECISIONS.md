@@ -1,4 +1,4 @@
-# 决议全文（R1–R99）
+# 决议全文（R1–R100）
 
 > 本文件是 `AGENTS.md` 第 1 节的**完整原文**——每条决议「为什么这么做 / 踩过什么坑 / 边界在哪」都在这里。
 > `AGENTS.md` 只保留每条的一句话判据，随每次会话自动加载，用来提醒「别推翻什么」；
@@ -1126,3 +1126,125 @@ runGrowthFor: if o.travel { ... }
 - **失败不当天反复重试**：`catchupDoneDay` 置位与成败无关。反复补跑会让「上游真挂了」变成每分钟三倍流量。
 - **不碰 `runCheckin(-1)`（手动/单账号入口）** 与面板的「立即执行」按钮（R76 的解耦语义）。
 - **不改上游签到窗口**：qoder 双区固定 10:00、minimax 00:00 重置，这些是 R94 的 `FollowGlobalCheckin` 白名单范畴，补跑只在「配置时刻已过」时判定。
+
+## R100 — 上下文超窗必须归「请求级」错误，不得走账号轮转
+
+### 触发
+
+2026-11-09 用户连续两次收到：
+
+```
+400: {"type":"invalid_request_error","message":"invalid params, context window exceeds limit (2013)"}
+```
+
+同一时间段还有三笔 raccoon 请求 `status=0` + `timeout awaiting response headers`，
+用户怀疑是「大上下文切到小窗口模型就报错」。查日志确认二者**同源**：都是超长上下文。
+
+生产日志逐字（`E:\陈焕生\workbuddy-api\data\app.log`）：
+
+```
+2026/11/09 16:00:55.916827 rotate platform=minimax uid=8b0948c077d2bcf1 kind=client status=400
+  body={"type":"error","error":{"type":"invalid_request_error",
+        "message":"invalid params, context window exceeds limit (2013)"},"request_id":"0740b..."}
+2026/11/09 16:00:55 access POST /v1/chat/completions status=400 bytes=169 dur=3.058s
+2026/11/09 16:01:00.244738 rotate platform=minimax uid=8b0948c077d2bcf1 kind=client status=400  (同上)
+2026/11/09 16:01:00 access POST /v1/chat/completions status=400 bytes=169 dur=4.295s
+```
+
+请求规模（`data/chat-capture/err-20261109-155716.136-raccoon-0-4533638.json`）：
+
+| 项 | 值 |
+|---|---|
+| `request_bytes` | 4533638（4.3 MB） |
+| `messages` | **2816 条** |
+| content 文本合计 | 1796003 字符 |
+| 其中 `tool` 角色 | 1478828 字符（**82.3%**） |
+| 其中压缩摘要（`[Compressed conversation section]`） | 33989 字符（**1.9%**） |
+| 粗估 input tokens | ≈64.5 万 |
+| `max_completion_tokens` | 100000 |
+
+⇒ **不是上下文压缩插件的问题**（压缩摘要只占 1.9%），是工具结果累积把窗口吃满。
+
+### 根因链
+
+1. `internal/minimax/client.go` 的 `Classify`，`case status >= 400` 分支里只有三条字符串判据
+   （`requires adaptive thinking` / `does not follow tool call` / `unsupported content type`），
+   加上 `provider.CodeMarker(lower, "bad_params") || provider.CodeMarker(lower, "2013")`。
+2. 上游那句话里的 `2013` 只出现在 **message 文本尾部**（`(2013)`），不是 `"code":2013`
+   字段形态；`CodeMarker` 只认 `"code":` / `'code':` 键后的值，看不见它。
+3. 于是落到末尾的 `return provider.ErrClient`。
+4. `ErrClient` 在 `provider.ErrKind.Rotatable()` 白名单里
+   （`case ErrSoftRate, ErrHardCredit, ErrSessionDead, ErrNotFound, ErrServer, ErrAccountFault, ErrClient: return true`）。
+5. `internal/server/handler.go` 的 `if kind.Rotatable()` 于是记一条
+   `rotate platform=minimax kind=client ...` 并 `continue` 换号。
+6. 本机每渠道只有 **1 个账号**（`data/state-*.json` 的 `accounts` 恒为 1）⇒ 换号必败 ⇒
+   走到 `if lastStatus > 0 && lastBody != nil { transparentError(...) }` 把上游 400 原文透传。
+7. 用户看到的是上游原文（行为上没罚号、没冷却），但日志写着 `kind=client` +
+   `rotate`，读起来像「这个号坏了」，真相是「这个请求对该模型的窗口来说太大了」。
+
+### 改法
+
+在 `case status >= 400:` 分支里、三条既有 `ErrBadParams` 判据之后、`return provider.ErrClient`
+之前插入四条超窗判据：
+
+```go
+if strings.Contains(lower, "context window exceed") ||
+    strings.Contains(lower, "context_length_exceeded") ||
+    strings.Contains(lower, "context length exceeded") ||
+    strings.Contains(lower, "maximum context length") {
+    return provider.ErrPromptTooLong
+}
+```
+
+归 `ErrPromptTooLong` 后 handler 走
+`case provider.ErrContentBlocked, provider.ErrPromptTooLong, provider.ErrPassthrough:` →
+直接 `transparentError` 原文透传，不冷却、不计数、不轮转。
+
+### 全仓对齐核对（minimax 是唯一漏网者）
+
+| 渠道 | 文件:行 | 判据 | 归类 |
+|---|---|---|---|
+| raccoon | `internal/raccoon/client.go:728-730` | `message is bigger than` / `context length` / `context_length_exceeded` / `too long` | `ErrPromptTooLong` |
+| qwenwork | `internal/qwenwork/client.go:734` | `prompt is too long` / `context length` | `ErrPromptTooLong` |
+| loomy | `internal/loomy/client.go:667` | `context length` / `too long` / `tokens exceed` | `ErrPromptTooLong` |
+| qoder | `internal/qoder/client.go:475` | `prompt is too long` / `11115` | `ErrPromptTooLong` |
+| qodercn | `internal/qodercn/client.go:786` | 同上 | `ErrPromptTooLong` |
+| qodercom | `internal/qodercom/client.go:544` | 同上 | `ErrPromptTooLong` |
+| workbuddyai | `internal/workbuddyai/models.go:497` | 同上 | `ErrPromptTooLong` |
+| workbuddy(CN) | `internal/upstream/client.go:102` | `prompt is too long` / `"code":11115` | `ErrPromptTooLong` |
+| **minimax** | `internal/minimax/client.go` | **（本轮新增）** | `ErrPromptTooLong` |
+
+### 闸门
+
+- `internal/minimax/minimax_test.go` 的 `TestClassify` 新增 4 例，第一例是**生产日志逐字复制**的上游原文
+  （`invalid params, context window exceeds limit (2013)` + `request_id:"0740b"`），另三例覆盖
+  `context_length_exceeded` / `maximum context length is N tokens` / `context length exceeded: 1000001 > 1000000`。
+- `internal/server/r100_prompt_too_long_test.go`：假上游的 `Classify` **直接转调
+  `minimax.Classify`**（走真实实现，否则测的是测试自己），断言「上游只被调用 1 次 + 400 原文透传 +
+  两个账号都不计数不冷却」；另加反向守卫 `TestOtherMinimax4xxStillRotates`，确认普通 400 仍是
+  可轮转的 `ErrClient`（不能为了修这一条把整类 4xx 都改成不轮转）。
+
+### 变异验证（3 处全红）
+
+| 变异 | 做法 | 结果 |
+|---|---|---|
+| M1 | `return provider.ErrPromptTooLong` → `return provider.ErrClient` | 红（回到漏判） |
+| M2 | 判据文案 `context window exceed` → `context window exceeding` | 红 |
+| M3 | 整条 `if` 块删除 | 红 |
+
+### 边界与已知未做
+
+- **minimax 出站协议没有窗口字段**。`internal/minimax/messages.go` 的出站键只有
+  `system` / `max_tokens` / `temperature` / `stop_sequences` / `tools` / `thinking` / `output_config`，
+  不下发任何窗口或档位 ⇒ 本地**无法**让 M3 吃下更大上下文，只能靠客户端压上下文或换更大窗口的模型。
+- `internal/minimax/models.go:276-287` 取 `context_window_options` 的**最大档**
+  （`[512000, 1000000]` → 1000000），是**声明**层面的乐观值；上游实际拒绝时仍以 400 为准。
+- **未做**：入站请求的 token 预估 + 目标模型窗口前置比对（当前只能等上游 400）。仓库里没有任何
+  token 估算函数，新增它要选口径（CJK/ASCII 加权）并承担误判风险，需单独决议。
+- **未做**：`internal/raccoon/client.go:96-111` 的 `ResponseHeaderTimeout: 60s`。
+  4.3 MB 请求体在 60 秒内上游发不完首字节 ⇒ `timeout awaiting response headers`。
+  R92 的 httpretry 会重试 3 次（同一 4.3 MB 体、同一 60s 上限），重试不能救。
+  是否按 `request_bytes` 放大上限，需先量清「上游读完多大体积需要多久」。
+- 上游 `rockswang/wild-work` 的 `internal/minimax/messages.go`（28216 字节）
+  **同样不处理 context 窗口**（全文只有 max_tokens/temperature/stop_sequences 三处可选字段），
+  无上游可抄。

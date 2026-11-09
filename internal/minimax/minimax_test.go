@@ -1047,6 +1047,11 @@ func TestClassify(t *testing.T) {
 		{http.StatusBadRequest, `{"code":2013,"message":"tool call result does not follow tool call"}`, provider.ErrBadParams},
 		{http.StatusBadRequest, `{"code":2013,"message":"unsupported content type 'image_url'"}`, provider.ErrBadParams},
 		{http.StatusBadRequest, `{"code":"bad_params","message":"本地拒绝"}`, provider.ErrBadParams},
+		// R100：上下文超窗是请求级错误，不许轮转换号（本机每渠道只有 1 个号）。
+		{http.StatusBadRequest, `{"type":"error","error":{"type":"invalid_request_error","message":"invalid params, context window exceeds limit (2013)"},"request_id":"0740b"}`, provider.ErrPromptTooLong},
+		{http.StatusBadRequest, `{"error":{"message":"context_length_exceeded"}}`, provider.ErrPromptTooLong},
+		{http.StatusBadRequest, `{"message":"This model's maximum context length is 200000 tokens"}`, provider.ErrPromptTooLong},
+		{http.StatusBadRequest, `{"message":"context length exceeded: 1000001 > 1000000"}`, provider.ErrPromptTooLong},
 		{http.StatusBadRequest, `{"error":"some other problem"}`, provider.ErrClient},
 		{http.StatusOK, ``, provider.ErrNone},
 	}

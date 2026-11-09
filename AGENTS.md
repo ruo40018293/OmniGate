@@ -136,6 +136,7 @@
 | R97 | 临期「花费」必须是**净花费**，且「到期作废」与「消耗速度」必须分开：上游 PR #217 修复的逐字同型缺陷——`creditOut` 是余额下降差值，不区分花掉与到期作废，昨领 300 今晨整包作废、白天又领 300 时 `creditOut=300` 全是作废、真实花费 0，旧口径外推出「已耗 300 · 预计作废 264」自相矛盾。改法：`internal/stats/stats.go` Version→2，`ExpiryRow` 加 `today_spent`/`today_expired`，新增 `expiredByUID` 与 `netSpentLocked`（`max(0, creditOut − 今日该 uid 作废)`），`burnForecastLocked` 改用净花费；`ApplyLedgerExpire` 签名由 `map[string]int64` 改 `[]LedgerExpire`（逐条带 Channel/UID，空 UID 只进渠道维度），`internal/app/stats_feed.go` 逐条喂入并保留 nil 守卫；`internal/ledger/credit.go` 的 `DiffCredits` 跳过 `InfoOnly`（monkeycode「每日 Token 额度」单位是 token，参与差分会产出假 expire），并用本次 InfoOnly 的 key 清掉旧快照误存条目；前端 `renderExpiry` 表头改「额度 · 今日花费」，`spent` 优先 `today_spent`（老后端退回 `today_out`），新增「今日已废」，预测文案「预计作废」改「到期前还会废」并带批次限定词；`scripts/ui-static-check.mjs` 夹具扩成 3 行、闸门 5 条。不移植上游 Urgency/HoursLeft 配色重构（我们结构较旧，属另一功能）。闸门：`internal/stats/r97_netspent_test.go`（5 例，含 1h 观测外推 4980）、`internal/ledger/r97_infoonly_test.go`（2 例）、`views_test.go` 12 处调用同步、UI 静态检查 5 条；六处变异全红；38 包全绿。 |
 | R98 | raccoon 签到必须由 `setting_info` 触发，不能用只读端点冒充：R61 用真实浏览器取证时把「打开工作台」触发的懒发放错记到 `GET /api/web/points/v1/balance` 头上，导致 2026-10-29 起用户不再开网页后，每日两次签到共 20 条全部 `msg=上游今日每日积分尚未发放（当日窗口内可重试）` 空转，300 分以 `daily_makeup` 当日即清零补发、余额长期不涨。上游 `internal/raccoon/checkin.go`（fork 点之前就存在，diff 视角永远看不见）实测：`GET /api/web/office/v3/setting_info` 的 `data.point_grant_popups[]` 才是发放触发点，`chat/completions` 只扣 -2、`balance`/`bills`/`user_info`/`iam/confirm` 全部只读不入账，同日重复幂等。改法：新增 `EpOfficeSettingInfo` + `FetchSettingInfo`（走 `doOfficial`，补 R91 的官方指纹头并按账号分桶会话），`DailyCheckinReport` 以 popups 累加 `granted>0` 判 claimed、popups 空则用 bills 交叉核对判 already / `NoCampaign`（反静默空转闸门）、bills 失败保守判 already，所有分支保留 `raccoon checkin setting_info uid=...` 日志形状；`do()` 拆成共享 `doWithHeaders`，普通调用维持精简三头、仅 web 端点走官方套件。八处变异全红。 |
 | R99 | 签到与猫猫旅行必须能「今日漏跑就补跑」：`growthDoneDay`/`checkinDone` 都是纯内存、重启即丢，`runGrowthOncePerDay` 只在配置时刻的**整分**被调用 ⇒ 进程没在那个分钟活着（关机、休眠、晚启动）就整天不跑；而 `GrowthTravelOnce` 一个方法内含「派出」与「到站领取」两个分支（按 TravelStatus 状态机推进），只跑一次的结果是派出成功、到站那 10 分要用户手点（2026-11-08 生产日志：09:00:01 自动派出 → 17:16:07 用户手点才 `到站领取 +10`）。改法：新增 `internal/scheduler/catchup.go`，`Run()` 每轮循环首行调 `catchUpToday(now)`，一天只判定一次（`catchupDoneDay`，重启后重置 = 允许再补）；签到侧读**已持久化**的 `Pool.Status.LastCheckinAt/LastCheckinOK` 判「今日是否已成功」，未成功且已过首个配置时刻 +2 分钟保护期才 `runCheckin(first)`；成长侧同规则调 `runGrowthOncePerDay`/`runGrowthTasksOncePerDay`，靠上游 `daily_limit_reached` 保证幂等。`ActivitiesOnly` 渠道（workbuddyai 保活）与无签到任务的渠道一律跳过，避免每分钟空打上游。六处变异全红。 |
+| R100 | 上下文超窗是**请求级**错误，不是账号坏了：2026-11-09 16:00:55 与 16:01:00 生产日志两连 `rotate platform=minimax uid=8b0948c077d2bcf1 kind=client status=400 body={"type":"error","error":{"type":"invalid_request_error","message":"invalid params, context window exceeds limit (2013)"}}` ⇒ 两次 `access POST /v1/chat/completions status=400 bytes=169`。根因：上游那句话里的 `2013` 只出现在 **message 文本尾部**（`(2013)`），不是 `"code":2013` 字段形态，所以 `provider.CodeMarker(lower,"2013")` 看不见它；`internal/minimax/client.go` 的 `Classify` 于是落到 `ErrClient`，而 `ErrClient` 在 `ErrKind.Rotatable()` 白名单里 ⇒ handler 白烧一次轮转（本机每渠道只有 1 个账号，必然失败），日志还记成 `kind=client`，读起来像「这个号坏了」，真相是「这个请求对该模型的窗口来说太大了」。改法：`Classify` 的 `case status >= 400` 分支新增四条判据（`context window exceed` / `context_length_exceeded` / `context length exceeded` / `maximum context length`）→ `ErrPromptTooLong`。归 `ErrPromptTooLong` 后 handler 走 `case provider.ErrContentBlocked, provider.ErrPromptTooLong, provider.ErrPassthrough:` 直接原文透传，不冷却、不计数、不轮转。同时验证了全仓对齐：其余 8 个渠道（raccoon/qwenwork/loomy/qoder/qodercn/qodercom/workbuddyai/upstream）**早已**认这些文案归 `ErrPromptTooLong`，minimax 是唯一漏网者。闸门：`internal/minimax/minimax_test.go` 的 `TestClassify` 新增 4 例（含生产日志逐字复制的原文）、`internal/server/r100_prompt_too_long_test.go` 用**真实 `minimax.Classify`** 串起整条链断言「上游只被调用 1 次 + 原文透传 + 两账号都不计数不冷却」，另加反向守卫 `TestOtherMinimax4xxStillRotates`（普通 400 必须仍是可轮转的 `ErrClient`）。三处变异全红（改回 `ErrClient` / 判据文案写错 / 整条分支删掉）
 
 ## 2. 架构选型（依据）
 
@@ -433,6 +434,8 @@ POST /api/quit                     # 退出程序
 
 36. **漏跑要能补跑，但不能多打上游**：R99 的硬约束。①判据读**持久化**状态（`Pool.Status.LastCheckinAt/LastCheckinOK`），不许用内存日标记当唯一依据——重启即丢，正是漏跑的成因；②补跑必须比正常调度**更保守**：已过首个时刻 + 保护期、今日无成功记录、且渠道确有该任务（`len(CheckinMinutes)>0`、非 `ActivitiesOnly`）三条同时成立；③一天最多判定一次（`catchupDoneDay`），失败也不当天反复重试——交给既有的窗口重试；④成长自动化的多道开关闸门（catchup 开关 / `runGrowthOncePerDay` / `RunGrowthNow` / `runGrowthFor` 的 `o.travel`）是**互为冗余**的，变异时必须**同时**拆全部才能观测到行为变化，只拆一层属等价变异。
 
+37. **上下文超窗必须归「请求级」错误，不得走账号轮转**：R100 的硬约束。①判据不能只认 `"code":NNNN` 字段——上游会把错误码塞在 message 文本里（minimax 的 `context window exceeds limit (2013)`），这类文案必须进字符串判据；②归 `ErrPromptTooLong`（或 `ErrContentBlocked`/`ErrPassthrough`），**不许**归 `ErrClient`——`ErrClient` 在 `Rotatable()` 里，每渠道单号时轮转必然失败，还污染日志语义；③新增渠道时必须先核对「上下文超限文案是否已认」——全仓基线是 8 个渠道已认，漏一个就是一个静默误判（`internal/provider/r93_quota_markers_test.go` 那种源码一致性闸门可复用）；④反向守卫必须有：修「某类 4xx 不轮转」时不能把其余 4xx 一起变成不轮转。
+
 ## 7. 平台能力差异表（internal/platform）
 
 | 能力 | Windows | macOS | Linux |
@@ -493,8 +496,8 @@ git tag vX.Y.Z && git push origin vX.Y.Z
 
 - [README.md](README.md) — 用户文档
 - [DEVELOPMENT.md](DEVELOPMENT.md) — 开发者文档（面向 AI Agent）
-- [AGENTS.md](AGENTS.md) — 本文件：决议项一句话判据（R1–R99）、架构选型、不变量
-- [docs/DECISIONS.md](docs/DECISIONS.md) — 决议全文（R1–R99）：每条决议的原始背景、踩坑记录与边界条件
+- [AGENTS.md](AGENTS.md) — 本文件：决议项一句话判据（R1–R100）、架构选型、不变量
+- [docs/DECISIONS.md](docs/DECISIONS.md) — 决议全文（R1–R100）：每条决议的原始背景、踩坑记录与边界条件
 - [docs/三接口兼容改造备忘.md](docs/三接口兼容改造备忘.md) — 三接口（Chat/Responses/Anthropic）兼容层架构决策、实施记录、验证清单、已知限制
 - [docs/用量积分流水记账备忘.md](docs/用量积分流水记账备忘.md) — 双流水统计（token/积分）架构、差分算法、实测验证、已知限制（R17）
 
