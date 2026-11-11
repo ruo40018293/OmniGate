@@ -617,12 +617,11 @@ func (h *Handler) fetchRuntimeModels(rt *Runtime) []provider.ModelInfo {
 	// 过期先 refresh + 落盘。否则冷启动时 qodercn/qodercom 等无静态兑底渠道
 	// 拿过期 token 拉 FetchModels → 401 → 静默失败 → 负缓存 5min，
 	// 费率面板整组消失，最坏要等 30min ticker 才补拉（不变量 19）。
-	if acct.NeedsRefresh(10 * time.Minute) {
-		if err := rt.Upstream.RefreshToken(acct); err != nil {
-			log.Printf("models fetch token refresh failed platform=%s uid=%s err=%v", rt.Kind, acct.UID, err)
-		} else if serr := acct.SaveAtomic(); serr != nil {
-			log.Printf("models fetch token save failed platform=%s uid=%s err=%v", rt.Kind, acct.UID, serr)
-		}
+	// R101：单飞（内层重检 + 落盘由 provider 统一做），避免与其它刷新路径并发。
+	if err := provider.RefreshIfNeeded(acct, 10*time.Minute, func() error {
+		return rt.Upstream.RefreshToken(acct)
+	}); err != nil {
+		log.Printf("models fetch token refresh failed platform=%s uid=%s err=%v", rt.Kind, acct.UID, err)
 	}
 	infos, err := rt.Upstream.FetchModels(acct)
 	if err != nil || len(infos) == 0 {
@@ -782,8 +781,21 @@ rotateLoop:
 		}
 		tried[acct.UID] = true
 		if acct.NeedsRefresh(h.cfg.RefreshSkew) {
+			// R101：单飞。并发的另一个请求/后台循环正在刷新同一账号时，这里等它的结果，
+			// 不再各自拿同一个 refresh_token 各打一次（单会话渠道必然一成功一失败）。
 			log.Printf("refresh start platform=%s uid=%s reason=request", rt.Kind, acct.UID)
-			if err := rt.Upstream.RefreshToken(acct); err != nil {
+			if err := provider.RefreshOnce(acct, func() error {
+				if !acct.NeedsRefresh(h.cfg.RefreshSkew) {
+					return nil // 等待期间已被刷好
+				}
+				if err := rt.Upstream.RefreshToken(acct); err != nil {
+					return err
+				}
+				if serr := acct.SaveAtomic(); serr != nil {
+					log.Printf("refresh save failed platform=%s uid=%s err=%v", rt.Kind, acct.UID, serr)
+				}
+				return nil
+			}); err != nil {
 				log.Printf("refresh failed platform=%s uid=%s err=%v", rt.Kind, acct.UID, err)
 				lastErr = err
 				h.stickyClear(rt)
@@ -794,9 +806,6 @@ rotateLoop:
 					rt.Pool.Cooldown(acct.UID, pool.CoolErr, h.cfg.ErrCooldown, "refresh: "+err.Error())
 				}
 				continue
-			}
-			if err := acct.SaveAtomic(); err != nil {
-				log.Printf("refresh save failed platform=%s uid=%s err=%v", rt.Kind, acct.UID, err)
 			}
 			log.Printf("refresh success platform=%s uid=%s expires_at=%d", rt.Kind, acct.UID, acct.ExpiresAt)
 		}

@@ -1440,13 +1440,13 @@ func (a *App) refreshIfSessionDead(rt *Runtime, au *auth.Auth, err error) bool {
 		return false
 	}
 	log.Printf("session dead, refreshing platform=%s uid=%s", rt.Kind, au.UID)
-	if rerr := rt.Upstream.RefreshToken(au); rerr != nil {
+	// R101：走单飞。这里的场景是「本地 expiresAt 仍有效、上游已 401」，不能用
+	// NeedsRefresh 判断，故用 RefreshForce 无条件刷新；并发时后来的调用直接复用
+	// 前一次的结果，不再拿同一个已作废的 refresh_token 各打一次（那必然一成功一失败，
+	// 失败那次还会把账号推进冷却）。
+	if rerr := provider.RefreshForce(au, func() error { return rt.Upstream.RefreshToken(au) }); rerr != nil {
 		log.Printf("session dead refresh failed platform=%s uid=%s err=%v", rt.Kind, au.UID, rerr)
 		return false
-	}
-	// 刷新成功必须落盘：否则下次启动又拿旧 token，重回 401。
-	if serr := au.SaveAtomic(); serr != nil {
-		log.Printf("session dead refresh save failed platform=%s uid=%s err=%v", rt.Kind, au.UID, serr)
 	}
 	return true
 }
@@ -1504,15 +1504,14 @@ func (a *App) StartCreditAutoRefresh(ctx context.Context, kinds []provider.Kind,
 					if au == nil {
 						continue
 					}
-					// token 临近过期时先刷新（国际版 token 有效期长，通常不触发）
-					if au.NeedsRefresh(10 * time.Minute) {
-						if err := rt.Upstream.RefreshToken(au); err != nil {
-							log.Printf("credit auto-refresh token refresh failed platform=%s uid=%s err=%v", k, st.UID, err)
-							continue
-						}
-						if err := au.SaveAtomic(); err != nil {
-							log.Printf("credit auto-refresh token save failed platform=%s uid=%s err=%v", k, st.UID, err)
-						}
+					// token 临近过期时先刷新（国际版 token 有效期长，通常不触发）。
+					// R101：单飞 + 内层重检——后台这个循环与请求路径可能同时对同一账号
+					// 触发刷新，并发刷新会互相作废单会话 refresh_token。
+					if err := provider.RefreshIfNeeded(au, 10*time.Minute, func() error {
+						return rt.Upstream.RefreshToken(au)
+					}); err != nil {
+						log.Printf("credit auto-refresh token refresh failed platform=%s uid=%s err=%v", k, st.UID, err)
+						continue
 					}
 					usable, expiring, unusable, err := a.creditTotals(rt, au)
 					if err != nil {
@@ -3081,17 +3080,12 @@ func (a *App) RefreshPricing() {
 		if acct == nil {
 			continue
 		}
-		// 先确保 token 有效
-		if acct.NeedsRefresh(10 * time.Minute) {
-			if err := rt.Upstream.RefreshToken(acct); err != nil {
-				errs = append(errs, fmt.Sprintf("%s: token refresh failed", rt.Kind))
-				continue
-			}
-			// 必须落盘：refresh token 会轮换，不写回则下次启动用的是旧 refresh token，
-			// 而旧 access token 已被上游作废 → 本地 expiresAt 仍显示有效 → 卡死在 401。
-			if serr := acct.SaveAtomic(); serr != nil {
-				log.Printf("pricing token save failed platform=%s uid=%s err=%v", rt.Kind, acct.UID, serr)
-			}
+		// 先确保 token 有效（R101：单飞，避免与额度轮询/请求路径并发刷新同一账号）
+		if err := provider.RefreshIfNeeded(acct, 10*time.Minute, func() error {
+			return rt.Upstream.RefreshToken(acct)
+		}); err != nil {
+			errs = append(errs, fmt.Sprintf("%s: token refresh failed", rt.Kind))
+			continue
 		}
 		pricing, err := rt.Upstream.FetchModelPricing(acct)
 		if err != nil {

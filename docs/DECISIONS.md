@@ -1,4 +1,4 @@
-# 决议全文（R1–R100）
+# 决议全文（R1–R101）
 
 > 本文件是 `AGENTS.md` 第 1 节的**完整原文**——每条决议「为什么这么做 / 踩过什么坑 / 边界在哪」都在这里。
 > `AGENTS.md` 只保留每条的一句话判据，随每次会话自动加载，用来提醒「别推翻什么」；
@@ -1248,3 +1248,104 @@ if strings.Contains(lower, "context window exceed") ||
 - 上游 `rockswang/wild-work` 的 `internal/minimax/messages.go`（28216 字节）
   **同样不处理 context 窗口**（全文只有 max_tokens/temperature/stop_sequences 三处可选字段），
   无上游可抄。
+
+## R101 — 吸收上游五项 + 修三处既有缺陷（刷新单飞 / 思考档位 / 月末裁剪 / 余额读不出 / 流水筛选）
+
+### 触发
+
+用户 2026-11-11：`qodercom: no enabled models in any scene` 看下上游是否也不能用了，然后看看有没值得吸收的。
+qodercom 一侧已用真实凭据钉死是上游按账号下发 `enable=false`（CN 区对照全 true），网关侧无法修；随后把上游 `rockswang/wild-work`（当时最新 v2.11.6 `100278f1c`，另有 `bed60fa02`）的 7 项候选逐条对我们的代码做裁决，得 5 做 / 2 不接。
+
+### 一、token 刷新单飞（新增 `internal/provider/refresh.go`，166 行）
+
+**我们原来的样子**：7 处 `RefreshToken` 调用点互不设防 ——
+`internal/app/app.go:1447`（session 自愈，Force）、`:1510`（额度轮询，IfNeeded）、`:3084`（费率刷新，IfNeeded）、
+`internal/server/handler.go:621`（请求前，IfNeeded）、`:787`（401 自愈换号后，Once）、
+`internal/scheduler/scheduler.go:795`（签到刷新，Force）、`:823`（保活批量，Force）。
+全仓 `grep singleflight|refreshOnce` 命中 0。
+
+**为什么必须单飞**：refresh_token 是单会话的渠道（raccoon/qwenwork 等）上游每次刷新都轮换它、旧值立刻作废。两个调用同时握着同一个旧 refresh_token，结果必然一成功一失败 —— raccoon 报 `200822 refresh_conflict`，qwenwork 报 `invalid_grant`；失败那次还会把账号推进冷却（默认 10 分钟）甚至判定 session dead，对外就是「偶发 503 / 账号莫名不可用」。
+`auth.Auth` 自带的 `mu` 只保证「不会并发读写字段」，拦不住「两次刷新都真的打上游」——串行执行照样各发一次，第二个用的还是已被轮换的旧 token。
+
+**实现要点**（每条都有对应测试）：
+1. `flightGroup` 手写 map+channel，不引 `golang.org/x/sync`（本仓 go.mod 刻意保持极小）。
+2. 键用 `auth.FilePath`，回落到 `UID`：文件路径天然唯一（各渠道 loader 各扫各的文件名前缀）；「同一 UID 在两个目录各一份文件」本就代表两个独立 refresh 会话，用 UID 反而会错误合并。
+3. **先写 err 再 close，先 close 再删表项**：前者保证等待者读到的不是零值；后者封住「刷新刚成功、并发请求刚拿到 401」那个极窄窗口里的重复刷新（重复刷新就是一次多余的 refresh_conflict）。
+4. `RefreshIfNeeded` 内含**内层重检**：等待者醒来时 token 可能已经是新的，重检让它直接返回。
+5. `RefreshForce` 给 401 自愈：本地 expiresAt 未到期时 `NeedsRefresh` 为 false，走 IfNeeded 永远修不回来。
+6. `refreshAndSave` 统一落盘，**落盘失败只记日志不返错** —— 内存里的 token 已经可用，把它当刷新失败会让调用方误判账号不可用并进冷却，代价远大于一次写盘失败。
+7. panic 时 defer 先 `finish(包装错误)` 唤醒所有等待者，再把 panic 上抛 —— 不能让等待者永久阻塞。
+
+### 二、qoder 系 thinking 档位（qodercn + qodercom 两份平行实现）
+
+**证据**（2026-11-11 探针，真实凭据走 `NewCosySession` 直连 `/algo/api/v2/model/list?Encode=1`，HTTP 200 / 60151 字节 / 顶层 12 键）：
+- `auto`：`is_reasoning=false`，`context_config={1M,200K(default),400K}`，**无 thinking_config**
+- `ultimate`：`is_reasoning=true`，`thinking_config={"enabled":{"efforts":{"high":{"is_default":true},"low":{},"max":{},"medium":{},"xhigh":{}},"is_default":true}}`
+- `efficient`：`context_config={200K(default)}`，无 thinking_config
+- 13 个模型解析结果：`ultimate` [low medium high xhigh max] 默认 high；`qmodel_latest` [low high xhigh] xhigh；`qmodel_38max`/`qfmodel` [low medium xhigh] medium；`kmodel_latest`/`kmodel`/`gmodel`/`dfmodel` [low high max] high；`gfmodel`/`dmodel` [high max] max；`mmodel` [low medium high xhigh max] xhigh；`auto`/`efficient` 空。
+
+**改法**（每个包 4 处，逐字对称）：
+1. `modelWire` 加 `ThinkingConfig json.RawMessage`
+2. `thinkingConfig` 结构 + `parseThinkingConfig() ([]string, string)`：RawMessage 承接（形状不符只损失本字段，不让整批模型解析失败）；空档位名丢弃；空表返 nil；无 `is_default` 回退最高档
+3. `parseDynamicModels` 里紧跟 `parseContextConfig` 调用
+4. `toModelInfos` 把两个字段带进 `provider.ModelInfo`
+5. `ModelEntry` 加 `ReasoningEfforts []string` / `DefaultReasoningEffort string` 两个 `json:"-"`
+6. `effortRank = {minimal:0, low:1, medium:2, high:3, xhigh:4, max:5, ultra:6}` + `sortEfforts`（SliceStable：双已知按 rank、单已知优先、双未知字典序）
+
+**为什么必须排序**：上游 efforts 是 **map**，Go 的 JSON 解析顺序随机 ⇒ 同一个模型每次启动给出的下拉框顺序都不同，用户看到的是「档位在跳」。
+
+### 三、ledger 月末 cutoff 溢出
+
+```go
+// 改前
+cutoff := time.Now().AddDate(0, -keepMonths, 0).Format("200601")
+```
+`AddDate` 在 10 月 31 日减 1 个月得到「9 月 31 日」，Go 规整为 10 月 1 日 ⇒ `cutoff = "202610"` = **当月** ⇒ `stem < cutoff` 把所有更早分段（含 9 月）一起删掉。`keepMonths = 1`（`internal/ledger/ledger.go:50`），于是**每月的月末几天启动都会清空上个月流水**。
+
+改法：`monthTagShift(t, back)` 先 `time.Date(t.Year(), t.Month(), 1, ...)` 归到月初再 `AddDate(0, -back, 0)` —— 任何月份都不存在溢出。
+
+### 四、loomy 余额读不出不得当 0
+
+```go
+// 改前：解析失败
+return 0, nil, nil   // 结构未知：不报错、不留余额
+```
+调用方把「读不出」当「余额为 0」⇒ 账本记一条 expire，下一轮读到真值再记一条 earn，面板上是余额断崖 + 假过期刷屏。上游确实会偶发回 HTTP 200 + 不含余额字段（`{"code":0,"data":{}}` 一类）。
+
+改法：解析失败返 `fmt.Errorf("loomy 额度响应解析失败: %w (%s)", ...)`；`len(items)==0` 返 `fmt.Errorf("loomy 额度响应缺少余额字段…")`。
+**反向约束**：真正的 0 余额仍带字段（`balance=0` / `dailyBalance=0`）⇒ items 非空 ⇒ 正常返回 0，不受此拦（有专门用例锁住）。
+
+### 五、raccoon 流水 `type=all` → `type=income`
+
+不带筛选时该页混着「桌面端 LLM 对话消耗」，每笔占一条；服务端只给最近 N 条且 `offset>0` 恒空（实测）⇒ 当天发放记录几小时后被挤出窗口 ⇒ `pickTodayDailyGrant` 找不到今天的 `daily_grant` ⇒ 把「今天已领过」误判成「今天根本没发」，触发无谓重试。收入流水每天 1 笔左右，窗口不会再被消耗冲掉。
+
+### 六、monkeycode 402 → ErrHardCredit
+
+`Classify` 的 switch 里原本没有 402 分支，于是 402 掉进 `case status >= 400: return provider.ErrPassthrough` —— 既不把账号推进硬冷却，也不触发换号，只把上游原文透传给客户端。用户侧表现是「一直报错、不知道是哪个号没钱了」，面板上那个号还是「健康」。
+新增 `case status == http.StatusPaymentRequired: return provider.ErrHardCredit`（与 upstream/workbuddyai/raccoon/qwenwork/qodercom/qodercn 的 402 口径一致）。
+
+### 边界与已知未做
+
+- **未做** `bed60fa02`（qodercn 积分包到期时间）：机制是 `POST /api/v1/auth/session-transfers` 换一次性 transferUrl → 禁跟随 303 取 Set-Cookie → `GET big_model_credits` 读 `quota_detail[].expires_at`，313 行 + 353 行测试，成本高，独立排期。业务 API `/api/v2/quota/usage` 只有 total/used/remaining，没有任何到期字段。
+- **不接** `3b90fee58`（千问办公设备授权流，51753 字节大改）：我们 qwenwork 走导入凭据，不是网页登录。
+- **不接** PR #219（sanitize 配置化）：脱敏链已在 R95 收敛，与上游结论一致。
+- monkeycode 账号数为 0，402 这条改动**当前收益为 0**，属「先对齐口径，等有号时自然生效」。
+- raccoon 逐条流水只在 R98 之后作交叉核对，`type=income` 的影响面有限（主要防误判重试）。
+
+### 闸门与变异
+
+| 文件 | 用例数 | 锁什么 |
+|---|---|---|
+| `internal/provider/refresh_test.go` | 11 | 并发只打一次 / 错误共享 / 顺序调用各打一次 / 跨账号独立 / 无 key 直通 / panic 不阻塞等待者 / 内层重检 / Force 无视到期 / 落盘 / 键优先级 |
+| `internal/qodercom/r101_thinking_test.go` | 5（含 10 子例） | 档位排序 / 默认档 / 空不编造 / 出口链路 / rank 完备 |
+| `internal/qodercn/r101_thinking_test.go` | 同上 | 平行实现不得漂移 |
+| `internal/ledger/r101_month_test.go` | 2（含 10 子例） | 31 日 / 闰年 / 跨年 / 连续 3 年每天 |
+| `internal/ledger/r101_cleanup_test.go` | 1 | 保留月数真的生效 |
+| `internal/loomy/r101_resource_test.go` | 4（含 8 子例） | 无字段必错 / 真 0 不报错 / 非法 JSON / 非 200 |
+| `internal/raccoon/r101_bills_test.go` | 6 | type=income / 默认 limit / 消耗不干扰 / 昨天不算 / ≤0 不算 / created_at 回退 / 取最大 |
+| `internal/monkeycode/r101_payment_test.go` | 3 | 402 四种 body / 其余 4xx 未被带偏 / 两 kind 不同 |
+
+**变异 10 处全 RED**：M1 单飞不等待在途 flight / M2 单飞不登记 flight / M3 去内层重检 / M4 ledger 退回 AddDate 溢出 / M5 loomy 守卫恒假 / M6 流水退回 type=all / M7 402 落回 4xx 透传 / M8 qodercom 不排序 / M9 qodercn 漂移 / M10 默认档回退到最低档。
+
+`go build ./...` / `go vet ./...` / `go test ./... -count=1` → **44 包全绿**。
+产物 `dist/omnigate.exe` 11756032 字节 sha256 `868e0d481fb45d4a61663c529e7e939e0af264269bcdac26ea0dcc9776c30289`，自检 `C:/Users/`=0 / `D:\Code`=0 / `huansheng`=0。

@@ -126,6 +126,13 @@ type ModelEntry struct {
 	ContextWindow  int64   `json:"-"`      // context_config 默认档（is_default）的 token_count
 	// AvailableWindows context_config 全部档位（升序）；空表示无档位表。
 	AvailableWindows []int64 `json:"-"`
+	// ReasoningEfforts / DefaultReasoningEffort 来自 thinking_config（R101）。
+	// 上游模型表的 thinking_config.enabled.efforts 是一张 map（档位名 → {is_default}），
+	// 决定「客户端能选哪些思考档位」；R89 只做了上下文档位、漏了思考档位，
+	// 导致 /v1/models 里 qoder 系 11/11 个模型的 reasoning_efforts 全是空，
+	// 客户端下拉框长不出来。空表示上游未声明，消费方不得编造。
+	ReasoningEfforts       []string `json:"-"`
+	DefaultReasoningEffort string   `json:"-"`
 }
 
 // 上游未下发时的兜底值（实测两渠道 204/204 条目均下发，此处仅防御）。

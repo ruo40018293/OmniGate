@@ -790,13 +790,11 @@ func (s *Scheduler) name() string {
 func (s *Scheduler) refreshForCheckin(a *auth.Auth, uid string) error {
 	name := s.name()
 	log.Printf("refresh start platform=%s uid=%s reason=checkin", name, uid)
-	if err := s.cfg.Upstream.RefreshToken(a); err != nil {
+	// R101：无条件刷新（签到必须拿新 token），但走单飞——与保活批量刷新、
+	// 请求路径的刷新并发时共享同一次结果，不各打一次上游。
+	if err := provider.RefreshForce(a, func() error { return s.cfg.Upstream.RefreshToken(a) }); err != nil {
 		log.Printf("refresh failed platform=%s uid=%s err=%v", name, uid, err)
 		return err
-	}
-	if err := a.SaveAtomic(); err != nil {
-		log.Printf("refresh save failed platform=%s uid=%s err=%v", name, uid, err)
-		return fmt.Errorf("refresh save: %w", err)
 	}
 	log.Printf("refresh success platform=%s uid=%s expires_at=%d", name, uid, a.ExpiresAt)
 	return nil
@@ -821,7 +819,8 @@ func (s *Scheduler) RunKeepaliveNow() {
 			continue
 		}
 		log.Printf("refresh start platform=%s uid=%s reason=keepalive", name, st.UID)
-		if err := s.cfg.Upstream.RefreshToken(a); err != nil {
+		// R101：单飞。保活批量刷新会遍历所有账号，最容易与请求路径撞在同一秒。
+		if err := provider.RefreshForce(a, func() error { return s.cfg.Upstream.RefreshToken(a) }); err != nil {
 			log.Printf("refresh failed platform=%s uid=%s err=%v", name, st.UID, err)
 			var ue *provider.Error
 			if errors.As(err, &ue) && ue.Kind == provider.ErrSessionDead {

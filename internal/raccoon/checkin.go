@@ -219,7 +219,11 @@ func (c *Client) fetchBills(a *auth.Auth, limit int) ([]pointsBill, error) {
 	if limit <= 0 {
 		limit = billLookback
 	}
-	url := fmt.Sprintf("%s%s?paging.limit=%d&type=all", c.siteBase(), EpPointsBillsV2, limit)
+	// R101：改用 type=income。不带筛选时这一页混着「桌面端 LLM 对话消耗」，每笔占一条；
+	// 服务端只给最近 N 条且 offset 翻不页（实测 offset>0 恒空），当天发放记录几小时后就被
+	// 挤出窗口 ⇒ pickTodayDailyGrant 找不到今天的 daily_grant，把「今天已领过」误判成
+	// 「今天根本没发」，触发无谓的重试。收入流水每天 1 笔左右，窗口不会再被消耗冲掉。
+	url := fmt.Sprintf("%s%s?paging.limit=%d&type=income", c.siteBase(), EpPointsBillsV2, limit)
 	resp, raw, err := c.do(http.MethodGet, url, a, nil)
 	if err != nil {
 		return nil, err
