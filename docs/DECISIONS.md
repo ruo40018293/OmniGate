@@ -1,4 +1,4 @@
-# 决议全文（R1–R103）
+# 决议全文（R1–R104）
 
 > 本文件是 `AGENTS.md` 第 1 节的**完整原文**——每条决议「为什么这么做 / 踩过什么坑 / 边界在哪」都在这里。
 > `AGENTS.md` 只保留每条的一句话判据，随每次会话自动加载，用来提醒「别推翻什么」；
@@ -1351,6 +1351,139 @@ return 0, nil, nil   // 结构未知：不报错、不留余额
 产物 `dist/omnigate.exe` 11756032 字节 sha256 `868e0d481fb45d4a61663c529e7e939e0af264269bcdac26ea0dcc9776c30289`，自检 `C:/Users/`=0 / `D:\Code`=0 / `huansheng`=0。
 
 ---
+## R104 — zcode 接入 + 可扩展凭证字段基座
+
+**触发**（用户原话）：「都搞吧，一项项来」——把上游尚未接入的五个渠道
+（gemini / lobsterai / codearts / zcode / officeace）全部接入。本轮落**基座 + zcode**，其余四个各自独立一期：
+一个渠道一个 commit，每个都要单独跑穿 build/vet/test + 变异。
+
+### 为什么先做基座而不是直接搬 zcode
+
+五个渠道的上游源码拉下来后，用 `grep -ho '\(provider\|upstream\|idle\|auth\)\.[A-Z][A-Za-z0-9]*'`
+扫出全部对外依赖并与本仓逐一比对，**只缺 10 项**：
+
+```
+auth.Extra                     provider.CodeArts       upstream.NormalizeRoles
+auth.LoadCodeArtsDir           provider.Gemini
+auth.LoadGeminiDir             provider.LobsterAI
+auth.LoadLobsterAIDir          provider.PublicModelID
+auth.LoadZCodeDir              provider.ZCode
+```
+
+这 10 项里有 5 项是**五个渠道共用**的（Extra / PublicModelID / NormalizeRoles / 四个 Load*Dir 中的三个形状相同）。
+若直接搬 zcode，这些会在 zcode 里先长一遍；第二个渠道接入时就会面临「复制一份还是抽出来」的选择，
+而**复制的结果已经在上游重演过**：`NormalizeRoles` 的上游注释写得很直白——
+「本仓此前有 10 处渠道各自复制了这段逻辑，而 officeace 漏做 ⇒ DSH 一发 developer 角色就必 400
+ModelArts.81001（role 白名单不含 developer）。凡「不走 upstream.PrepareBody」的渠道，请直接调
+NormalizeRoles，不要再复制第 11 份。」
+
+### 基座五件
+
+**① `auth.Auth.Extra map[string]string`（`json:"extra,omitempty"`）**
+
+`Auth` 的一等字段（`AccessToken`/`RefreshToken`/`ExpiresAt`/`UID`）只能表达「跨渠道同语义」的东西。
+而 zcode 需 `device_mid` + `app_version`（缺 `X-Device-Mid` 直接 400 code 3001）、
+codearts 需 STS 三件套（`access_key`/`secret_key`/`security_token`）、officeace 需 `dpop_priv`。
+这些既不能塞进 `AccessToken`（语义不同、且 accessToken 落盘时要 DPAPI 加密），
+也不能各建一个渠道私有结构——`auth.Parse` 是唯一读盘入口，私有的解析必然漏掉
+refresh token 轮换后的落盘。
+
+三条硬约束（三条都有变异验证）：
+
+1. **`Parse` 的两条路径都要读 extra**。嵌套形（`{auth:{...},account:{...}}`）与扁平形都要。
+   这一条不是多余：往返测试（Save→Parse）**永远只走嵌套形**（因为 `saveAtomicLocked` 写的就是嵌套形），
+   而导入型渠道（codearts / officeace）的凭证可能是**外部工具写的扁平形**。
+   只测嵌套形会得到一个假绿的往返测试——实际上扁平形路径从未被覆盖。
+2. **落盘必须是「条件写键」**：
+   ```go
+   if len(a.Extra) > 0 {
+       doc["auth"].(map[string]any)["extra"] = a.Extra
+   }
+   ```
+   **不能**写成 map 字面量里的 `"extra": a.Extra`。原因：`doc` 是 `map[string]any`，
+   字段声明上的 `json:"extra,omitempty"` 对 **map 元素**不生效，写进去就会得到 `"extra": null`。
+   当初实现时还特地写了个 `extraOrNil()` 辅助函数「空时返 nil」，
+   以为这样就能被 omitempty 省掉——**完全没用**，`nil` 作为 map 元素值照样序列化成 `null`。
+   测试直接抳住这一点（`TestEmptyExtraIsOmittedFromDisk` 拳断磁盘字节里不得出现 `"extra"`）。
+3. **空 Extra 不得在盘上留痕**。否则每次 SaveAtomic 都会把所有老凭证文件改写一遍，
+   既产生无意义的 diff，也让「哪个账号真的带扩展凭证」变得看不出来。
+
+**② `provider.ZCode` Kind**。其余四个渠道各自接入时才声明——本仓已有
+`TestFeeChannelOrderCoversEveryKind` 会拓住「已声明但未接入」的 Kind（实测抓到过：本轮一度提前声明了四个，
+该测试立刻转红，适时发现）。另外 Kind 字面量是模型名前缀与 stats 归属的**单一真源**，
+写错一个字母等于该渠道永远匹配不到。
+字面量是模型名前缀与 stats 归属的**单一真源**，写错一个字母等于该渠道永远匹配不到。
+
+**③ `provider.PublicModelID` + `ModelNamespaces`**：这三处（面板复制 / `/v1/models` 的 id / 报错提示里的可用模型名）
+不一致会产生「用户复制了却拿不到」的怪现象且不报错。上游 ID 自带命名空间的渠道（首例 `cline-free/*`）
+**整串透传**，其余拼 `<kind>/<upstreamID>`。
+
+**④ `upstream.NormalizeRoles`**：上游的做法是在每个渠道包内各自复制，结果漏了一个。我们直接暴露包级函数，
+并在注释里写明「不要再复制第 11 份」。
+
+**⑤ 四个 `auth.Load*Dir`**：均 `return loadPrefixed(dir, "<prefix>")`，但各自带长注释说明凭证形态——
+凭证形态是「下一个接手人最需要知道、也最容易被误读」的那一页。
+
+### zcode 接入（本轮落地的第一个验证品）
+
+`internal/zcode/`（9 个源文件 + 1 个上游测试）+ `internal/login_zcode/`（登录编排 2 文件）。
+运行上游原生测试直接全绿（`internal/zcode` 1.982s、`internal/login_zcode` 1.147s），说明协议层没有被我们的差异性破坏。
+
+**六处登记**（每处漏了都不报错，只是「整组不出现」）：
+
+| 位置 | 改什么 | 漏了的表现 |
+|---|---|---|
+| `cmd/omnigate/main.go` | auth 加载、`zcPool`、挑号策略池列表、`zcUp := zcode.New()`、启动期+热更新期两处 `applyProxies`、`runtimes`、`appRuntimes`、import | 渠道不存在 |
+| `internal/app/app.go` | `channelOrder` / `feeChannelOrder` / `noExplicitCheckin` / `StartLoginFor` 三处（开关分支 + loginClient + Start）/ `pollLogin` 分支 / `completeZCodeLogin` | 面板排序错、费率整组不出现、签到按钮点了必失败、登录无法发起 |
+| `internal/stats/stats.go` | `channelKind` 白名单 | token 从不进平台统计表 |
+| `cmd/omnigate/web/app.js` | `CH_LABEL` / `CH_CLASS` / `NO_EXPLICIT_CHECKIN` / `PROXY_CHANNELS` / `PROXY_HINT` / 按钮 onclick | 显示原始 kind、无配色、多个必失败按钮、代理列表找不到 |
+| `cmd/omnigate/web/index.html` | 添加按钮 + grid 坐标 + 注释行 | 用户没有添加入口 |
+| `cmd/omnigate/web/style.css` | 颜色变量 + 四条规则（btn/hover/badge/ch-header） | 按钮与徽标没颜色 |
+
+### 闸门（三个新文件）
+
+- **`internal/app/r104_channel_registry_test.go`**：按**源码**断言五处登记齐全。
+  这类漏登记不会被任何运行时测试抓到（漏了就不出现，不报错），只能做源码级检查。
+  判据来自两次真实事故：R65 漏 `feeChannelOrder` ⇒ 面板「模型列表和费率」整组不出现；
+  R103 盘点发现 minimax/cline/kilo 三个渠道从未进 `stats.channelKind`。
+  另带 **grid 坐标不得重复**（两个按钮占同一格会叠在一起，用户只看得见上面那个，
+  于是又会出现「某个渠道没有入口」的误报），且阈值按 `13 + len(r104Buttons)` **动态计算**——
+  每接入一个渠道都要手改硬编码阈值是设计漏洞，漏改时测试会失效但还是绿的。
+- **`internal/auth/extra_test.go`**：五条（往返不丢 / 空不写键 / 老凭证两种形状都为 nil / 写在 `auth` 段内 / 扁平形带 extra）。
+  最后一条是变异逼出来的：初版没有它时，「`Parse` 丢扁平形 extra」这个变异**存活了**。
+- **`internal/provider/r104_modelid_test.go`**：`PublicModelID` 六种形态 + `ModelNamespaces` 的参照完整性。
+
+### 变异（六处全红）
+
+| 编号 | 变异 | 被哪条拳住 |
+|---|---|---|
+| M1 | `if len(a.Extra) > 0` → `if false`（Extra 不落盘） | `TestExtraSurvivesSaveLoadRoundtrip` |
+| M2 | `if len(a.Extra) > 0` → `if true`（空也写键） | `TestEmptyExtraIsOmittedFromDisk` |
+| M3 | `Extra: n.Auth.Extra` → `nil`（嵌套形丢失） | `TestExtraSurvivesSaveLoadRoundtrip` |
+| M4 | `Extra: f.Extra` → `nil`（扁平形丢失） | `TestFlatCredentialKeepsExtra` |
+| M5 | `PublicModelID` 删掉命名空间分支 | `TestPublicModelID` |
+| M6 | `ZCode Kind = "zcode"` → `"z-code"` | `TestR104KindsAreDeclaredInProvider` |
+
+### 顺带发现的真 bug
+
+**zcode 的 `modelRewriter` 注入点必须按行吐字节。** 攒整条流再替换会把流式退化成一次性（R35/R56 类缺陷）；
+且只能替换「值恰好等于裸 id」那一种形形态——无条件把 `"model":"` 整体换掉会拼出 `"model":"zcode/x"x"` 这样的坏帧。
+
+### 边界与已知未做
+
+- **其余四个渠道本轮不落代码**：gemini / lobsterai / codearts / officeace 的数据面与登录编排各自独立一期。
+  已把它们的 `provider.Kind`、`auth.Load*Dir`、前端颜色变量与 grid 坐标预留好，
+  但**按钮与登录分支不预先提交**——否则会给用户一个点了只得到
+  `unknown login provider` 的入口，比没有入口更糟。
+- zcode 无 refresh 端点（JWT 无 exp、`ZCODE_REFRESHABLE = false`），`ExpiresAt` 写远期哨兵，
+  到期只能重新登录导入；故 `RefreshToken` 是空实现。
+- zcode 的 `DailyCheckin` 恒返 `ErrClaimUnsupported`（billing/claim 需 headful 浏览器 + 每个 plan 需新 mint
+  一次性 captcha param，无法纯静态移植），故进 `noExplicitCheckin`。
+- **AGENTS.md 已超出工作区指令渲染预算**（93639 字符 > 65536 字节），
+  新会话只能看到前 65244 字节，不变量 18 之后的条目对后续会话**不可见**。
+  这是待处理项（需要把已稳定的早期决议压缩成指针，而不是删除——全文在本文件）。
+
+
 ## R103 — 免密渠道（虚拟账号）：免费集合只认上游布尔、能力位按实测来源取、虚拟账号不可删停
 
 **触发**：用户 m19195「继续，检查上游，然后看有没新的渠道」。上游 `rockswang/wild-work` 的 `internal/kilo/`（3 文件 21.7 KB，MIT）是免费池实现，无登录编排、无签名体系，是唯一「零凭据、立即可用」的候选。

@@ -59,6 +59,7 @@ import (
 	"omnigate/internal/traework"
 	"omnigate/internal/upstream"
 	"omnigate/internal/workbuddyai"
+	"omnigate/internal/zcode"
 )
 
 //go:embed all:web
@@ -260,8 +261,13 @@ func main() {
 	if err != nil {
 		fatal("读取 Cline 账号目录失败：%v", err)
 	}
-	log.Printf("loaded accounts: workbuddy=%d %s, traework=%d, qoder=%d, qodercn=%d, qodercom=%d, workbuddyai=%d, qwenwork=%d, glm=%d, monkeycode=%d, raccoon=%d, loomy=%d, minimax=%d, cline=%d from %s",
-		len(wbAuths), cfg.Region, len(trAuths), len(qdAuths), len(qcnAuths), len(qcmAuths), len(wbaAuths), len(qwAuths), len(glmAuths), len(mcAuths), len(rcAuths), len(lmAuths), len(miAuths), len(clAuths), cfg.AuthDir)
+	// ZCode：凭据由 login_zcode 的网页登录写入（含 Extra 里的四个身份键）。
+	zcAuths, err := auth.LoadZCodeDir(cfg.AuthDir)
+	if err != nil {
+		fatal("读取 ZCode 账号目录失败：%v", err)
+	}
+	log.Printf("loaded accounts: workbuddy=%d %s, traework=%d, qoder=%d, qodercn=%d, qodercom=%d, workbuddyai=%d, qwenwork=%d, glm=%d, monkeycode=%d, raccoon=%d, loomy=%d, minimax=%d, cline=%d, zcode=%d from %s",
+		len(wbAuths), cfg.Region, len(trAuths), len(qdAuths), len(qcnAuths), len(qcmAuths), len(wbaAuths), len(qwAuths), len(glmAuths), len(mcAuths), len(rcAuths), len(lmAuths), len(miAuths), len(clAuths), len(zcAuths), cfg.AuthDir)
 
 	wbPool := pool.New(filepath.Join(stateDir, "state-workbuddy.json"))
 	for _, a := range wbAuths {
@@ -321,6 +327,11 @@ func main() {
 	for _, a := range clAuths {
 		clPool.Add(a)
 	}
+	zcPool := pool.New(filepath.Join(stateDir, "state-zcode.json"))
+	for _, a := range zcAuths {
+		zcPool.Add(a)
+	}
+
 	// Kilo 免费池是**免密**渠道（R103）：没有登录、没有 API Key、没有可伪造凭据，
 	// 免费集合完全由上游清单的 isFree 决定。故不建 auth 加载器、不进 reloadAccounts，
 	// 这里注入唯一虚拟账号（R22）。ExpiresAt 是远期值，否则 NeedsRefresh 恒真、
@@ -332,7 +343,7 @@ func main() {
 	// normalize 已校验过合法性，这里 ParseStrategy 不会失败。
 	if st, ok := pool.ParseStrategy(cfg.Strategy); ok {
 		for _, p := range []*pool.Pool{wbPool, trPool, qdPool, wbaPool, qwPool, qcnPool,
-			qcmPool, glmPool, mcPool, rcPool, lmPool, klPool} {
+			qcmPool, glmPool, mcPool, rcPool, lmPool, klPool, zcPool} {
 			p.SetStrategy(st)
 		}
 		log.Printf("账号挑选策略：%s", st.Label())
@@ -366,6 +377,8 @@ func main() {
 	// Kilo 网关（api.kilo.ai/api/gateway）免费池：与其它渠道一致禁 h2、
 	// 流式 client 不设总超时（R35），靠 ResponseHeaderTimeout + IdleReader 兜底。
 	klUp := kilo.New()
+	zcUp := zcode.New()
+	zcUp.HTTP.Timeout = time.Duration(cfg.Upstream.TimeoutSeconds) * time.Second
 	clUp.HTTP.Timeout = time.Duration(cfg.Upstream.TimeoutSeconds) * time.Second
 	glmUp := glm.New()
 	// ⚠️ 只改 HTTP（非流式）的 Timeout。
@@ -394,6 +407,7 @@ func main() {
 		provider.Minimax.String():     {miUp.HTTP, miUp.StreamHTTP},
 		provider.Cline.String():       {clUp.HTTP, clUp.StreamHTTP},
 		provider.Kilo.String():        {klUp.HTTP, klUp.StreamHTTP},
+		provider.ZCode.String():       {zcUp.HTTP, zcUp.StreamHTTP},
 		// glm 两个 client 都要传（SetTransportProxy 会**新建** Transport，
 		// 只套 HTTP 会让 StreamHTTP 仍走直连（代理对流式不生效）。
 		provider.GLM.String(): {glmUp.HTTP, glmUp.StreamHTTP},
@@ -523,6 +537,8 @@ func main() {
 		// 任何账号级惩罚（冷却/禁用）都等于整条渠道下线且无法人工恢复。
 		provider.Kilo: {Kind: provider.Kilo, Pool: klPool, Upstream: klUp,
 			StaticModels: kilo.StaticModels(), SingleAccount: true},
+		provider.ZCode: {Kind: provider.ZCode, Pool: zcPool, Upstream: zcUp,
+			StaticModels: zcode.StaticModels()},
 		provider.GLM: {Kind: provider.GLM, Pool: glmPool, Upstream: glmUp, StaticModels: glm.StaticModels()},
 		// 注意：GLM **不**置 SingleAccount。
 		//
@@ -549,7 +565,11 @@ func main() {
 		provider.Cline:       {Kind: provider.Cline, Pool: clPool, Upstream: clUp, Scheduler: clSch},
 		// Kilo 无 Scheduler：免费池没有签到、没有保活、没有积分可刷（R103）。
 		provider.Kilo: {Kind: provider.Kilo, Pool: klPool, Upstream: klUp},
-		provider.GLM:  {Kind: provider.GLM, Pool: glmPool, Upstream: glmUp, Scheduler: glmSch},
+		// ZCode 无可用签到（DailyCheckin 恒 ErrClaimUnsupported：上游要 headful 浏览器 +
+		// 一次性验证码参数），但**需要 Scheduler**：它是唯一驱动 token 到期检查与
+		// 账号池保活的组件，缺了它账号永不刷新（到期后只能手动重登）。
+		provider.ZCode: {Kind: provider.ZCode, Pool: zcPool, Upstream: zcUp},
+		provider.GLM:   {Kind: provider.GLM, Pool: glmPool, Upstream: glmUp, Scheduler: glmSch},
 	}
 
 	appInst, err := app.New(app.Options{
@@ -645,7 +665,8 @@ func main() {
 			// R103：热更新这块历来只覆盖部分渠道（cline/raccoon/loomy/minimax/
 			// monkeycode 一直缺席，属既有缺口）。kilo 一并补上，避免「改了代理要
 			// 重启」这种不可预期行为再扩一个渠道。
-			provider.Kilo.String(): {klUp.HTTP, klUp.StreamHTTP},
+			provider.Kilo.String():  {klUp.HTTP, klUp.StreamHTTP},
+			provider.ZCode.String(): {zcUp.HTTP, zcUp.StreamHTTP},
 		})
 	})
 	compat.SetAPIKeySource(inner.CurrentAPIKey) // 面板改 API-Key 后，兼容层立即跟随

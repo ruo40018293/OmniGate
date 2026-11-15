@@ -105,6 +105,18 @@ func translateMaxCompletionTokens(obj map[string]any) {
 	}
 }
 
+// NormalizeRoles 把 messages 里的 developer 角色归一为 system，供**不走 PrepareBody**
+// 的渠道（R104 起：gemini / codearts / lobsterai / officeace / zcode 等）调用。
+//
+// 为什么要单独暴露：本仓此前在 10 个渠道各自复制了这段逻辑，
+// 而 officeace 漏做 ⇒ DSH 一发 developer 角色就必 400 ModelArts.81001（role 白名单
+// 不含 developer）。新渠道请直接调这里，不要再复制第 11 份。
+//
+// 注意这是「协议兼容」不是「内容脱敏」：与 sanitize 开关无关，始终生效。
+func NormalizeRoles(obj map[string]any) {
+	normalizeRoles(obj)
+}
+
 // normalizeRoles 把 messages 里的 developer 角色归一为 system。
 //
 // 背景：上游对 messages 的 role 字段做白名单校验，developer 不在白名单内，

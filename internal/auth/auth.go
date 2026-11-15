@@ -46,6 +46,12 @@ type Auth struct {
 	// 导入器从客户端同一 bundle 目录的 baizhi-cookies.json 取得。
 	// 仅 MonkeyCode 用；其它渠道不用该字段。
 	BaizhiCookie string
+	// Extra 是渠道扩展凭据的通用承载袋（键值均字符串）。首例是 zcode / officeace / codearts 这类
+	// 需要多字段凭据的渠道：app_version / device_mid / dpop_priv / access_key /
+	// security_token / region / coding_plan_key_* 等。**只增不减、向后兼容**（旧凭证
+	// 无该字段 → nil，各渠道自行判空）。这里的每个键都是凭据，
+	// 不得当「任意存储」用。
+	Extra        map[string]string `json:"extra,omitempty"`
 	UID          string
 	EnterpriseID string
 	Nickname     string
@@ -140,6 +146,8 @@ func Parse(raw []byte) (*Auth, error) {
 				ConsoleCookie string `json:"consoleCookie"`
 				// baizhiCookie 同上：百智云会话 Cookie（控制台会话的上游来源）
 				BaizhiCookie string `json:"baizhiCookie"`
+				// extra 渠道扩展凭据袋（zcode / officeace / codearts 等用）
+				Extra map[string]string `json:"extra"`
 			} `json:"auth"`
 			Account struct {
 				UID          string `json:"uid"`
@@ -166,6 +174,7 @@ func Parse(raw []byte) (*Auth, error) {
 			ConsoleCookie: n.Auth.ConsoleCookie,
 			// BaizhiCookie 同上（控制台会话的上游来源）
 			BaizhiCookie: n.Auth.BaizhiCookie,
+			Extra:        n.Auth.Extra,
 			UID:          n.Account.UID,
 			EnterpriseID: n.Account.EnterpriseID,
 			Nickname:     n.Account.Nickname,
@@ -187,9 +196,11 @@ func Parse(raw []byte) (*Auth, error) {
 			ConsoleCookie string `json:"consoleCookie"`
 			// baizhiCookie 同上：百智云会话 Cookie（控制台会话的上游来源）
 			BaizhiCookie string `json:"baizhiCookie"`
-			UID          string `json:"uid"`
-			EnterpriseID string `json:"enterpriseId"`
-			Nickname     string `json:"nickname"`
+			// extra 渠道扩展凭据袋
+			Extra        map[string]string `json:"extra"`
+			UID          string            `json:"uid"`
+			EnterpriseID string            `json:"enterpriseId"`
+			Nickname     string            `json:"nickname"`
 		}
 		if err := json.Unmarshal(raw, &f); err != nil {
 			return nil, fmt.Errorf("storage_parse_error: %w", err)
@@ -208,6 +219,7 @@ func Parse(raw []byte) (*Auth, error) {
 			SigningSecret: f.SigningSecret,
 			ConsoleCookie: f.ConsoleCookie,
 			BaizhiCookie:  f.BaizhiCookie,
+			Extra:         f.Extra,
 			UID:           f.UID,
 			EnterpriseID:  f.EnterpriseID,
 			Nickname:      f.Nickname,
@@ -266,6 +278,14 @@ func (a *Auth) saveAtomicLocked() error {
 			"enterpriseId": a.EnterpriseID,
 			"nickname":     a.Nickname,
 		},
+	}
+	// extra 只在非空时**新增该键**。
+	//
+	// 不能只把值置 nil：doc 是 map[string]any，字段上的
+	// `json:"extra,omitempty"` 对 map 元素不生效，写进去就会得到
+	// `"extra": null`——所有老凭证文件都会被改写一遍。
+	if len(a.Extra) > 0 {
+		doc["auth"].(map[string]any)["extra"] = a.Extra
 	}
 	raw, err := json.MarshalIndent(doc, "", "  ")
 	if err != nil {
@@ -513,6 +533,32 @@ func LoadRaccoonDir(dir string) ([]*Auth, error) {
 func LoadLoomyDir(dir string) ([]*Auth, error) {
 	return loadPrefixed(dir, "loomy")
 }
+
+// LoadZCodeDir 扫描 ZCode 凭证（zcode-*.json）。
+//
+// ZCode 凭证除 accessToken / refreshToken 外还带四个身份键（全部在 Extra）：
+// app_version / device_mid / coding_plan_key_bigmodel / coding_plan_key_zai。
+// 身份头族缺 X-Device-Mid 会直接 400 code 3001，故这些键是凭据不是元数据。
+// 上游无 refresh 端点，到期只能重新登录导入。
+func LoadZCodeDir(dir string) ([]*Auth, error) { return loadPrefixed(dir, "zcode") }
+
+// LoadLobsterAIDir 扫描有道龙虾凭证（lobsterai-*.json）。
+//
+// 凭证为 OAuth 三件套（accessToken / refreshToken / expiresAt），refresh 可续期。
+func LoadLobsterAIDir(dir string) ([]*Auth, error) { return loadPrefixed(dir, "lobsterai") }
+
+// LoadGeminiDir 扫描 Google Code Assist 凭证（gemini-*.json）。
+//
+// 凭证为 Google OAuth：accessToken + refreshToken + expiresAt + FilePath（刷新后要写回）。
+func LoadGeminiDir(dir string) ([]*Auth, error) { return loadPrefixed(dir, "gemini") }
+
+// LoadCodeArtsDir 扫描华为云 CodeArts 凭证（codearts-*.json）。
+//
+// 凭证为 STS 临时 AK/SK 三件套（全部在 Extra）：
+// access_key / secret_key / security_token，加 expires_at 与 uid / nickname。
+// **不要把它当成普通 accessToken**：签名用的是 AK/SK，
+// accessToken 字段存的是 STS token（与 security_token 同值），保留是为了直接送给上游。
+func LoadCodeArtsDir(dir string) ([]*Auth, error) { return loadPrefixed(dir, "codearts") }
 
 // loadPrefixed 按前缀扫描并解析凭证（供无登录编排的「导入型」渠道复用）。
 // 单个文件损坏时跳过而不整体失败——与既有 Load*Dir 的容错口径一致。

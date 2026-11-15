@@ -664,6 +664,8 @@ var channelKind = map[string]bool{
 	// 意味着它们的 token 从未进过平台表（R103 盘点时发现，与 R65「漏登记就整组
 	// 不出现」同一类缺陷）。白名单只按模型名前缀归属，补齐不改变既有归属。
 	string(provider.Minimax): true, string(provider.Cline): true, string(provider.Kilo): true,
+	// R104：新渠道逐个接入，接入一个补一个。
+	string(provider.ZCode): true,
 }
 
 // traeKinds 为 Trae 系渠道集合（TraeWork + TraeCode 共用账号与积分池——上游只为

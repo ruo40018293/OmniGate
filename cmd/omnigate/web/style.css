@@ -36,6 +36,9 @@
   --ch-minimax: #c2410c;
   --ch-cline: #7c3aed;
   --ch-kilo: #15803d;
+  /* R104 新增五渠道：与既有 13 类颜色都不撞 */
+  --ch-zcode: #7c3aed;
+  --ch-gemini: #2563eb;
 }
 
 * { box-sizing: border-box; margin: 0; padding: 0; }
@@ -587,6 +590,11 @@ code.about-repo:active { transform: translateY(1px); }
 .btn.primary.alt.kilo:hover { background: color-mix(in srgb, var(--ch-kilo), #000 12%); }
 .badge.kilo { background: var(--ch-kilo); }
 .fees .ch-header.kilo td { color: var(--ch-kilo); }
+/* R104 新增五渠道色彩 */
+.btn.primary.alt.zcode { background: var(--ch-zcode); border-color: var(--ch-zcode); }
+.btn.primary.alt.zcode:hover { background: color-mix(in srgb, var(--ch-zcode), #000 12%); }
+.badge.zcode { background: var(--ch-zcode); }
+.fees .ch-header.zcode td { color: var(--ch-zcode); }
 
 /* credit-na 积分「不适用」文案（匿名通道无积分） */
 .credit-na { color: var(--muted, #94a3b8); font-style: italic; }

@@ -34,6 +34,7 @@ import (
 	loginraccoon "omnigate/internal/login_raccoon"
 	logintrae "omnigate/internal/login_trae"
 	"omnigate/internal/login_wbai"
+	loginzcode "omnigate/internal/login_zcode"
 	"omnigate/internal/platform"
 	"omnigate/internal/pool"
 	"omnigate/internal/provider"
@@ -328,6 +329,8 @@ var channelOrder = map[provider.Kind]int{
 	// R65：MiniMax / Cline 与既有渠道并列排在最前段（未知渠道按 100 排最后）。
 	provider.Minimax: 8, provider.Cline: 9,
 	provider.Kilo: 10,
+	// R104：新渠道逐个接入，每个均在本表占一位（未列入的按 100 排末尾）。
+	provider.ZCode: 11,
 }
 
 // feeChannelOrder 「模型列表和费率」面板的渠道分组顺序。
@@ -345,6 +348,8 @@ var feeChannelOrder = []provider.Kind{
 	// R103：Kilo 免费池必须同时进 feeChannelOrder，否则面板「模型列表和费率」
 	// 里整组不出现（R65 的教训：显示「没模型」而 /v1/models 明明有）。
 	provider.Kilo,
+	// R104：同样必须登记，否则面板「模型列表和费率」里整组不出现（R65）。
+	provider.ZCode,
 }
 
 // channelRank 渠道排序键：未知渠道排最后。
@@ -372,8 +377,10 @@ func sortChannelsByOrder[T any](items []T, kindOf func(T) provider.Kind) {
 // 幂等且不额外消耗额度，手动按钮与定时任务都可用 —— 不再列入本名单。
 // Loomy 一期也不提供手动签到：上游未提供额度或签到端点。
 func noExplicitCheckin(k provider.Kind) bool {
+	// R104：ZCode 的 billing/claim 需 headful 浏览器 + 一次性验证码参数
+	// （DailyCheckin 恒返 ErrClaimUnsupported），故不给手动签到入口。
 	return k == provider.WorkBuddyAI || k == provider.QwenWork || k == provider.MonkeyCode ||
-		k == provider.Loomy || k == provider.Cline || k == provider.Kilo
+		k == provider.Loomy || k == provider.Cline || k == provider.Kilo || k == provider.ZCode
 }
 
 func (a *App) findRuntimeAuth(uid string) (*Runtime, *auth.Auth) {
@@ -540,7 +547,8 @@ func (a *App) StartLoginFor(kind string) (string, error) {
 		k = provider.WorkBuddy
 	}
 	switch k {
-	case provider.WorkBuddy, provider.WorkBuddyAI, provider.TraeWork, provider.Qoder, provider.QoderCN, provider.QoderCOM, provider.QwenWork, provider.Minimax:
+	case provider.WorkBuddy, provider.WorkBuddyAI, provider.TraeWork, provider.Qoder, provider.QoderCN, provider.QoderCOM, provider.QwenWork, provider.Minimax,
+		provider.ZCode:
 		// 这些渠道已有登录编排
 	case provider.MonkeyCode:
 		// 导入型渠道：凭据来自本机已登录的官方客户端，上游没有可复现的 OAuth 流程。
@@ -592,6 +600,9 @@ func (a *App) StartLoginFor(kind string) (string, error) {
 		a.loginClient = loginraccoon.NewClient()
 	case provider.Minimax:
 		a.loginClient = loginminimax.NewClient()
+	case provider.ZCode:
+		// ZCode 是网页授权码流（flowId + flowSecret + 轮询），与 login_minimax 同形。
+		a.loginClient = loginzcode.NewClient()
 	default:
 		a.loginClient = login.NewClient()
 	}
@@ -625,6 +636,9 @@ func (a *App) StartLoginFor(kind string) (string, error) {
 		// MiniMax Code：OAuth 设备码 + PKCE，全程不起本地端口。
 		// 返回 verification_uri_complete（已内嵌 user_code），面板直接 window.open 即可。
 		authURL, err = loginminimax.Start(a.loginClient, a.loginStateFP)
+	case provider.ZCode:
+		// ZCode 网页授权：Start 返回授权 URL，Poll 轮询到 token。
+		authURL, err = loginzcode.Start(a.loginClient, a.loginStateFP)
 	default:
 		ep := login.EndpointsForRegion(a.cfg.Region)
 		authURL, err = login.Start(a.loginClient, a.loginStateFP, ep)
@@ -786,6 +800,17 @@ func (a *App) pollLogin(ctx context.Context) {
 			}
 			if !errors.Is(err, loginminimax.ErrPending) {
 				log.Printf("minimax login poll failed: %v", err)
+			}
+			continue
+		}
+		if a.loginKind == provider.ZCode {
+			r, err := loginzcode.Poll(a.loginClient, a.loginStateFP)
+			if err == nil {
+				a.completeZCodeLogin(r)
+				return
+			}
+			if !errors.Is(err, loginzcode.ErrPending) {
+				log.Printf("zcode login poll failed: %v", err)
 			}
 			continue
 		}
@@ -1348,6 +1373,21 @@ func (a *App) completeMinimaxLogin(r loginminimax.Result) {
 			log.Printf("minimax 首次签到 uid=%s ok=%t msg=%s remain=%d", uid, res.OK, res.Msg, res.Remain)
 		}
 	})
+}
+
+// completeZCodeLogin ZCode 登录成功：落带 Extra 的凭证，重载账号池。
+//
+// 不做首次签到：本渠道 DailyCheckin 恒返 ErrClaimUnsupported
+// （billing/claim 依赖 headful 浏览器 + 一次性验证码参数）。
+func (a *App) completeZCodeLogin(r loginzcode.Result) {
+	log.Printf("zcode 登录成功 uid=%s device_mid=%t", r.UID, strings.TrimSpace(r.DeviceMid) != "")
+	if _, err := loginzcode.SaveAuth(a.cfg.AuthDir, r); err != nil {
+		log.Printf("zcode 登录保存凭证失败 uid=%s err=%v", r.UID, err)
+		a.setLoginError("保存凭证失败：" + err.Error())
+		return
+	}
+	a.reloadAccounts()
+	a.afterAccountAdded(provider.ZCode)
 }
 
 // SubmitClineKey 面板粘贴 Cline 官方 API Key 的入口。

@@ -43,6 +43,11 @@ const (
 	// sk_ + 64 hex（只在创建时显示一次，**不过期、不轮换** ⇒ 无 refresh、无保活、无签到）。
 	// 免费范围只认上游 recommended-models 的 free[]，不做任何本地假设。
 	Cline Kind = "cline"
+
+	// ZCode 智谱 ZCode：Anthropic Messages 形态；请求体 `system` 必须内嵌官方
+	// 身份块（否则 405 / code 3012），身份头族缺 X-Device-Mid 直接 400 code 3001；
+	// 凭据不可续期（无 refresh 端点，ExpiresAt 写远期哨兵）。
+	ZCode Kind = "zcode"
 	// Kilo Kilo AI 网关免费池（api.kilo.ai/api/gateway）：**免密**渠道，
 	// 没有登录/API Key/可伪造凭据，免费集合只认上游清单的 isFree 布尔；
 	// 无签到、无积分、无解析端点 ⇒ 虚拟账号（R22）+ SingleAccount（R23）。
@@ -50,6 +55,28 @@ const (
 )
 
 func (k Kind) String() string { return string(k) }
+
+// ModelNamespaces 声明「上游 ID 自带命名空间」的渠道：命名空间前缀 → 渠道 kind。
+//
+// 这类渠道对客户端**直接透传上游 ID**，不再拼 `<kind>/` 前缀（首例为 cline
+// 免费档：上游 free[] 的 ID 就是 `cline-free/*`）。同时旧的 `<kind>/<上游ID>` 双层写法
+// 继续有效 —— 老配置/老客户端里的映射表与降级链都是那种写法，不能失效。
+var ModelNamespaces = map[string]Kind{
+	"cline-free": Cline,
+}
+
+// PublicModelID 返回客户端应填写的模型 ID（面板复制 / `/v1/models` / 报错
+// 提示同源——三处不一致会让用户「复制了却拿不到」）。
+// 上游 ID 自带命名空间时直接透传上游 ID；其余渠道拼 `<kind>/<上游ID>`。
+func PublicModelID(k Kind, upstreamID string) string {
+	up := strings.TrimSpace(upstreamID)
+	if i := strings.IndexByte(up, '/'); i > 0 {
+		if kk, ok := ModelNamespaces[up[:i]]; ok && kk == k {
+			return up
+		}
+	}
+	return k.String() + "/" + up
+}
 
 // ErrKind 错误分类，驱动 pool 冷却状态机。
 type ErrKind int
@@ -368,6 +395,14 @@ type ResourceItem struct {
 	// 两者都该显示，但相加无意义。
 	// 注意：InfoOnly 条目应同时置 Usable=true（它在界面上既非「不可用」，也不该被小计）。
 	InfoOnly bool `json:"info_only,omitempty"`
+	// Unit 该条目的计量单位：空串 = 积分（credits，默认），`"token"` = Token 计数。
+	//
+	// 为什么需要它：有些渠道的额度**不以积分计量**（ZCode 的 billing/balance 是 token 桶，
+	// MonkeyCode 的每日额度也是 token）。这类数字按「积分」展示会严重误导（上亿 token
+	// 看起来像巨额积分），但完全隐藏又让用户看不到用量。故用 Unit 明确标注计量单位：
+	// 前端据此把该渠道渲染成「Token 计数」面板，并与积分**分开统计**。
+	// 零值（空串）保持既有语义 = 积分，向后兼容。
+	Unit string `json:"unit,omitempty"`
 }
 
 // Summarize 按 Usable 标记汇总条目：返回 (可消耗剩余, 不可消耗剩余)。
