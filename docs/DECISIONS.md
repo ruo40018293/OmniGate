@@ -1,4 +1,4 @@
-# 决议全文（R1–R101）
+# 决议全文（R1–R102）
 
 > 本文件是 `AGENTS.md` 第 1 节的**完整原文**——每条决议「为什么这么做 / 踩过什么坑 / 边界在哪」都在这里。
 > `AGENTS.md` 只保留每条的一句话判据，随每次会话自动加载，用来提醒「别推翻什么」；
@@ -1349,3 +1349,107 @@ return 0, nil, nil   // 结构未知：不报错、不留余额
 
 `go build ./...` / `go vet ./...` / `go test ./... -count=1` → **44 包全绿**。
 产物 `dist/omnigate.exe` 11756032 字节 sha256 `868e0d481fb45d4a61663c529e7e939e0af264269bcdac26ea0dcc9776c30289`，自检 `C:/Users/`=0 / `D:\Code`=0 / `huansheng`=0。
+
+---
+
+## R102 — 上游目录端点下线必须按状态码语义切源；积分到期必须取最早活着的那批
+
+**触发**：用户「继续，检查上游，然后看有没新的渠道」。盘点上游 2026-11-13/14 的四个内容提交后，逐条对着我们的代码核，落两项。
+
+### 一、workbuddyai v2 目录 404：不是「上游改了接口」那么简单，是我们**没有回退路径**
+
+上游 commit `574c0a766` 说明：「2026-11-14 起 `/v2/enterprises/personal/models` 对三个账号一致返回
+`404 {"error_msg":"404 Route Not Found"}`，模型列表与费率面板因此全空」。
+
+我们的生产日志完全对上：`E:\陈焕生\workbuddy-api\data\app.log` 里这条 404 命中 **189 次**，且是每 30 分钟一轮：
+
+```
+models fetch failed platform=workbuddyai uid=e0f0b910-... err=models api status 404: {"error_msg":"404 Route Not Found"}
+pricing fetch failed platform=workbuddyai ...
+21:00:00 workbuddyai activity poke uid=e0f0b910: all free models failed
+```
+
+代码现状（改前）：
+
+- `internal/workbuddyai/constants.go:31` `EpCatalog = "/v2/enterprises/personal/models"`、`:36` `EpCatalogV3 = "/v3/config"`
+- `internal/workbuddyai/models.go` 的 `fetchCatalog` **只打 v2，404 时直接 `return nil, fmt.Errorf(...)`**，没有任何回退
+- `fetchV3Catalog` 是独立的一条路，只在 v2 **成功之后**才被调用（`mergeV3` 用它补 v2 缺失的 id）
+- 调用点 `internal/workbuddyai/client.go` 的 `FetchModels` / `FetchModelPricing` 都在 `fetchCatalog` 失败时立即返回错误
+
+于是 v2 一 404，v3 的增强逻辑根本没机会跑 ⇒ 面板 workbuddyai 模型表与费率全空。
+`/v1/models` 仍能列出 27 个模型，是因为它走静态兜底表 + 上次成功缓存，**不是实时目录** —— 这一点很容易让人误判「没事」。
+
+**真实凭据探针实证**（用 `E:/陈焕生/workbuddy-api/auths/workbuddyai-e0f0b910-....json` 直连，探针跑完即删）：
+
+| 端点 | 结果 |
+|---|---|
+| `/v2/enterprises/personal/models` | **404**，body 36 字节 `{"error_msg":"404 Route Not Found"}` |
+| `/v3/config` | **200**，22482 字节，`code=0 models=25 cli=23 reasoning=22 images=23 promos=2` |
+
+**推翻了上游 commit 的一条结论**：上游说 v3 不带 `supportsReasoning`，切过去会丢能力。我们的实测是 v3 **也带
+`agents[cli]`（23 条）与完整能力/倍率字段**，23 条 in_cli 且 credits 非空（`hy4free x0.00`、`hy4std x0.29`、
+`deepseek-v4.1-flash-sg x0.11`、`gpt-6-astra x6.67`、`kimi-k3.1-pro x0.97`）。差集只有 2 条
+（`hy-image-3.5` / `kling-video-v3` 不在 cli 面）。⇒ 可以放心让 v3 单源供数。
+
+**改法**（`internal/workbuddyai/models.go` +93/−43）：
+
+1. `catalogCache` 加 `v2Down bool` + `v2RetryAt time.Time`，`const v2RetryInterval = 30 * time.Minute`
+2. `fetchCatalogEnv(a) (catalogResp, bool, error)`：`if !down || now.After(retryAt)` 先试 v2；`err == nil` 且原本 down ⇒ 清标记（**自动切回**，v2 是 cli agent 的权威顺序）；`status == http.StatusNotFound` ⇒ 置 down + 30 分钟后重探，继续走 v3；`default` ⇒ **原样上抛**
+3. `getCatalog(a, path) (catalogResp, int, error)`：抽公共请求/校验，404 判定靠返回的 status，错误体 label 按路径区分，错误**类型化**为 `&provider.Error{Kind: Classify(...), Status, Msg}`
+4. v3 兜底成功时回灌 `cache.v3 / cache.v3OK / cache.v3Fetched`，避免 `mergeV3` 再打一次同一端点
+
+**为什么「401 不切源」是硬要求**：换端点救不了凭据过期。若把所有错误都当切源理由，账号过期会表现为「目录为空」，
+用户看到模型消失却查不到原因——这类「静默降级」比直接报错坏得多。
+
+**一个等价变异的教训**：最初设计 `getCatalog` 带 `cliUA bool` 参数，在 v3 分支补 `User-Agent`。变异验证时发现
+「v3 分支不补 UA」杀不死测试 —— 因为 `commonHeaders` 已经设过 `clientUA`，那行是死代码。正确处理是**删掉死代码**
+（把「`/v3/config` 有 UA 门禁，web UA 会拿到 `400 code=12403 "check ua"`」这条知识挪到 `commonHeaders` 的注释里），
+而不是留一行注释解释「它其实没用」。
+
+### 二、minimax 积分批次到期：只汇总余额、把到期时间丢掉
+
+`credit/details` 是**按批账本**：每批带 `credit_type`（1 购买 / 2 签到）、`granted_amount`、`remaining_amount`、
+`expire_at_ms`。我们（改前）只把 `remaining_amount` 求和，到期时间直接丢掉 ⇒ `ResourceItem.ExpireAt` **恒空** ⇒
+选号永远排在有到期信息的账号之后（临期排序拿不到输入）。
+
+新建 `internal/minimax/expiry.go`：
+
+| 常量/函数 | 值/语义 |
+|---|---|
+| `creditLedgerPage` / `creditLedgerPages` | 20 / 10（最多 200 批） |
+| `creditExpiryTTL` | 5 分钟 |
+| `expiryCacheKey(tok)` | sha256 前 8 字节 hex（**按 token 分桶**：不同账号不能共享到期结论） |
+| `fetchCreditExpiry(tok)` | 翻页读全账本；`total_count` 缺失或 `seen < total` ⇒ **整体放弃** |
+| `earliestLiveExpiry(details, now)` | 只认 `credit_type ∈ {1,2}` 且 `remaining > 0` 且 `expire_at_ms > now`，取**最小** |
+| `ledgerAmount(raw)` | 去千分位逗号、NaN/Inf 拒绝、负数按 0 |
+| `expireAtString(t)` | CST(+8) RFC3339；零值返回空串（不得用零值冒充「永不过期」） |
+
+三条刻意的决定：
+
+1. **`ledgerAmount` 与余额汇总的 `amountOf` 分开**：账本字段可能有千分位与 null，容错策略不同，混用会把解析差异带进余额。
+2. **账本读不全整体放弃**：半份账本会算出**偏早**的到期日，而「偏早」会让用户误以为额度快过期。
+3. **读失败不缓存、读到空结果也缓存**：失败要下轮立刻重试；零积分账号不必每次刷新重翻 10 页。
+
+接线只有 `internal/minimax/client.go` 几行：`creditDetail` 里 `expireAt := expireAtString(c.creditExpiry(a))` 写入 `ResourceItem.ExpireAt`。
+
+### 三、闸门
+
+| 文件 | 覆盖 |
+|---|---|
+| `internal/workbuddyai/r102_catalog_fallback_test.go` | 9 例：404 回退且 v2 只试 1 次、记住下线不再探、401 报错且不置 down、30 分钟窗口到期重探并切回 v2、费率同步回退、v3 只打一次（回灌生效）、`v2RetryInterval` 合理、复刻真实 UA 门禁（缺 CLI 形 UA 回 `400 code=12403`） |
+| `internal/minimax/r102_expiry_test.go` | 14 例：最早活批次、全死返空串、跨页读全、读不全放弃、缺 total 放弃、失败不影响余额、缓存命中只读一次、失败不缓存、TTL 过期重读、按 token 隔离、query 形态、amount 容错 8 例、CST RFC3339 |
+
+### 四、变异（16 处全红）
+
+`剩余>0` 判据放宽 / 不排除已过期批次 / 类型白名单扩大 / 只读第一页 / 读不全照样给结论 / 读失败也缓存 /
+`creditDetail` 不接到期（回到 R102 前）/ 不做 CST 归一（时区错 8 小时）/ 缓存永不过期 / 不按 token 分桶 /
+404 不回退 / 不记住下线 / v3 不回灌缓存 / v2 恢复不清标记 / 401 也切源 / 目录请求不带 CLI UA。
+
+### 五、边界与已知未做
+
+- **v2 若永久下线**：30 分钟一次的 404 探测会持续产生一行日志。可接受（每次一条，不是每请求一条）。
+- **v3 的模型集合比 v2 窄 2 条**（`hy-image-3.5` / `kling-video-v3` 不在 cli 面）：这是上游的分面方式，不在本地补齐。
+- **未做** `bed60fa02`（qodercn 积分包到期）：要 `session-transfers` 换一次性 transferUrl → 禁跟随 303 取 Set-Cookie →
+  读 `big_model_credits`，313 行 + 353 行测试，成本远高于本轮两项，独立排期。
+- **未做** v2.11.7 的手机端布局修复、PR #219 的 `sanitize.toml` 配置化（R95 已判脱敏链收敛，与上游结论一致）、
+  v2.11.5 的 oczen TLS 指纹（我们没有 oczen 渠道）。

@@ -75,6 +75,8 @@ func (c *Client) base() string {
 // ---------------------------------------------------------------------------
 
 // commonHeaders 所有 API 共享的头。
+// commonHeaders 设 clientUA（CLI 形）。/v3/config 有 UA 门禁：web UA 会拿到
+// 400 code=12403 "check ua"，所以这个 User-Agent 是承重的，不是装饰。
 func commonHeaders(req *http.Request) {
 	req.Header.Set("Accept", "application/json, text/plain, */*")
 	req.Header.Set("X-Requested-With", "XMLHttpRequest")

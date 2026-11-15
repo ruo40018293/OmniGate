@@ -73,12 +73,22 @@ type catalogCache struct {
 	colors  map[string]string
 	fetched time.Time
 
+	// v2Down 记录 /v2/enterprises/personal/models 已不可用。2026-11-14 起上游
+	// 对该端点返回 `404 {"error_msg":"404 Route Not Found"}`（本机实测，三个账号
+	// 一致），此后直接走 v3，避免每轮刷新先白撞一次 404。到期后重探一次：上游
+	// 若恢复 v2 就自动切回——v2 是 cli agent 的权威顺序，v3 只作兜底。
+	v2Down    bool
+	v2RetryAt time.Time
+
 	v3        []catalogModel // /v3/config 全量模型面（不过滤）
 	v3OK      bool           // v3 探测是否成功过（失败不写缓存，避免负缓存住坏结果）
 	v3Fetched time.Time
 }
 
 const catalogTTL = 10 * time.Minute
+
+// v2RetryInterval 判定 v2 下线后，多久再重探一次。
+const v2RetryInterval = 30 * time.Minute
 
 var cache catalogCache
 
@@ -92,28 +102,9 @@ func (c *Client) fetchCatalog(a *auth.Auth) ([]catalogModel, error) {
 	}
 	cache.mu.RUnlock()
 
-	req, err := http.NewRequest(http.MethodGet, c.base()+EpCatalog, nil)
+	env, fromV3, err := c.fetchCatalogEnv(a)
 	if err != nil {
 		return nil, err
-	}
-	commonHeaders(req)
-	req.Header.Set("Authorization", "Bearer "+a.AccessToken)
-	req.Header.Set("Accept", "application/json")
-	resp, err := c.HTTP.Do(req)
-	if err != nil {
-		return nil, err
-	}
-	defer resp.Body.Close()
-	raw, _ := io.ReadAll(io.LimitReader(resp.Body, 4<<20))
-	if resp.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("models api status %d: %s", resp.StatusCode, truncate(string(raw), 120))
-	}
-	var env catalogResp
-	if err := json.Unmarshal(raw, &env); err != nil {
-		return nil, fmt.Errorf("models parse: %w", err)
-	}
-	if env.Code != 0 {
-		return nil, fmt.Errorf("models api code=%d", env.Code)
 	}
 
 	// cli agent 的模型 ID 顺序为准；models[] 提供元数据。
@@ -168,8 +159,86 @@ func (c *Client) fetchCatalog(a *auth.Auth) ([]catalogModel, error) {
 
 	cache.mu.Lock()
 	cache.models, cache.promo, cache.badges, cache.colors, cache.fetched = out, promo, badges, colors, time.Now()
+	// v3 兜底时把同一份响应灌进 v3 缓存：FetchModels / FetchModelPricing 随后调
+	// fetchV3Catalog 做增强时直接命中缓存，不再对同一个端点重复请求一次。
+	if fromV3 {
+		cache.v3, cache.v3OK, cache.v3Fetched = env.Data.Models, true, time.Now()
+	}
 	cache.mu.Unlock()
 	return out, nil
+}
+
+// fetchCatalogEnv 请求目录接口：v2 优先，404 后切 v3 并记住下线，避免每轮先撞 404。
+// 其它错误（网络、401、5xx）原样返回、不做源切换——那类失败换端点救不回来，
+// 悄悄换源只会把「账号过期」伪装成「目录为空」。
+//
+// 返回的 bool 表示这份响应是否来自 v3（供调用方回灌 v3 缓存）。
+func (c *Client) fetchCatalogEnv(a *auth.Auth) (catalogResp, bool, error) {
+	cache.mu.RLock()
+	down, retryAt := cache.v2Down, cache.v2RetryAt
+	cache.mu.RUnlock()
+
+	if !down || time.Now().After(retryAt) {
+		env, status, err := c.getCatalog(a, EpCatalog)
+		switch {
+		case err == nil:
+			if down { // v2 恢复了：切回来，它才有 cli agent 的权威顺序
+				cache.mu.Lock()
+				cache.v2Down, cache.v2RetryAt = false, time.Time{}
+				cache.mu.Unlock()
+			}
+			return env, false, nil
+		case status == http.StatusNotFound:
+			cache.mu.Lock()
+			cache.v2Down, cache.v2RetryAt = true, time.Now().Add(v2RetryInterval)
+			cache.mu.Unlock()
+		default:
+			return catalogResp{}, false, err
+		}
+	}
+
+	env, _, err := c.getCatalog(a, EpCatalogV3)
+	if err != nil {
+		return catalogResp{}, false, err
+	}
+	return env, true, nil
+}
+
+// getCatalog 请求一个目录端点并解析外层信封。第二个返回值是 HTTP 状态码，
+// 供调用方判 404（错误本身已类型化，状态码是额外的判据而非唯一信息源）。
+func (c *Client) getCatalog(a *auth.Auth, path string) (catalogResp, int, error) {
+	req, err := http.NewRequest(http.MethodGet, c.base()+path, nil)
+	if err != nil {
+		return catalogResp{}, 0, err
+	}
+	commonHeaders(req)
+	req.Header.Set("Authorization", "Bearer "+a.AccessToken)
+	req.Header.Set("Accept", "application/json")
+	resp, err := c.HTTP.Do(req)
+	if err != nil {
+		return catalogResp{}, 0, err
+	}
+	defer resp.Body.Close()
+	raw, _ := io.ReadAll(io.LimitReader(resp.Body, 4<<20))
+	if resp.StatusCode != http.StatusOK {
+		label := "models api"
+		if path == EpCatalogV3 {
+			label = "v3 config"
+		}
+		// 类型化错误：上层靠 errors.As 取分类才能 refresh + 重试（不变量 19），
+		// 裸 fmt.Errorf 会让目录面的 401 自愈永远不生效（R79）。
+		return catalogResp{}, resp.StatusCode, &provider.Error{
+			Kind: Classify(resp.StatusCode, string(raw)), Status: resp.StatusCode,
+			Msg: fmt.Sprintf("%s: %s", label, truncate(string(raw), 200))}
+	}
+	var env catalogResp
+	if err := json.Unmarshal(raw, &env); err != nil {
+		return catalogResp{}, resp.StatusCode, fmt.Errorf("%s parse: %w", path, err)
+	}
+	if env.Code != 0 {
+		return catalogResp{}, resp.StatusCode, fmt.Errorf("%s code=%d", path, env.Code)
+	}
+	return env, resp.StatusCode, nil
 }
 
 // fetchV3Catalog 抓取 /v3/config 全量模型面（2026-09-28 实测，issue #39）。
@@ -190,31 +259,10 @@ func (c *Client) fetchV3Catalog(a *auth.Auth) ([]catalogModel, error) {
 	}
 	cache.mu.RUnlock()
 
-	req, err := http.NewRequest(http.MethodGet, c.base()+EpCatalogV3, nil)
+	// 请求/信封校验与主源共用 getCatalog（同一套 UA 门禁与类型化错误）。
+	env, _, err := c.getCatalog(a, EpCatalogV3)
 	if err != nil {
 		return nil, err
-	}
-	commonHeaders(req)
-	req.Header.Set("Authorization", "Bearer "+a.AccessToken)
-	req.Header.Set("Accept", "application/json")
-	// UA 门禁：commonHeaders 已设 clientUA（CLI 形），实测可通过；
-	// 此处显式再设一次以防调用方改写（12403 的教训）。
-	req.Header.Set("User-Agent", clientUA)
-	resp, err := c.HTTP.Do(req)
-	if err != nil {
-		return nil, err
-	}
-	defer resp.Body.Close()
-	raw, _ := io.ReadAll(io.LimitReader(resp.Body, 4<<20))
-	if resp.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("v3 config status %d: %s", resp.StatusCode, truncate(string(raw), 120))
-	}
-	var env catalogResp
-	if err := json.Unmarshal(raw, &env); err != nil {
-		return nil, fmt.Errorf("v3 config parse: %w", err)
-	}
-	if env.Code != 0 {
-		return nil, fmt.Errorf("v3 config code=%d", env.Code)
 	}
 	if len(env.Data.Models) == 0 {
 		return nil, fmt.Errorf("v3 config empty models")
