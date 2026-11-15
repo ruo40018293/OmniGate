@@ -1,4 +1,4 @@
-# 决议全文（R1–R102）
+# 决议全文（R1–R103）
 
 > 本文件是 `AGENTS.md` 第 1 节的**完整原文**——每条决议「为什么这么做 / 踩过什么坑 / 边界在哪」都在这里。
 > `AGENTS.md` 只保留每条的一句话判据，随每次会话自动加载，用来提醒「别推翻什么」；
@@ -1351,6 +1351,45 @@ return 0, nil, nil   // 结构未知：不报错、不留余额
 产物 `dist/omnigate.exe` 11756032 字节 sha256 `868e0d481fb45d4a61663c529e7e939e0af264269bcdac26ea0dcc9776c30289`，自检 `C:/Users/`=0 / `D:\Code`=0 / `huansheng`=0。
 
 ---
+## R103 — 免密渠道（虚拟账号）：免费集合只认上游布尔、能力位按实测来源取、虚拟账号不可删停
+
+**触发**：用户 m19195「继续，检查上游，然后看有没新的渠道」。上游 `rockswang/wild-work` 的 `internal/kilo/`（3 文件 21.7 KB，MIT）是免费池实现，无登录编排、无签名体系，是唯一「零凭据、立即可用」的候选。
+
+**取证（2026-11-15 直连，非上游文档）**
+- `GET https://api.kilo.ai/api/gateway/models` → 200，617720 字节，467 个模型，其中 **14 个 `isFree: true`**。
+- `POST /chat/completions` + `{"model":"kilo-auto/free","messages":[…],"stream":false}` → 200 / 4.75s，上游实路由到 `baidu/ernie-5.5-flash-preview:free`，返回完整 SSE（含 `reasoning`/`reasoning_details`、末帧 `usage.cost = 0`、`data: [DONE]`）。**注：请求 `stream:false` 上游仍回 SSE**，所以出站必须强制 `stream = true`，否则透传层拿到的是「伪非流式」。
+- 三个字段位置与直觉相反（三条都是先写错过再实测纠正的）：
+  1. 免费标记是**驼峰 `isFree`**，不是 `is_free`。
+  2. 输出上限在 **`top_provider.max_completion_tokens`**；14 个免费模型的顶层 `max_output` **全是 null**。只读顶层会得到本地默认值且 `ContextFromAPI` 永远 false（`openrouter/free` 至今仍是这个状态）。
+  3. 视觉能力只在 **`architecture.input_modalities`**；`supported_parameters` 里一个 vision/image 字段都没有。实测 14 个免费模型里 **6 个能读图**，只看 `supported_parameters` 会把它们全标成不支持图片。
+
+**接口与装配**
+- `internal/kilo/`：`constants.go`（`Kind`/`DefaultBase`/`AnonymousUID`/`noExpiry`/`EpChat`/`EpModels`）、`free.go`（`listingRow`、`IsFreeRow`、`rowToModelInfo`、`staticFree`、`filterFree`）、`client.go`（10 个 `provider.Upstream` 方法 + `modelRewriter`）。
+- `internal/provider`：新增 `Kilo Kind = "kilo"`。
+- `cmd/omnigate/main.go` 七处：`klPool` + `klPool.Add(kilo.AnonymousAuth())`、挑号池 `, klPool`、`klUp := kilo.New()`、启动期与热更新期两处 `applyProxies`、`runtimes`（**`SingleAccount: true`**）、`appRuntimes`（**无 Scheduler**，无签到/无积分/无保活）。
+- `internal/app/app.go`：`channelOrder: 10`、`feeChannelOrder` 末尾（R65）、`noExplicitCheckin`、`StartLoginFor` 的 `case provider.Kilo:` 明确答复「免费池无需登录」、`isVirtualAccount` 守卫（`RemoveAccount`/`DisableAccount` 硬拒）、`AccountView.CreditsNA`、`reloadAccounts` 不纳入。
+- `internal/stats/stats.go`：`channelKind` 补 `minimax`/`cline`/`kilo` —— 前两个是**此前就漏了**的，它们的 token 从未进过平台表。
+- 前端：`CH_LABEL`/`CH_CLASS`/`NO_EXPLICIT_CHECKIN`/`NO_CREDITS`/`PROXY_CHANNELS`/`PROXY_HINT` 六处 + `index.html` 的 `btnAddKilo` 按钮（`grid-column:3;grid-row:3`）+ `style.css` 的 `--ch-kilo` 与四条规则。
+
+**为什么 `Classify` 绝不返回 `ErrSessionDead`**：虚拟账号没有凭据文件、没有重登路径，`ErrSessionDead` 会让 handler 走 `Pool.Disable`，一次就能把这个渠道永久抹掉，且用户没有任何入口恢复。上游免费池根本没有「会话」概念，任何 4xx 都只能是「这个请求」的问题。
+
+**为什么装配必须 `SingleAccount: true`**：`internal/server/handler.go` 在进 `Classify` 分支**之前**就对 `SingleAccount` 渠道原文透传、不罚号、不轮转。kilo 只有一个虚拟账号，轮转必然失败；`ErrClient` 虽然在 `Rotatable()` 白名单里，但因为这一层提前返回而无害。
+
+**为什么静态兜底要 `ContextFromAPI: false`**：`staticFree()` 里的 `kilo-auto/free` 的 131072/32768 是**本地估值**（唯一公开出处是上游参考实现 README）。把它标成官方值会让面板与 `/v1/models` 谎报容量，客户端据此发送超长上下文，最后表现为上游 400。宁可标「估值」。
+
+**闸门**：`internal/kilo/r103_kilo_test.go`（26 个用例 / 29629 字节）。三条重点：
+- `TestParseRealListingShape` 用**上游真实 JSON 片段**回归，锁住 `isFree` 驼峰、`top_provider.max_completion_tokens`、`input_modalities` 三个字段位置。
+- `TestClassifyNeverDisablesTheVirtualAccount` 对 9 种 status × 5 种 body 全组合断言不得返回 `ErrSessionDead`。
+- `TestModelRewriterStreamsIncrementally` 用 `io.Pipe` 只写一行不关闭——攒整条流再替换的实现会在这里超时失败。
+
+**变异（11 处全红）**：免费判据改成名字含 free / Classify 加 `ErrSessionDead` / 去掉强制 stream / 静态兜底标 `ContextFromAPI: true` / 不筛 `isFree` / 视觉只看 `supported_parameters` / 输出上限只读顶层 / rewriter 无条件替换 / 清单失败返 error / `ExpiresAt` 置 0 / `ReadBytes('\n')` 换成 `io.ReadAll`。
+
+**边界与已知未做**
+- Kilo 无签到、无积分、无余额端点 ⇒ `DailyCheckin` 返错、`UserResource*` 返 0、面板显示「积分不适用」。上游的日常活动若开放，需要单独接。
+- 上游用 `: KILO PROCESSING` SSE 注释帧保活，`upstream.StreamCapture` 会跳过注释行；**不得**把它当 idle 超时证据（`internal/provider.IdleReader` 只看字节流，注释帧也算流量，故不误判）。
+- `openrouter/free` 缺 `top_provider.max_completion_tokens` ⇒ `ContextFromAPI` 保持 false，容量是本地估值。等上游补齐字段后自动变 true（无需改代码）。
+- 未接入其它候选渠道：`gemini`（Google Code Assist OAuth）、`lobsterai`（有道）、`codearts`（华为云 AK/SK + DPoP + STS）、`zcode`（智谱，身份块准入 + JWT 不可续期）、`officeace`（31 文件 DPAPI + OAuth）——都需要登录编排或签名体系，成本远高于 kilo；`lingxi`/`comate` 属 WPS 生态，用户此前已明确否掉。
+
 
 ## R102 — 上游目录端点下线必须按状态码语义切源；积分到期必须取最早活着的那批
 

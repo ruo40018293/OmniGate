@@ -43,6 +43,10 @@ const (
 	// sk_ + 64 hex（只在创建时显示一次，**不过期、不轮换** ⇒ 无 refresh、无保活、无签到）。
 	// 免费范围只认上游 recommended-models 的 free[]，不做任何本地假设。
 	Cline Kind = "cline"
+	// Kilo Kilo AI 网关免费池（api.kilo.ai/api/gateway）：**免密**渠道，
+	// 没有登录/API Key/可伪造凭据，免费集合只认上游清单的 isFree 布尔；
+	// 无签到、无积分、无解析端点 ⇒ 虚拟账号（R22）+ SingleAccount（R23）。
+	Kilo Kind = "kilo"
 )
 
 func (k Kind) String() string { return string(k) }

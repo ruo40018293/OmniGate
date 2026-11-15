@@ -35,6 +35,7 @@
   --ch-loomi: #475569;
   --ch-minimax: #c2410c;
   --ch-cline: #7c3aed;
+  --ch-kilo: #15803d;
 }
 
 * { box-sizing: border-box; margin: 0; padding: 0; }
@@ -580,6 +581,12 @@ code.about-repo:active { transform: translateY(1px); }
 .btn.primary.alt.cline:hover { background: color-mix(in srgb, var(--ch-cline), #000 12%); }
 .badge.cline { background: var(--ch-cline); }
 .fees .ch-header.cline td { color: var(--ch-cline); }
+
+/* kilo Kilo AI 免费池：松绿（与既有 13 类渠道色不撞；raccoon 亮紫、cline 深紫已占） */
+.btn.primary.alt.kilo { background: var(--ch-kilo); border-color: var(--ch-kilo); }
+.btn.primary.alt.kilo:hover { background: color-mix(in srgb, var(--ch-kilo), #000 12%); }
+.badge.kilo { background: var(--ch-kilo); }
+.fees .ch-header.kilo td { color: var(--ch-kilo); }
 
 /* credit-na 积分「不适用」文案（匿名通道无积分） */
 .credit-na { color: var(--muted, #94a3b8); font-style: italic; }

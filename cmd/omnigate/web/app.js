@@ -397,8 +397,8 @@ function renderTopbar() {
 }
 
 // 渠道显示名与 CSS 短类名（后端 group / 费率 channel 均为 provider.Kind）。
-const CH_LABEL = { workbuddy: "WorkBuddyCN", workbuddyai: "WorkBuddyAI", traework: "TraeWork", traecode: "TraeCode", qoder: "Qoder", qodercn: "QoderCN", qodercom: "QoderCOM", qwenwork: "千问办公", glm: "智谱清言", monkeycode: "MonkeyCode", raccoon: "小浣熊", loomy: "Loomy", minimax: "MiniMax", cline: "Cline" };
-const CH_CLASS = { workbuddy: "wb", workbuddyai: "wbai", traework: "trae", traecode: "traecode", qoder: "qoder", qodercn: "qodercn", qodercom: "qodercom", qwenwork: "qwenwork", glm: "glm", monkeycode: "monkeycode", raccoon: "raccoon", loomy: "loomy", minimax: "minimax", cline: "cline" };
+const CH_LABEL = { workbuddy: "WorkBuddyCN", workbuddyai: "WorkBuddyAI", traework: "TraeWork", traecode: "TraeCode", qoder: "Qoder", qodercn: "QoderCN", qodercom: "QoderCOM", qwenwork: "千问办公", glm: "智谱清言", monkeycode: "MonkeyCode", raccoon: "小浣熊", loomy: "Loomy", minimax: "MiniMax", cline: "Cline", kilo: "Kilo" };
+const CH_CLASS = { workbuddy: "wb", workbuddyai: "wbai", traework: "trae", traecode: "traecode", qoder: "qoder", qodercn: "qodercn", qodercom: "qodercom", qwenwork: "qwenwork", glm: "glm", monkeycode: "monkeycode", raccoon: "raccoon", loomy: "loomy", minimax: "minimax", cline: "cline", kilo: "kilo" };
 const chLabel = (k) => CH_LABEL[k] || "WorkBuddy";
 const chClass = (k) => CH_CLASS[k] || "wb";
 // 不支持显式签到（手动按钮）的渠道：
@@ -406,7 +406,8 @@ const chClass = (k) => CH_CLASS[k] || "wb";
 // 千问办公无签到活动；MonkeyCode / Loomy 无签到端点。
 // 小浣熊**不在此列**（R61）：上游没有领取端点，每日 300 积分是当天首次触达积分服务时
 // 懒发放的，「签到」= 摸一次余额 + 核对流水，幂等且不消耗额度，故给出手动按钮。
-const NO_EXPLICIT_CHECKIN = new Set(["workbuddyai", "qwenwork", "monkeycode", "loomy"]);
+// R103 Kilo 免费池在列：无签到、无积分、无凭据，只有免费模型池。
+const NO_EXPLICIT_CHECKIN = new Set(["workbuddyai", "qwenwork", "monkeycode", "loomy", "kilo"]);
 const noExplicitCheckin = (g) => NO_EXPLICIT_CHECKIN.has(g);
 // 导入型渠道：凭据由本机已登录的官方客户端提供，没有浏览器登录流程（见 internal/app/import_local.go）。
 const IMPORT_LOCAL_CHANNELS = new Set(["monkeycode", "raccoon", "loomy"]);
@@ -420,8 +421,10 @@ const hasProtocolLogin = (ch) => PROTOCOL_LOGIN_CHANNELS.has(ch);
 const NO_CHECKIN_TAG = { workbuddyai: "自动领日活奖励" };
 const noCheckinText = (g) => NO_CHECKIN_TAG[g] || "无签到";
 // 无积分概念的渠道：积分区域显示「不适用」，并隐藏刷新积分/明细入口。
-// 当前所有渠道都有积分概念，故为空集；机制保留以备将来接入匿名通道。
-const NO_CREDITS = new Set();
+// R103 之前是空集（预留），Kilo 免费池正是那个「匿名通道」：它有免费额度，
+// 但没有「积分余额」这个概念，上游 UserResource 恒返 0 —— 显示 0 会被读成
+// 「额度耗尽」（R71 的教训：折算不出来要显示「—」不能显示 0）。
+const NO_CREDITS = new Set(["kilo"]);
 
 // creditsText 账号卡片的积分文案。
 // 拆成「可用 / 不可用 / 临期」三个数字：渠道（如 TraeWork）会下发官方客户端专用的
@@ -1666,8 +1669,8 @@ async function toggleAutostart() {
 
 // ---------- 设置弹层（统一配置：监听/API-Key/签到/自启/模型路由/渠道代理） ----------
 // PROXY_CHANNELS 渠道上游代理列表（顺序与面板渠道序一致；旧 qoder 已下线不提供代理配置）。
-const PROXY_CHANNELS = ["workbuddy", "workbuddyai", "qodercn", "qodercom", "traework", "qwenwork", "glm", "monkeycode", "raccoon", "loomy", "minimax", "cline"];
-const PROXY_HINT = { workbuddy: "WorkBuddyCN", workbuddyai: "WorkBuddyAI", traework: "TraeWork", qodercn: "QoderCN", qodercom: "QoderCOM", qwenwork: "千问办公", glm: "智谱清言" };
+const PROXY_CHANNELS = ["workbuddy", "workbuddyai", "qodercn", "qodercom", "traework", "qwenwork", "glm", "monkeycode", "raccoon", "loomy", "minimax", "cline", "kilo"];
+const PROXY_HINT = { workbuddy: "WorkBuddyCN", workbuddyai: "WorkBuddyAI", traework: "TraeWork", qodercn: "QoderCN", qodercom: "QoderCOM", qwenwork: "千问办公", glm: "智谱清言", kilo: "Kilo" };
 
 // renderProxyList 按当前 state.proxies 渲染每渠道一个输入行。
 function renderProxyList() {
@@ -2043,6 +2046,9 @@ function bind() {
   $("btnAddGLM").onclick = () => startGLMLogin();
   $("btnAddMinimax").onclick = () => promptLogin("minimax");
   $("btnAddCline").onclick = openClineAdd;
+  // R103 Kilo 免费池是免密渠道：没有登录、没有可粘贴的凭据、没有可导入的本机客户端，
+  // 点按钮只需告知「已经可用」——比给一个点了会报错的入口好。
+  $("btnAddKilo").onclick = () => toast("Kilo 免费池是免密渠道：无需添加账号，直接在客户端里调用 kilo/* 模型即可");
   $("btnClineSubmit").onclick = submitClineKey;
   $("btnClineCancel").onclick = () => $("clineOverlay").classList.add("hidden");
   $("btnGLMSubmit").onclick = submitGLMToken;

@@ -327,6 +327,7 @@ var channelOrder = map[provider.Kind]int{
 	provider.GLM: 7,
 	// R65：MiniMax / Cline 与既有渠道并列排在最前段（未知渠道按 100 排最后）。
 	provider.Minimax: 8, provider.Cline: 9,
+	provider.Kilo: 10,
 }
 
 // feeChannelOrder 「模型列表和费率」面板的渠道分组顺序。
@@ -341,6 +342,9 @@ var feeChannelOrder = []provider.Kind{
 	// 跳过该渠道（它按固定顺序遍历），面板「模型列表和费率」里整组不出现——
 	// 面板显示「没模型」，而 /v1/models 明明有。R63 接渠道时漏了这一步。
 	provider.Minimax, provider.Cline,
+	// R103：Kilo 免费池必须同时进 feeChannelOrder，否则面板「模型列表和费率」
+	// 里整组不出现（R65 的教训：显示「没模型」而 /v1/models 明明有）。
+	provider.Kilo,
 }
 
 // channelRank 渠道排序键：未知渠道排最后。
@@ -369,7 +373,7 @@ func sortChannelsByOrder[T any](items []T, kindOf func(T) provider.Kind) {
 // Loomy 一期也不提供手动签到：上游未提供额度或签到端点。
 func noExplicitCheckin(k provider.Kind) bool {
 	return k == provider.WorkBuddyAI || k == provider.QwenWork || k == provider.MonkeyCode ||
-		k == provider.Loomy || k == provider.Cline
+		k == provider.Loomy || k == provider.Cline || k == provider.Kilo
 }
 
 func (a *App) findRuntimeAuth(uid string) (*Runtime, *auth.Auth) {
@@ -556,6 +560,10 @@ func (a *App) StartLoginFor(kind string) (string, error) {
 		// Cline 无登录流程：凭据是官方 API Key（sk_ 开头）。
 		// 面板粘贴后走 SubmitClineKey（校验走零消耗的 GET /api/v1/api-keys）。
 		return "", fmt.Errorf("cline 渠道无需登录：请在面板粘贴官方 API Key（app.cline.bot → Account → API Keys）")
+	case provider.Kilo:
+		// 免费池是免密的：没有登录流程、没有可粘贴的凭据、没有可导入的本机客户端。
+		// 返回明确拒绝而不是「unknown login provider」——后者会让用户以为漏了入口。
+		return "", fmt.Errorf("%s 免费池无需登录：该渠道匿名可用，无需任何凭据即可在 /v1/models 中选择 kilo/* 模型", k)
 	default:
 		return "", fmt.Errorf("unknown login provider %s", kind)
 	}
@@ -1681,11 +1689,23 @@ type AccountRefresh struct {
 	Msg    string `json:"msg,omitempty"`
 }
 
+// isVirtualAccount 报告该渠道的账号是「虚拟账号」（面板不可增删）。
+//
+// 虚拟账号没有 auth 文件、也无法重新登录（R22）。放到 Remove/Disable 路径里
+// 会直接毁掉唯一账号，且**没有任何恢复手段**——只能改代码或删 state 文件。
+// 目前只有 Kilo 免费池属于此形态（匿名渠道）。
+func isVirtualAccount(rt *Runtime) bool {
+	return rt != nil && rt.Kind == provider.Kilo
+}
+
 // RemoveAccount 删除账号（auth 文件 + 内存池）。
 func (a *App) RemoveAccount(uid string) error {
 	rt, au := a.findRuntimeAuth(uid)
 	if rt == nil || au == nil {
 		return fmt.Errorf("unknown account %s", uid)
+	}
+	if isVirtualAccount(rt) {
+		return fmt.Errorf("%s 是虚拟账号（免密渠道，无凭据可删），不提供删除操作", rt.Kind)
 	}
 	if au.FilePath != "" {
 		_ = os.Remove(au.FilePath)
@@ -1700,6 +1720,9 @@ func (a *App) DisableAccount(uid string, disabled bool) error {
 	rt, _ := a.findRuntimeAuth(uid)
 	if rt == nil || rt.Pool == nil {
 		return fmt.Errorf("unknown account %s", uid)
+	}
+	if isVirtualAccount(rt) {
+		return fmt.Errorf("%s 是虚拟账号（免密渠道），不提供停用操作", rt.Kind)
 	}
 	rt.Pool.SetDisabled(uid, disabled)
 	if disabled {
@@ -2067,7 +2090,7 @@ type AccountView struct {
 	UnusableCredits int64 `json:"unusable_credits"`
 	// CreditsStale 余额口径不可信（旧版 state 或尚未完成首次成功刷新），UI 显示「待刷新」。
 	CreditsStale bool `json:"credits_stale,omitempty"`
-	// CreditsNA 积分概念不适用（如 OpenCodeZen 匿名通道），UI 显示「不适用」
+	// CreditsNA 积分概念不适用（匿名通道如 Kilo 免费池），UI 显示「不适用」
 	// 而非 0，并隐藏刷新积分与明细入口。
 	CreditsNA bool   `json:"credits_na,omitempty"`
 	Cooling   bool   `json:"cooling"`
@@ -2244,6 +2267,7 @@ func (a *App) accountViews() []AccountView {
 			ExpiringCredits: s.ExpiringCredits,
 			UnusableCredits: s.UnusableCredits,
 			CreditsStale:    s.CreditsStale,
+			CreditsNA:       group == string(provider.Kilo),
 			Cooling:         s.Cooling,
 			Until:           fmtTime(s.Until),
 			Reason:          s.Reason,
@@ -2260,7 +2284,8 @@ func (a *App) accountViews() []AccountView {
 			InUse:      pool.InUse(s.LastUsedAt, time.Now()),
 		})
 	}
-	// 面板固定渠道序展示：OpenCodeZen → WorkBuddyCN → WorkBuddyAI → QoderCN → QoderCOM → TraeWork → 千问办公
+	// 面板固定渠道序展示（顺序见 channelOrder）：WorkBuddyCN → WorkBuddyAI →
+	// QoderCN → QoderCOM → TraeWork → 千问办公 → … → Kilo。
 	sortChannelsByOrder(out, func(v AccountView) provider.Kind { return provider.Kind(v.Group) })
 	return out
 }

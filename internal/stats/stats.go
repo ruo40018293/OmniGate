@@ -660,6 +660,10 @@ var channelKind = map[string]bool{
 	string(provider.QwenWork): true, string(provider.MonkeyCode): true,
 	string(provider.Raccoon): true, string(provider.Loomy): true,
 	string(provider.GLM): true,
+	// R103：补齐三个此前遗漏的渠道 —— minimax / cline / kilo 都在这张表外面，
+	// 意味着它们的 token 从未进过平台表（R103 盘点时发现，与 R65「漏登记就整组
+	// 不出现」同一类缺陷）。白名单只按模型名前缀归属，补齐不改变既有归属。
+	string(provider.Minimax): true, string(provider.Cline): true, string(provider.Kilo): true,
 }
 
 // traeKinds 为 Trae 系渠道集合（TraeWork + TraeCode 共用账号与积分池——上游只为

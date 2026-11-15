@@ -40,6 +40,7 @@ import (
 	"omnigate/internal/config"
 	"omnigate/internal/gateway"
 	"omnigate/internal/glm"
+	"omnigate/internal/kilo"
 	"omnigate/internal/ledger"
 	"omnigate/internal/loomy"
 	"omnigate/internal/minimax"
@@ -320,12 +321,18 @@ func main() {
 	for _, a := range clAuths {
 		clPool.Add(a)
 	}
+	// Kilo 免费池是**免密**渠道（R103）：没有登录、没有 API Key、没有可伪造凭据，
+	// 免费集合完全由上游清单的 isFree 决定。故不建 auth 加载器、不进 reloadAccounts，
+	// 这里注入唯一虚拟账号（R22）。ExpiresAt 是远期值，否则 NeedsRefresh 恒真、
+	// 天天去刷新一个没有刷新端点的账号。
+	klPool := pool.New(filepath.Join(stateDir, "state-kilo.json"))
+	klPool.Add(kilo.AnonymousAuth())
 	// 挑号策略（config.strategy）统一下发到所有渠道的池。
 	// 各渠道共用同一策略：策略是「怎么用账号」的全局偏好，不是渠道特性。
 	// normalize 已校验过合法性，这里 ParseStrategy 不会失败。
 	if st, ok := pool.ParseStrategy(cfg.Strategy); ok {
 		for _, p := range []*pool.Pool{wbPool, trPool, qdPool, wbaPool, qwPool, qcnPool,
-			qcmPool, glmPool, mcPool, rcPool, lmPool} {
+			qcmPool, glmPool, mcPool, rcPool, lmPool, klPool} {
 			p.SetStrategy(st)
 		}
 		log.Printf("账号挑选策略：%s", st.Label())
@@ -356,6 +363,9 @@ func main() {
 	miUp := minimax.New()
 	miUp.HTTP.Timeout = time.Duration(cfg.Upstream.TimeoutSeconds) * time.Second
 	clUp := cline.New()
+	// Kilo 网关（api.kilo.ai/api/gateway）免费池：与其它渠道一致禁 h2、
+	// 流式 client 不设总超时（R35），靠 ResponseHeaderTimeout + IdleReader 兜底。
+	klUp := kilo.New()
 	clUp.HTTP.Timeout = time.Duration(cfg.Upstream.TimeoutSeconds) * time.Second
 	glmUp := glm.New()
 	// ⚠️ 只改 HTTP（非流式）的 Timeout。
@@ -383,6 +393,7 @@ func main() {
 		provider.Loomy.String():       {lmUp.HTTP, lmUp.StreamHTTP},
 		provider.Minimax.String():     {miUp.HTTP, miUp.StreamHTTP},
 		provider.Cline.String():       {clUp.HTTP, clUp.StreamHTTP},
+		provider.Kilo.String():        {klUp.HTTP, klUp.StreamHTTP},
 		// glm 两个 client 都要传（SetTransportProxy 会**新建** Transport，
 		// 只套 HTTP 会让 StreamHTTP 仍走直连（代理对流式不生效）。
 		provider.GLM.String(): {glmUp.HTTP, glmUp.StreamHTTP},
@@ -508,7 +519,11 @@ func main() {
 		provider.Loomy:      {Kind: provider.Loomy, Pool: lmPool, Upstream: lmUp, StaticModels: loomy.StaticModels()},
 		provider.Minimax:    {Kind: provider.Minimax, Pool: miPool, Upstream: miUp, StaticModels: minimax.StaticModels()},
 		provider.Cline:      {Kind: provider.Cline, Pool: clPool, Upstream: clUp, StaticModels: cline.StaticModels()},
-		provider.GLM:        {Kind: provider.GLM, Pool: glmPool, Upstream: glmUp, StaticModels: glm.StaticModels()},
+		// SingleAccount 是硬要求（不变量 23）：唯一虚拟账号没有重登路径，
+		// 任何账号级惩罚（冷却/禁用）都等于整条渠道下线且无法人工恢复。
+		provider.Kilo: {Kind: provider.Kilo, Pool: klPool, Upstream: klUp,
+			StaticModels: kilo.StaticModels(), SingleAccount: true},
+		provider.GLM: {Kind: provider.GLM, Pool: glmPool, Upstream: glmUp, StaticModels: glm.StaticModels()},
 		// 注意：GLM **不**置 SingleAccount。
 		//
 		// 早期误判：以为「凭据轮换后不可人工恢复」就该按单账号处理。但
@@ -532,7 +547,9 @@ func main() {
 		provider.Loomy:       {Kind: provider.Loomy, Pool: lmPool, Upstream: lmUp, Scheduler: lmSch},
 		provider.Minimax:     {Kind: provider.Minimax, Pool: miPool, Upstream: miUp, Scheduler: miSch},
 		provider.Cline:       {Kind: provider.Cline, Pool: clPool, Upstream: clUp, Scheduler: clSch},
-		provider.GLM:         {Kind: provider.GLM, Pool: glmPool, Upstream: glmUp, Scheduler: glmSch},
+		// Kilo 无 Scheduler：免费池没有签到、没有保活、没有积分可刷（R103）。
+		provider.Kilo: {Kind: provider.Kilo, Pool: klPool, Upstream: klUp},
+		provider.GLM:  {Kind: provider.GLM, Pool: glmPool, Upstream: glmUp, Scheduler: glmSch},
 	}
 
 	appInst, err := app.New(app.Options{
@@ -625,6 +642,10 @@ func main() {
 			provider.QwenWork.String():    {qwUp.HTTP, qwUp.StreamHTTP},
 			// glm 两个 client 都要传（同启动路径的理由：SetTransportProxy 新建 Transport）
 			provider.GLM.String(): {glmUp.HTTP, glmUp.StreamHTTP},
+			// R103：热更新这块历来只覆盖部分渠道（cline/raccoon/loomy/minimax/
+			// monkeycode 一直缺席，属既有缺口）。kilo 一并补上，避免「改了代理要
+			// 重启」这种不可预期行为再扩一个渠道。
+			provider.Kilo.String(): {klUp.HTTP, klUp.StreamHTTP},
 		})
 	})
 	compat.SetAPIKeySource(inner.CurrentAPIKey) // 面板改 API-Key 后，兼容层立即跟随
