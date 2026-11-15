@@ -44,8 +44,9 @@ func TestMainFollowsGlobalCheckinWhitelist(t *testing.T) {
 		got[m[1]] = strings.Contains(chunk, "FollowGlobalCheckin:")
 	}
 
-	// 这五个渠道的签到时刻就是面板上的全局时刻，必须跟随。
-	mustFollow := []string{"workbuddy", "traework", "workbuddyai", "raccoon", "glm"}
+	// 这些渠道的签到时刻就是面板上的全局时刻，必须跟随。
+	// lobsterai（R104）：上游活动按自然日开放、没有固定窗口，跟随全局时刻。
+	mustFollow := []string{"workbuddy", "traework", "workbuddyai", "raccoon", "glm", "lobsterai"}
 	for _, name := range mustFollow {
 		v, ok := got[name]
 		if !ok {

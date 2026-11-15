@@ -141,6 +141,7 @@
 | R102 | 目录端点下线只有「404 端点不存在」才可切源（401/网络/5xx 一律上抛），并记住下线 30 分钟重探；积分到期取最早活批次 |
 | R103 | 免密渠道三铁律：免费集合只认上游 `isFree` 布尔、能力位按实测来源（`top_provider` + `input_modalities`）、虚拟账号不得进任何「能弄没」的路径（含 Classify 绝不 ErrSessionDead） |
 | R104 | zcode 接入 + 共享基座：`auth.Extra` 条件写键、`provider.PublicModelID`、`upstream.NormalizeRoles`、四个 auth 加载器；已声明但未接入的 Kind 会被 `TestFeeChannelOrderCoversEveryKind` 挡住 |
+| R105 | lobsterai 接入；有真签到的渠道**必须不在** `noExplicitCheckin` / `NO_EXPLICIT_CHECKIN` 里（反向断言），且 `FollowGlobalCheckin` 白名单要同步；面板 JS 表必须断言**闭合**——R104 吃掉三张表的 `}` 让整个面板 SyntaxError 而全部测试是绿的 |
 
 ## 2. 架构选型（依据）
 
@@ -460,6 +461,20 @@ POST /api/quit                     # 退出程序
     对 map 元素不生效，会写出 `"extra": null` 把所有老凭证文件改写一遍；
     ③ 空 Extra 不得在盘上留痕（否则看不出哪个账号真的带扩展凭证）。
 
+42. **面板前端表的断言必须按表切开，并且要有一条闭合闸门。**
+    R104 往 `CH_LABEL` / `CH_CLASS` / `PROXY_HINT` 追加条目时吃掉了结尾的 ` }`，
+    三个表都变成 `const X = { ...;` —— `app.js` 在解析阶段直接 SyntaxError，
+    **整个面板所有按钮失效**；而当时全部测试都是绿的（前端断言只查「文件里有没有
+    `lit: "`」，后端测试根本不碰 JS）。用户看到的是「面板能打开但点什么都没反应」，
+    这种症状极难与「后端挂了」区分。三条硬约束：
+    ① 断言必须**逐表切块**再查（`jsTableBlock` / `jsLiteralBlock` 按括号配对），
+    不能只查「全文件包含 `lit: "`」——三张表都有这个形态，漏一张不会红；
+    ② 必须有纯文本的**花括号/方括号配平闸门**（`TestFrontendTablesAreClosed`），
+    它与任何渠道条目无关，能独立抓住整类「面板静默失效」；
+    ③ 「不支持手动签到」不是普适属性：**有真签到的渠道必须断言它不在**
+    `noExplicitCheckin` / `NO_EXPLICIT_CHECKIN` 里（双向断言，误登记比漏登记更隐蔽——
+    用户只会觉得「这个渠道怎么不能签到」）。
+
 ## 7. 平台能力差异表（internal/platform）
 
 | 能力 | Windows | macOS | Linux |
@@ -520,8 +535,8 @@ git tag vX.Y.Z && git push origin vX.Y.Z
 
 - [README.md](README.md) — 用户文档
 - [DEVELOPMENT.md](DEVELOPMENT.md) — 开发者文档（面向 AI Agent）
-- [AGENTS.md](AGENTS.md) — 本文件：决议项一句话判据（R1–R104）、架构选型、不变量
-- [docs/DECISIONS.md](docs/DECISIONS.md) — 决议全文（R1–R104）：每条决议的原始背景、踩坑记录与边界条件
+- [AGENTS.md](AGENTS.md) — 本文件：决议项一句话判据（R1–R105）、架构选型、不变量
+- [docs/DECISIONS.md](docs/DECISIONS.md) — 决议全文（R1–R105）：每条决议的原始背景、踩坑记录与边界条件
 - [docs/三接口兼容改造备忘.md](docs/三接口兼容改造备忘.md) — 三接口（Chat/Responses/Anthropic）兼容层架构决策、实施记录、验证清单、已知限制
 - [docs/用量积分流水记账备忘.md](docs/用量积分流水记账备忘.md) — 双流水统计（token/积分）架构、差分算法、实测验证、已知限制（R17）
 

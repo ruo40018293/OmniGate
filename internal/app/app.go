@@ -26,6 +26,7 @@ import (
 	"omnigate/internal/login"
 	logincline "omnigate/internal/login_cline"
 	"omnigate/internal/login_glm"
+	loginlobsterai "omnigate/internal/login_lobsterai"
 	loginminimax "omnigate/internal/login_minimax"
 	loginqoder "omnigate/internal/login_qoder"
 	loginqodercn "omnigate/internal/login_qodercn"
@@ -330,7 +331,8 @@ var channelOrder = map[provider.Kind]int{
 	provider.Minimax: 8, provider.Cline: 9,
 	provider.Kilo: 10,
 	// R104：新渠道逐个接入，每个均在本表占一位（未列入的按 100 排末尾）。
-	provider.ZCode: 11,
+	provider.ZCode:     11,
+	provider.LobsterAI: 12,
 }
 
 // feeChannelOrder 「模型列表和费率」面板的渠道分组顺序。
@@ -350,6 +352,7 @@ var feeChannelOrder = []provider.Kind{
 	provider.Kilo,
 	// R104：同样必须登记，否则面板「模型列表和费率」里整组不出现（R65）。
 	provider.ZCode,
+	provider.LobsterAI,
 }
 
 // channelRank 渠道排序键：未知渠道排最后。
@@ -548,7 +551,7 @@ func (a *App) StartLoginFor(kind string) (string, error) {
 	}
 	switch k {
 	case provider.WorkBuddy, provider.WorkBuddyAI, provider.TraeWork, provider.Qoder, provider.QoderCN, provider.QoderCOM, provider.QwenWork, provider.Minimax,
-		provider.ZCode:
+		provider.ZCode, provider.LobsterAI:
 		// 这些渠道已有登录编排
 	case provider.MonkeyCode:
 		// 导入型渠道：凭据来自本机已登录的官方客户端，上游没有可复现的 OAuth 流程。
@@ -603,6 +606,9 @@ func (a *App) StartLoginFor(kind string) (string, error) {
 	case provider.ZCode:
 		// ZCode 是网页授权码流（flowId + flowSecret + 轮询），与 login_minimax 同形。
 		a.loginClient = loginzcode.NewClient()
+	case provider.LobsterAI:
+		// LobsterAI 走本机回调端口（portal 只认 127.0.0.1/auth/callback）。
+		a.loginClient = loginlobsterai.NewClient()
 	default:
 		a.loginClient = login.NewClient()
 	}
@@ -639,6 +645,9 @@ func (a *App) StartLoginFor(kind string) (string, error) {
 	case provider.ZCode:
 		// ZCode 网页授权：Start 返回授权 URL，Poll 轮询到 token。
 		authURL, err = loginzcode.Start(a.loginClient, a.loginStateFP)
+	case provider.LobsterAI:
+		// LobsterAI：起本机回调口并立即返回 portal 登录 URL。
+		authURL, err = loginlobsterai.Start(a.loginClient, a.loginStateFP)
 	default:
 		ep := login.EndpointsForRegion(a.cfg.Region)
 		authURL, err = login.Start(a.loginClient, a.loginStateFP, ep)
@@ -676,6 +685,10 @@ func (a *App) CancelLogin() error {
 	// 小浣熊授权登录：取消时立刻恢复注册表（幂等；pollLogin 的 defer 还会再兜一次）
 	if kind == provider.Raccoon {
 		loginraccoon.Shutdown(a.loginStateFP, a.stateDir())
+	}
+	// LobsterAI 登录附带本机回调 server，取消时一并关闭（幂等）。
+	if kind == provider.LobsterAI {
+		loginlobsterai.Shutdown()
 	}
 	log.Printf("登录已取消")
 	return nil
@@ -811,6 +824,17 @@ func (a *App) pollLogin(ctx context.Context) {
 			}
 			if !errors.Is(err, loginzcode.ErrPending) {
 				log.Printf("zcode login poll failed: %v", err)
+			}
+			continue
+		}
+		if a.loginKind == provider.LobsterAI {
+			r, err := loginlobsterai.Poll(a.loginClient, a.loginStateFP)
+			if err == nil {
+				a.completeLobsterAILogin(r)
+				return
+			}
+			if !errors.Is(err, loginlobsterai.ErrPending) {
+				log.Printf("lobsterai login poll failed: %v", err)
 			}
 			continue
 		}
@@ -1388,6 +1412,22 @@ func (a *App) completeZCodeLogin(r loginzcode.Result) {
 	}
 	a.reloadAccounts()
 	a.afterAccountAdded(provider.ZCode)
+}
+
+// completeLobsterAILogin LobsterAI 登录成功：落带 keyfrom 四元组的凭证，重载账号池。
+//
+// keyfrom 四元组（uuid / first_keyfrom / latest_keyfrom / user_id）必须落盘到
+// auth.Auth.Extra（R104 不变量 41）：refresh 请求体与模型列表 query 都要它们，
+// 少了账号直接不可用（refresh 失败，或拿不到 kimi-k3 等准入模型）。
+func (a *App) completeLobsterAILogin(r loginlobsterai.Result) {
+	log.Printf("lobsterai 登录成功 uid=%s keyfrom=%t", r.UID, strings.TrimSpace(r.FirstKeyfrom) != "")
+	if _, err := loginlobsterai.SaveAuth(a.cfg.AuthDir, r); err != nil {
+		log.Printf("lobsterai 登录保存凭证失败 uid=%s err=%v", r.UID, err)
+		a.setLoginError("保存凭证失败：" + err.Error())
+		return
+	}
+	a.reloadAccounts()
+	a.afterAccountAdded(provider.LobsterAI)
 }
 
 // SubmitClineKey 面板粘贴 Cline 官方 API Key 的入口。

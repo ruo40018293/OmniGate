@@ -666,6 +666,7 @@ var channelKind = map[string]bool{
 	string(provider.Minimax): true, string(provider.Cline): true, string(provider.Kilo): true,
 	// R104：新渠道逐个接入，接入一个补一个。
 	string(provider.ZCode): true,
+	string(provider.LobsterAI): true,
 }
 
 // traeKinds 为 Trae 系渠道集合（TraeWork + TraeCode 共用账号与积分池——上游只为

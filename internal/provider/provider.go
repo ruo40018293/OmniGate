@@ -47,7 +47,11 @@ const (
 	// ZCode 智谱 ZCode：Anthropic Messages 形态；请求体 `system` 必须内嵌官方
 	// 身份块（否则 405 / code 3012），身份头族缺 X-Device-Mid 直接 400 code 3001；
 	// 凭据不可续期（无 refresh 端点，ExpiresAt 写远期哨兵）。
-	ZCode Kind = "zcode"
+	// LobsterAI 有道龙虾（lobsterai-server.youdao.com）：OAuth 三件套可续期，
+	// 走 Anthropic Messages 形态；上游 ID 自带命名空间（claude-* / gpt-* 等
+	// 原样透传，不走 <kind>/ 拼装）。
+	LobsterAI Kind = "lobsterai"
+	ZCode     Kind = "zcode"
 	// Kilo Kilo AI 网关免费池（api.kilo.ai/api/gateway）：**免密**渠道，
 	// 没有登录/API Key/可伪造凭据，免费集合只认上游清单的 isFree 布尔；
 	// 无签到、无积分、无解析端点 ⇒ 虚拟账号（R22）+ SingleAccount（R23）。

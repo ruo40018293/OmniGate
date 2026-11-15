@@ -1,4 +1,4 @@
-# 决议全文（R1–R104）
+# 决议全文（R1–R105）
 
 > 本文件是 `AGENTS.md` 第 1 节的**完整原文**——每条决议「为什么这么做 / 踩过什么坑 / 边界在哪」都在这里。
 > `AGENTS.md` 只保留每条的一句话判据，随每次会话自动加载，用来提醒「别推翻什么」；
@@ -1351,6 +1351,88 @@ return 0, nil, nil   // 结构未知：不报错、不留余额
 产物 `dist/omnigate.exe` 11756032 字节 sha256 `868e0d481fb45d4a61663c529e7e939e0af264269bcdac26ea0dcc9776c30289`，自检 `C:/Users/`=0 / `D:\Code`=0 / `huansheng`=0。
 
 ---
+## R105 — lobsterai 接入；面板前端表的断言必须按表切开并加闭合闸门
+
+### 触发
+
+用户「都搞吧，一项项来」——逐个接入五个候选渠道。本期第二个：lobsterai（有道龙虾）。
+
+### 接入内容
+
+- `internal/lobsterai/`（6 文件）+ `internal/login_lobsterai/`（5 文件）从上游移植，
+  `wild-work/internal/` → `omnigate/internal/` 批量改写 import。
+- 凭据：OAuth 三件套可续期；**keyfrom 四元组必须落 `auth.Extra`**
+  （`uuid` / `first_keyfrom` / `latest_keyfrom` / `user_id`）——续期请求体与模型列表
+  query 都要它们，少了账号直接不可用。`latest_keyfrom` **刻意不改成当前时刻**
+  （上游参考实现如此，且 `refresh` 绝不回写 keyfrom 四元组）。
+- 登录：本机回调口，`redirect_uri` 恒为 `http://127.0.0.1:<port>/auth/callback`
+  （portal 的 ElectronAuth 严格判定 hostname/protocol/pathname/port，不满足就改发
+  `lobsterai://auth/callback?code=…` deep-link）。`StartWithPort` 支持固定端口
+  （`config.login.lobsterai_callback_port`），`Poll` 超时 10 分钟，`Shutdown()` 幂等。
+- 有**真签到**（三步 `GET slot` → `GET context` → `POST actions/check_in`，
+  `idempotencyKey` 是 uuid4）；`ActivityPlatform` 固定 `win32`（伪装客户端形态，
+  与运行环境无关）。故 `FollowGlobalCheckin: true`（上游活动按自然日开放、无固定窗口），
+  且**不进** `noExplicitCheckin`。
+- 静态模型目录 19 条、`staticContextWindow = 131072`；`FetchModels` 失败回退静态表。
+
+### 上游测试的一处本仓适配
+
+`TestRefreshTokenBodyAndPersist` 原来 `json.Unmarshal(onDisk)` 后直接比明文
+`doc.Auth.AccessToken == "new-access"`，但本仓 `auth.SaveAtomic` 在 Windows 下用
+DPAPI 加密（盘上是 `dpapi:...`）⇒ 恒假。改成走 `auth.Parse(onDisk)` 往返
+（唯一读盘入口，自动解密），断言意图（refresh 轮换必须落盘 + `latest_keyfrom`
+不得被改成当前时刻）一字未丢。
+
+### 本期最贵的发现：R104 引入了面板 JS 语法错误
+
+`git log -- cmd/omnigate/web/app.js` 逐提交量花括号：
+
+| 提交 | 版本 | CH_LABEL 行尾 | 闭合 |
+|---|---|---|---|
+| d7c989a | R103 | `kilo: "Kilo" };` | ✅ |
+| a216a98 | R104 | `zcode: "ZCode";` | ❌ |
+
+R104 往 `CH_LABEL` / `CH_CLASS` / `PROXY_HINT` 追加条目时吃掉了结尾的 ` }`，
+三个表都成了 `const X = { ...;`。**整个 `app.js` 在解析阶段就 SyntaxError，
+面板所有按钮全部失效**（用户看到的是「面板能打开但点什么都没反应」，
+这种症状极难与「后端挂了」区分），而当时**全部测试都是绿的**：
+
+- 前端断言只有 `strings.Contains(js, lit+": "")` —— 三张表都有这个形态，
+  删掉任何一张的条目，另两张的条目会把断言喂饱（M4a 变异就这么存活的）；
+- 后端 Go 测试根本不碰 JS。
+
+### 三条改法
+
+1. **断言逐表切块**：新增 `jsTableBlock`（按花括号配对）与 `jsLiteralBlock`
+   （按 `()` / `[]` 配对）。初版写成 `strings.Index(js[start:], "};")`，
+   而本文件的表字面量以 `;` 结尾 ⇒ 那个 `};` 一路命中文档后面某个无关闭合，
+   把一大段（含其它表）都圈进来，「逐表断言」退化成「全文件断言」，变异照样存活。
+2. **闭合闸门**：`TestFrontendTablesAreClosed` 检查全文件 `{}` / `[]` 配平，
+   并逐个确认五张表能被切出来。它与任何渠道条目无关，能独立抓住整类「面板静默失效」。
+3. **「无手动签到」改成按渠道的双向断言**：`r104NoManualCheckin = map[string]bool{"zcode": true}`。
+   原来写成对所有 `r104Kinds` 的普适断言 —— 那是在「第一批只接 zcode（无签到）」
+   时偷懒成立的；lobsterai 有真签到，按普适断言会要求它**必须**进
+   `noExplicitCheckin`，即把正确实现判成失败。反向断言（误登记 ⇒ 红）比漏登记更重要：
+   误登记只会让用户觉得「这个渠道怎么不能签到」。
+4. **Kind 声明断言改成 token 匹配**：gofmt 会把 Kind 常量块的 `Kind =` 按最长标识符
+   对齐，每接一个名字更长的渠道，既有行的空格数都会变；精确字面量匹配必然因排版误报
+   （本轮加 `LobsterAI` 后 `ZCode` 那行变五空格，立刻撞上）。改用
+   `\b<Exported>\s+Kind\s*=\s*"<lit>"`。
+
+### 闸门与变异
+
+九个变异全部被杀：M1 `noExplicitCheckin` 误登记 lobsterai / M2 `feeChannelOrder` 漏登记 /
+M3 `stats.channelKind` 漏登记 / M4a `CH_LABEL` 漏条目 / M4b `NO_EXPLICIT_CHECKIN` 误含 /
+M4c `PROXY_CHANNELS` 漏条目 / M5 R94 白名单与装配不一致 / M6 `extraOf` 恒空 /
+M7 表吃掉闭合括号（R104 事故重演）。
+
+### 边界与已知未做
+
+- 五个渠道里 lobsterai 是第二个（zcode 已完成），余下 gemini / officeace / codearts。
+- `config.login.lobsterai_callback_port` 未在面板暴露配置项，只走配置文件。
+- 上游 `: KILO PROCESSING` 同类的保活注释帧不适用于 lobsterai（它没有排队语义）。
+- AGENTS.md 已压到注入预算内；§1 每行一句话，长文只在本文件。
+
 ## R104 — zcode 接入 + 可扩展凭证字段基座
 
 **触发**（用户原话）：「都搞吧，一项项来」——把上游尚未接入的五个渠道

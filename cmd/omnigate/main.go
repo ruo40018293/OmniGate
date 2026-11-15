@@ -42,6 +42,7 @@ import (
 	"omnigate/internal/glm"
 	"omnigate/internal/kilo"
 	"omnigate/internal/ledger"
+	"omnigate/internal/lobsterai"
 	"omnigate/internal/loomy"
 	"omnigate/internal/minimax"
 	"omnigate/internal/monkeycode"
@@ -266,8 +267,13 @@ func main() {
 	if err != nil {
 		fatal("读取 ZCode 账号目录失败：%v", err)
 	}
-	log.Printf("loaded accounts: workbuddy=%d %s, traework=%d, qoder=%d, qodercn=%d, qodercom=%d, workbuddyai=%d, qwenwork=%d, glm=%d, monkeycode=%d, raccoon=%d, loomy=%d, minimax=%d, cline=%d, zcode=%d from %s",
-		len(wbAuths), cfg.Region, len(trAuths), len(qdAuths), len(qcnAuths), len(qcmAuths), len(wbaAuths), len(qwAuths), len(glmAuths), len(mcAuths), len(rcAuths), len(lmAuths), len(miAuths), len(clAuths), len(zcAuths), cfg.AuthDir)
+	// LobsterAI：正常多账号渠道，凭据由本机回调登录写入（含 keyfrom 四元组 Extra）。
+	lobAuths, err := auth.LoadLobsterAIDir(cfg.AuthDir)
+	if err != nil {
+		fatal("读取 LobsterAI 账号目录失败：%v", err)
+	}
+	log.Printf("loaded accounts: workbuddy=%d %s, traework=%d, qoder=%d, qodercn=%d, qodercom=%d, workbuddyai=%d, qwenwork=%d, glm=%d, monkeycode=%d, raccoon=%d, loomy=%d, minimax=%d, cline=%d, lobsterai=%d, zcode=%d from %s",
+		len(wbAuths), cfg.Region, len(trAuths), len(qdAuths), len(qcnAuths), len(qcmAuths), len(wbaAuths), len(qwAuths), len(glmAuths), len(mcAuths), len(rcAuths), len(lmAuths), len(miAuths), len(clAuths), len(lobAuths), len(zcAuths), cfg.AuthDir)
 
 	wbPool := pool.New(filepath.Join(stateDir, "state-workbuddy.json"))
 	for _, a := range wbAuths {
@@ -331,6 +337,10 @@ func main() {
 	for _, a := range zcAuths {
 		zcPool.Add(a)
 	}
+	lobPool := pool.New(filepath.Join(stateDir, "state-lobsterai.json"))
+	for _, a := range lobAuths {
+		lobPool.Add(a)
+	}
 
 	// Kilo 免费池是**免密**渠道（R103）：没有登录、没有 API Key、没有可伪造凭据，
 	// 免费集合完全由上游清单的 isFree 决定。故不建 auth 加载器、不进 reloadAccounts，
@@ -343,7 +353,7 @@ func main() {
 	// normalize 已校验过合法性，这里 ParseStrategy 不会失败。
 	if st, ok := pool.ParseStrategy(cfg.Strategy); ok {
 		for _, p := range []*pool.Pool{wbPool, trPool, qdPool, wbaPool, qwPool, qcnPool,
-			qcmPool, glmPool, mcPool, rcPool, lmPool, klPool, zcPool} {
+			qcmPool, glmPool, mcPool, rcPool, lmPool, klPool, zcPool, lobPool} {
 			p.SetStrategy(st)
 		}
 		log.Printf("账号挑选策略：%s", st.Label())
@@ -379,6 +389,11 @@ func main() {
 	klUp := kilo.New()
 	zcUp := zcode.New()
 	zcUp.HTTP.Timeout = time.Duration(cfg.Upstream.TimeoutSeconds) * time.Second
+	// LobsterAI：对话是 OpenAI 兼容面且恒流式；非流式 client 留总超时兜底，
+	// StreamHTTP 不设 Timeout（R35），两者共用 Transport。
+	lobUp := lobsterai.New()
+	lobUp.HTTP.Timeout = time.Duration(cfg.Upstream.TimeoutSeconds) * time.Second
+	lobUp.StreamHTTP.Transport = lobUp.HTTP.Transport
 	clUp.HTTP.Timeout = time.Duration(cfg.Upstream.TimeoutSeconds) * time.Second
 	glmUp := glm.New()
 	// ⚠️ 只改 HTTP（非流式）的 Timeout。
@@ -408,6 +423,7 @@ func main() {
 		provider.Cline.String():       {clUp.HTTP, clUp.StreamHTTP},
 		provider.Kilo.String():        {klUp.HTTP, klUp.StreamHTTP},
 		provider.ZCode.String():       {zcUp.HTTP, zcUp.StreamHTTP},
+		provider.LobsterAI.String():   {lobUp.HTTP, lobUp.StreamHTTP},
 		// glm 两个 client 都要传（SetTransportProxy 会**新建** Transport，
 		// 只套 HTTP 会让 StreamHTTP 仍走直连（代理对流式不生效）。
 		provider.GLM.String(): {glmUp.HTTP, glmUp.StreamHTTP},
@@ -511,6 +527,11 @@ func main() {
 	// 定时任务全部关闭（显式空切片），否则每天空跑一次并记录失败。
 	clSch := scheduler.New(scheduler.Config{Pool: clPool, Upstream: clUp, Name: "cline",
 		CheckinMinutes: []int{}, KeepaliveHours: []int{}, ExpiringThreshold: expiringThreshold, Ledger: lg})
+	// LobsterAI：**有每日签到**（三步 slot → context → check_in，带客户端幂等键），
+	// 也要 token 保活（refresh 会轮换，刷新后必须落盘，不变量 21）。
+	lobSch := scheduler.New(scheduler.Config{Pool: lobPool, Upstream: lobUp, Name: "lobsterai",
+		CheckinMinutes: checkinMinutes, KeepaliveHours: cfg.Schedule.KeepaliveHours,
+		ExpiringThreshold: expiringThreshold, Ledger: lg, FollowGlobalCheckin: true})
 	glmSch := scheduler.New(scheduler.Config{Pool: glmPool, Upstream: glmUp, Name: "glm",
 		CheckinMinutes: checkinMinutes, KeepaliveHours: cfg.Schedule.KeepaliveHours,
 		ExpiringThreshold: expiringThreshold, Ledger: lg, FollowGlobalCheckin: true})
@@ -539,6 +560,8 @@ func main() {
 			StaticModels: kilo.StaticModels(), SingleAccount: true},
 		provider.ZCode: {Kind: provider.ZCode, Pool: zcPool, Upstream: zcUp,
 			StaticModels: zcode.StaticModels()},
+		provider.LobsterAI: {Kind: provider.LobsterAI, Pool: lobPool, Upstream: lobUp,
+			StaticModels: lobsterai.StaticModels()},
 		provider.GLM: {Kind: provider.GLM, Pool: glmPool, Upstream: glmUp, StaticModels: glm.StaticModels()},
 		// 注意：GLM **不**置 SingleAccount。
 		//
@@ -568,8 +591,9 @@ func main() {
 		// ZCode 无可用签到（DailyCheckin 恒 ErrClaimUnsupported：上游要 headful 浏览器 +
 		// 一次性验证码参数），但**需要 Scheduler**：它是唯一驱动 token 到期检查与
 		// 账号池保活的组件，缺了它账号永不刷新（到期后只能手动重登）。
-		provider.ZCode: {Kind: provider.ZCode, Pool: zcPool, Upstream: zcUp},
-		provider.GLM:   {Kind: provider.GLM, Pool: glmPool, Upstream: glmUp, Scheduler: glmSch},
+		provider.ZCode:     {Kind: provider.ZCode, Pool: zcPool, Upstream: zcUp},
+		provider.LobsterAI: {Kind: provider.LobsterAI, Pool: lobPool, Upstream: lobUp, Scheduler: lobSch},
+		provider.GLM:       {Kind: provider.GLM, Pool: glmPool, Upstream: glmUp, Scheduler: glmSch},
 	}
 
 	appInst, err := app.New(app.Options{
@@ -665,8 +689,9 @@ func main() {
 			// R103：热更新这块历来只覆盖部分渠道（cline/raccoon/loomy/minimax/
 			// monkeycode 一直缺席，属既有缺口）。kilo 一并补上，避免「改了代理要
 			// 重启」这种不可预期行为再扩一个渠道。
-			provider.Kilo.String():  {klUp.HTTP, klUp.StreamHTTP},
-			provider.ZCode.String(): {zcUp.HTTP, zcUp.StreamHTTP},
+			provider.Kilo.String():      {klUp.HTTP, klUp.StreamHTTP},
+			provider.ZCode.String():     {zcUp.HTTP, zcUp.StreamHTTP},
+			provider.LobsterAI.String(): {lobUp.HTTP, lobUp.StreamHTTP},
 		})
 	})
 	compat.SetAPIKeySource(inner.CurrentAPIKey) // 面板改 API-Key 后，兼容层立即跟随
@@ -728,6 +753,7 @@ func main() {
 	go lmSch.Run(sctx)
 	go miSch.Run(sctx)
 	go clSch.Run(sctx)
+	go lobSch.Run(sctx)
 	// ⚠️ 新增渠道时必须在这里补 Run()。
 	// 漏了**不会报错**——只表现为「该渠道的自动签到/保活从不运行」，
 	// 而手工触发（面板按钮 / RunCheckinNow）仍然可用，极难发现。
@@ -748,6 +774,8 @@ func main() {
 		provider.Loomy,
 		provider.Minimax,
 		provider.Cline,
+		// LobsterAI 有 profile-summary 额度端点，不纳入就永远显示 0。
+		provider.LobsterAI,
 	}, app.CreditRefreshInterval)
 
 	// 启动即刷新「模型列表 + 费率」，之后每 30 分钟。

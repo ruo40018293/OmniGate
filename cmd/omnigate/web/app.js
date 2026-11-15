@@ -397,8 +397,8 @@ function renderTopbar() {
 }
 
 // 渠道显示名与 CSS 短类名（后端 group / 费率 channel 均为 provider.Kind）。
-const CH_LABEL = { workbuddy: "WorkBuddyCN", workbuddyai: "WorkBuddyAI", traework: "TraeWork", traecode: "TraeCode", qoder: "Qoder", qodercn: "QoderCN", qodercom: "QoderCOM", qwenwork: "千问办公", glm: "智谱清言", monkeycode: "MonkeyCode", raccoon: "小浣熊", loomy: "Loomy", minimax: "MiniMax", cline: "Cline", kilo: "Kilo", zcode: "ZCode";
-const CH_CLASS = { workbuddy: "wb", workbuddyai: "wbai", traework: "trae", traecode: "traecode", qoder: "qoder", qodercn: "qodercn", qodercom: "qodercom", qwenwork: "qwenwork", glm: "glm", monkeycode: "monkeycode", raccoon: "raccoon", loomy: "loomy", minimax: "minimax", cline: "cline", kilo: "kilo", zcode: "zcode";
+const CH_LABEL = { workbuddy: "WorkBuddyCN", workbuddyai: "WorkBuddyAI", traework: "TraeWork", traecode: "TraeCode", qoder: "Qoder", qodercn: "QoderCN", qodercom: "QoderCOM", qwenwork: "千问办公", glm: "智谱清言", monkeycode: "MonkeyCode", raccoon: "小浣熊", loomy: "Loomy", minimax: "MiniMax", cline: "Cline", kilo: "Kilo", zcode: "ZCode", lobsterai: "LobsterAI" };
+const CH_CLASS = { workbuddy: "wb", workbuddyai: "wbai", traework: "trae", traecode: "traecode", qoder: "qoder", qodercn: "qodercn", qodercom: "qodercom", qwenwork: "qwenwork", glm: "glm", monkeycode: "monkeycode", raccoon: "raccoon", loomy: "loomy", minimax: "minimax", cline: "cline", kilo: "kilo", zcode: "zcode", lobsterai: "lobsterai" };
 const chLabel = (k) => CH_LABEL[k] || "WorkBuddy";
 const chClass = (k) => CH_CLASS[k] || "wb";
 // 不支持显式签到（手动按钮）的渠道：
@@ -1672,8 +1672,8 @@ async function toggleAutostart() {
 // ---------- 设置弹层（统一配置：监听/API-Key/签到/自启/模型路由/渠道代理） ----------
 // PROXY_CHANNELS 渠道上游代理列表（顺序与面板渠道序一致；旧 qoder 已下线不提供代理配置）。
 const PROXY_CHANNELS = ["workbuddy", "workbuddyai", "qodercn", "qodercom", "traework", "qwenwork", "glm", "monkeycode", "raccoon", "loomy", "minimax", "cline", "kilo",
-  "zcode"];
-const PROXY_HINT = { workbuddy: "WorkBuddyCN", workbuddyai: "WorkBuddyAI", traework: "TraeWork", qodercn: "QoderCN", qodercom: "QoderCOM", qwenwork: "千问办公", glm: "智谱清言", kilo: "Kilo", zcode: "ZCode";
+  "zcode", "lobsterai"];
+const PROXY_HINT = { workbuddy: "WorkBuddyCN", workbuddyai: "WorkBuddyAI", traework: "TraeWork", qodercn: "QoderCN", qodercom: "QoderCOM", qwenwork: "千问办公", glm: "智谱清言", kilo: "Kilo", zcode: "ZCode", lobsterai: "LobsterAI" };
 
 // renderProxyList 按当前 state.proxies 渲染每渠道一个输入行。
 function renderProxyList() {
@@ -2050,6 +2050,7 @@ function bind() {
   $("btnAddMinimax").onclick = () => promptLogin("minimax");
   $("btnAddCline").onclick = openClineAdd;
   $("btnAddZCode").onclick = () => promptLogin("zcode");
+$("btnAddLobsterAI").onclick = () => promptLogin("lobsterai");
   // R103 Kilo 免费池是免密渠道：没有登录、没有可粘贴的凭据、没有可导入的本机客户端，
   // 点按钮只需告知「已经可用」——比给一个点了会报错的入口好。
   $("btnAddKilo").onclick = () => toast("Kilo 免费池是免密渠道：无需添加账号，直接在客户端里调用 kilo/* 模型即可");
