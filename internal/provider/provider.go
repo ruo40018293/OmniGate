@@ -72,6 +72,14 @@ const (
 	// 后三者全在 Extra；STS 过期靠 refresh.go 的 ensureCredential 续。
 	// **有真签到**：POST {gateway}/v1/subscription/bonus/claim（V11 签名，body {}）。
 	OfficeAce Kind = "officeace"
+
+	// CodeArts 华为云 CodeArts Agent（snap-access.cn-north-4）：Anthropic Messages 形态
+	// 转华为自有 DSML 工具调用语法。凭据是**华为云 STS 临时 AK/SK/SecurityToken**
+	// （不是 Bearer）：accessToken 承载 AK，refreshToken 承载 OAuth refresh_token 用于
+	// 静默续期，secret_access_key / security_token / dpop_private_key_jwk /
+	// domain_id / user_id / project_id / region 全在 Extra。签名用 AK/SK + DPoP。
+	// **有签到**：benefit（免费额度）模型目录 + 每日额度领取，见 credits.go。
+	CodeArts Kind = "codearts"
 )
 
 func (k Kind) String() string { return string(k) }

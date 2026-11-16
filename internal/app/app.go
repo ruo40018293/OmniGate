@@ -25,6 +25,7 @@ import (
 	"omnigate/internal/live"
 	"omnigate/internal/login"
 	logincline "omnigate/internal/login_cline"
+	login_codearts "omnigate/internal/login_codearts"
 	logingemini "omnigate/internal/login_gemini"
 	"omnigate/internal/login_glm"
 	loginlobsterai "omnigate/internal/login_lobsterai"
@@ -336,6 +337,7 @@ var channelOrder = map[provider.Kind]int{
 	provider.LobsterAI: 12,
 	provider.Gemini:    13,
 	provider.OfficeAce: 14,
+	provider.CodeArts:  15,
 }
 
 // feeChannelOrder 「模型列表和费率」面板的渠道分组顺序。
@@ -360,6 +362,8 @@ var feeChannelOrder = []provider.Kind{
 	provider.Gemini,
 	// R107：OfficeAce 同样要登记（R65 教训）。
 	provider.OfficeAce,
+	// R108：CodeArts 同样要登记（R65 教训）。
+	provider.CodeArts,
 }
 
 // channelRank 渠道排序键：未知渠道排最后。
@@ -622,6 +626,9 @@ func (a *App) StartLoginFor(kind string) (string, error) {
 	case provider.Gemini:
 		// Gemini 走本机 loopback OAuth（installed-app 政策限 redirect host 为 localhost）。
 		a.loginClient = logingemini.NewClient()
+	case provider.CodeArts:
+		// CodeArts 走本机 http 回调 + PKCE + DPoP（华为云 STS 换取临时 AK/SK）。
+		a.loginClient = login_codearts.NewClient()
 	default:
 		a.loginClient = login.NewClient()
 	}
@@ -664,6 +671,9 @@ func (a *App) StartLoginFor(kind string) (string, error) {
 	case provider.Gemini:
 		// Gemini：起本机 loopback 回调口（127.0.0.1:<随机端口>/oauth-callback）并返回 Google 授权 URL。
 		authURL, err = logingemini.Start(a.loginClient, a.loginStateFP)
+	case provider.CodeArts:
+		// CodeArts：起本机回调口并返回华为云 portal 授权 URL。
+		authURL, err = login_codearts.Start(a.loginClient, a.loginStateFP)
 	default:
 		ep := login.EndpointsForRegion(a.cfg.Region)
 		authURL, err = login.Start(a.loginClient, a.loginStateFP, ep)
@@ -709,6 +719,10 @@ func (a *App) CancelLogin() error {
 	// Gemini 同样持有本机回调 server，取消时一并关闭（幂等）。
 	if kind == provider.Gemini {
 		logingemini.Shutdown()
+	}
+	// CodeArts 同款（幂等）。
+	if kind == provider.CodeArts {
+		login_codearts.Shutdown()
 	}
 	log.Printf("登录已取消")
 	return nil
@@ -866,6 +880,17 @@ func (a *App) pollLogin(ctx context.Context) {
 			}
 			if !errors.Is(err, logingemini.ErrPending) {
 				log.Printf("gemini login poll failed: %v", err)
+			}
+			continue
+		}
+		if a.loginKind == provider.CodeArts {
+			r, err := login_codearts.Poll(a.loginClient, a.loginStateFP)
+			if err == nil {
+				a.completeCodeArtsLogin(r)
+				return
+			}
+			if !errors.Is(err, login_codearts.ErrPending) {
+				log.Printf("codearts login poll failed: %v", err)
 			}
 			continue
 		}
@@ -1441,6 +1466,14 @@ func (a *App) reloadAccounts() {
 			rt.Pool.SyncToDir(auths)
 		}
 	}
+	if rt := a.runtime(provider.CodeArts); rt != nil && rt.Pool != nil {
+		auths, err := auth.LoadCodeArtsDir(a.cfg.AuthDir)
+		if err != nil {
+			log.Printf("reload codearts accounts: %v", err)
+		} else {
+			rt.Pool.SyncToDir(auths)
+		}
+	}
 }
 
 // CheckinAccount 单个账号立即签到。
@@ -1512,6 +1545,24 @@ func (a *App) completeGeminiLogin(r logingemini.Result) {
 	}
 	a.reloadAccounts()
 	a.afterAccountAdded(provider.Gemini)
+}
+
+// completeCodeArtsLogin CodeArts 登录成功：落 STS 临时凭据并重载账号池。
+//
+// 渠道专有字段全部由 login_codearts.SaveAuth 写进 auth.Extra（AK/SK/SecurityToken、
+// DPoP 私钥 JWK、code_verifier、domain/user/project/region）；accessToken 承载 AK
+// （账号唯一标识 + Parse 非空校验的落点），refreshToken 是 OAuth 续期材料。
+// **不要**把它当普通 Bearer：签名用的是 AK/SK + DPoP（R104 不变量 41）。
+func (a *App) completeCodeArtsLogin(r login_codearts.Result) {
+	log.Printf("codearts 登录成功 uid=%s label=%s region=%s expires_at=%d",
+		r.UID, r.Label, r.Region, r.ExpiresAt)
+	if _, err := login_codearts.SaveAuth(a.cfg.AuthDir, r); err != nil {
+		log.Printf("codearts 登录保存凭证失败 uid=%s err=%v", r.UID, err)
+		a.setLoginError("保存凭证失败：" + err.Error())
+		return
+	}
+	a.reloadAccounts()
+	a.afterAccountAdded(provider.CodeArts)
 }
 
 // SubmitClineKey 面板粘贴 Cline 官方 API Key 的入口。

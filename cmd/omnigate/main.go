@@ -37,6 +37,7 @@ import (
 	"omnigate/internal/app"
 	"omnigate/internal/auth"
 	"omnigate/internal/cline"
+	"omnigate/internal/codearts"
 	"omnigate/internal/config"
 	"omnigate/internal/gateway"
 	"omnigate/internal/gemini"
@@ -286,8 +287,14 @@ func main() {
 	if err != nil {
 		fatal("读取 OfficeAce 账号目录失败：%v", err)
 	}
-	log.Printf("loaded accounts: workbuddy=%d %s, traework=%d, qoder=%d, qodercn=%d, qodercom=%d, workbuddyai=%d, qwenwork=%d, glm=%d, monkeycode=%d, raccoon=%d, loomy=%d, minimax=%d, cline=%d, lobsterai=%d, zcode=%d, gemini=%d, officeace=%d from %s",
-		len(wbAuths), cfg.Region, len(trAuths), len(qdAuths), len(qcnAuths), len(qcmAuths), len(wbaAuths), len(qwAuths), len(glmAuths), len(mcAuths), len(rcAuths), len(lmAuths), len(miAuths), len(clAuths), len(lobAuths), len(zcAuths), len(gemAuths), len(oaAuths), cfg.AuthDir)
+	// CodeArts（华为云）：正常多账号渠道，凭据由本机 OAuth（PKCE + DPoP）登录写入
+	// auths/codearts-*.json。AK/SK/SecurityToken 与 DPoP 私钥在 Extra。
+	caAuths, err := auth.LoadCodeArtsDir(cfg.AuthDir)
+	if err != nil {
+		fatal("读取 CodeArts 账号目录失败：%v", err)
+	}
+	log.Printf("loaded accounts: workbuddy=%d %s, traework=%d, qoder=%d, qodercn=%d, qodercom=%d, workbuddyai=%d, qwenwork=%d, glm=%d, monkeycode=%d, raccoon=%d, loomy=%d, minimax=%d, cline=%d, lobsterai=%d, zcode=%d, gemini=%d, officeace=%d, codearts=%d from %s",
+		len(wbAuths), cfg.Region, len(trAuths), len(qdAuths), len(qcnAuths), len(qcmAuths), len(wbaAuths), len(qwAuths), len(glmAuths), len(mcAuths), len(rcAuths), len(lmAuths), len(miAuths), len(clAuths), len(lobAuths), len(zcAuths), len(gemAuths), len(oaAuths), len(caAuths), cfg.AuthDir)
 
 	wbPool := pool.New(filepath.Join(stateDir, "state-workbuddy.json"))
 	for _, a := range wbAuths {
@@ -364,6 +371,10 @@ func main() {
 	for _, a := range oaAuths {
 		oaPool.Add(a)
 	}
+	caPool := pool.New(filepath.Join(stateDir, "state-codearts.json"))
+	for _, a := range caAuths {
+		caPool.Add(a)
+	}
 
 	// Kilo 免费池是**免密**渠道（R103）：没有登录、没有 API Key、没有可伪造凭据，
 	// 免费集合完全由上游清单的 isFree 决定。故不建 auth 加载器、不进 reloadAccounts，
@@ -376,7 +387,7 @@ func main() {
 	// normalize 已校验过合法性，这里 ParseStrategy 不会失败。
 	if st, ok := pool.ParseStrategy(cfg.Strategy); ok {
 		for _, p := range []*pool.Pool{wbPool, trPool, qdPool, wbaPool, qwPool, qcnPool,
-			qcmPool, glmPool, mcPool, rcPool, lmPool, klPool, zcPool, lobPool, gemPool, oaPool} {
+			qcmPool, glmPool, mcPool, rcPool, lmPool, klPool, zcPool, lobPool, gemPool, oaPool, caPool} {
 			p.SetStrategy(st)
 		}
 		log.Printf("账号挑选策略：%s", st.Label())
@@ -427,6 +438,11 @@ func main() {
 	oaUp := officeace.New()
 	oaUp.HTTP.Timeout = time.Duration(cfg.Upstream.TimeoutSeconds) * time.Second
 	oaUp.StreamHTTP.Transport = oaUp.HTTP.Transport
+	// CodeArts：华为自有 DSML 工具调用语法（Anthropic Messages 转译）。
+	// 流式必须用 StreamHTTP（R35），两者共用 Transport 才能一起套代理。
+	caUp := codearts.New()
+	caUp.HTTP.Timeout = time.Duration(cfg.Upstream.TimeoutSeconds) * time.Second
+	caUp.StreamHTTP.Transport = caUp.HTTP.Transport
 	clUp.HTTP.Timeout = time.Duration(cfg.Upstream.TimeoutSeconds) * time.Second
 	glmUp := glm.New()
 	// ⚠️ 只改 HTTP（非流式）的 Timeout。
@@ -459,6 +475,7 @@ func main() {
 		provider.LobsterAI.String():   {lobUp.HTTP, lobUp.StreamHTTP},
 		provider.Gemini.String():      {gemUp.HTTP, gemUp.StreamHTTP},
 		provider.OfficeAce.String():   {oaUp.HTTP, oaUp.StreamHTTP},
+		provider.CodeArts.String():    {caUp.HTTP, caUp.StreamHTTP},
 		// glm 两个 client 都要传（SetTransportProxy 会**新建** Transport，
 		// 只套 HTTP 会让 StreamHTTP 仍走直连（代理对流式不生效）。
 		provider.GLM.String(): {glmUp.HTTP, glmUp.StreamHTTP},
@@ -577,6 +594,12 @@ func main() {
 	oaSch := scheduler.New(scheduler.Config{Pool: oaPool, Upstream: oaUp, Name: "officeace",
 		CheckinMinutes: checkinMinutes, KeepaliveHours: cfg.Schedule.KeepaliveHours,
 		ExpiringThreshold: expiringThreshold, Ledger: lg, FollowGlobalCheckin: true})
+	// CodeArts：**有真签到**（活动 campaign：fetchCampaigns → claim → confirm，
+	// 只认 type == USER_LOGIN 的活动），跟随全局签到时刻（R94 白名单）；
+	// 临时 AK/SK 会过期，保活也必要（refresh_token 静默续期）。
+	caSch := scheduler.New(scheduler.Config{Pool: caPool, Upstream: caUp, Name: "codearts",
+		CheckinMinutes: checkinMinutes, KeepaliveHours: cfg.Schedule.KeepaliveHours,
+		ExpiringThreshold: expiringThreshold, Ledger: lg, FollowGlobalCheckin: true})
 	glmSch := scheduler.New(scheduler.Config{Pool: glmPool, Upstream: glmUp, Name: "glm",
 		CheckinMinutes: checkinMinutes, KeepaliveHours: cfg.Schedule.KeepaliveHours,
 		ExpiringThreshold: expiringThreshold, Ledger: lg, FollowGlobalCheckin: true})
@@ -612,6 +635,8 @@ func main() {
 			StaticModels: gemini.StaticModels()},
 		provider.OfficeAce: {Kind: provider.OfficeAce, Pool: oaPool, Upstream: oaUp,
 			StaticModels: officeace.StaticModels()},
+		provider.CodeArts: {Kind: provider.CodeArts, Pool: caPool, Upstream: caUp,
+			StaticModels: codearts.StaticModels()},
 		provider.GLM: {Kind: provider.GLM, Pool: glmPool, Upstream: glmUp, StaticModels: glm.StaticModels()},
 		// 注意：GLM **不**置 SingleAccount。
 		//
@@ -648,6 +673,7 @@ func main() {
 		provider.LobsterAI: {Kind: provider.LobsterAI, Pool: lobPool, Upstream: lobUp, Scheduler: lobSch},
 		provider.Gemini:    {Kind: provider.Gemini, Pool: gemPool, Upstream: gemUp, Scheduler: gemSch},
 		provider.OfficeAce: {Kind: provider.OfficeAce, Pool: oaPool, Upstream: oaUp, Scheduler: oaSch},
+		provider.CodeArts:  {Kind: provider.CodeArts, Pool: caPool, Upstream: caUp, Scheduler: caSch},
 		provider.GLM:       {Kind: provider.GLM, Pool: glmPool, Upstream: glmUp, Scheduler: glmSch},
 	}
 
@@ -749,6 +775,7 @@ func main() {
 			provider.LobsterAI.String(): {lobUp.HTTP, lobUp.StreamHTTP},
 			provider.Gemini.String():    {gemUp.HTTP, gemUp.StreamHTTP},
 			provider.OfficeAce.String(): {oaUp.HTTP, oaUp.StreamHTTP},
+			provider.CodeArts.String():  {caUp.HTTP, caUp.StreamHTTP},
 		})
 	})
 	compat.SetAPIKeySource(inner.CurrentAPIKey) // 面板改 API-Key 后，兼容层立即跟随
@@ -815,6 +842,8 @@ func main() {
 	go gemSch.Run(sctx)
 	// OfficeAce 有签到 + token 保活，Run 不可漏（R34）。
 	go oaSch.Run(sctx)
+	// CodeArts 有签到 + token 保活，Run 不可漏（R34）。
+	go caSch.Run(sctx)
 	// ⚠️ 新增渠道时必须在这里补 Run()。
 	// 漏了**不会报错**——只表现为「该渠道的自动签到/保活从不运行」，
 	// 而手工触发（面板按钮 / RunCheckinNow）仍然可用，极难发现。

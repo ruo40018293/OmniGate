@@ -144,6 +144,7 @@
 | R105 | lobsterai 接入；有真签到的渠道**必须不在** `noExplicitCheckin` / `NO_EXPLICIT_CHECKIN` 里（反向断言），且 `FollowGlobalCheckin` 白名单要同步；面板 JS 表必须断言**闭合**——R104 吃掉三张表的 `}` 让整个面板 SyntaxError 而全部测试是绿的 |
 | R106 | gemini 接入（Google Code Assist，loopback OAuth、可续期、**无签到**）；顺带修 R104/R105 遗留的真实缺陷——`reloadAccounts` 漏了 zcode/lobsterai 分支，新登录账号只落盘不进内存池（面板要重启才可见），加 `TestReloadAccountsCoversEveryChannel` 闸门锁住 |
 | R107 | officeace 接入（华为云果办网关，OpenAI 兼容但恒流式打上游 + 1.1s 节流 + **有真签到** `bonus/claim`）；顺带把 R106 的差集闸门补成**双向**——原来从 `runtimes` 删掉渠道却留着 reloadAccounts 分支时全绿（变异实测存活），现在红 |
+| R108 | codearts 接入（华为云 CodeArts Agent：Anthropic Messages 转 DSML、STS 临时 AK/SK + DPoP 签名、**有真签到** campaign claim/confirm）；`reloadAccounts` 闸门当场抓到漏分支——它存在的意义就是让这类漏项在提交前变红 |
 
 ## 2. 架构选型（依据）
 
@@ -308,44 +309,27 @@ POST /api/quit                     # 退出程序
 15. **错误分类 429 必须优先于 hardMarkers**：限流 body 高频带 `quota exceeded`，先判 hardRule 会把限流误归余额耗尽 → 12h 硬冷却。三渠道 `Classify` 均已修复此顺序。
 16. **脱敏层仅做文本替换不做语义变更**：`internal/sanitize` 只改模板句、不改用户内容语义；预检不命中时零分配原样通过。将来配置 `features.sanitize_fingerprints` 可一键关闭（逃生门）。
 
-17. **本机的读取通道会失真，只有 go test 的 `% x` 打印可信** —— 改脱敏表前必读。
-   在本机用 `sed` / grep / python `print` / edit 工具读取含特定指纹字面量的源码时，
-   **输出会被静默截断或转写**，且不同通道给出的结果互相矛盾。已实测三例：
-   - `reHdr` 显示为 `(?i)\n]*;?\s*`（正则主体丢失），运行时其实是完整的
-     `(?i)x-anthropic-billing-hdr\s*:[^;\n]*;?\s*`；
-   - `sanitize_test.go` 的 `dshIdentity` 常量显示为 `"."`，运行时其实是
-     完整的 48 字节身份句；
-   - 脱敏表的 old/new 两值曾被渲染成完全相同的字符串，看起来「全是空转」。
-
-   **后果**：照着失真输出改代码会把真实有效的改写删掉，或把替换源写成空串
-   （`strings.ReplaceAll(text, "", X)` 会往每个字节间隙插 X，属真实破坏）。
-   这条教训 R82 期间踩了 6 次。
-
-   **唯一可信的取证方式**：在 `go test` 里打印字节。
-   ```go
-   fmt.Printf("PROBE x = % x\n", []byte(x))
-   ```
-   动手改动脱敏表（两个 `sanitize.go`）之前，**先跑一遍 `zz_probe_test.go`
-   打印全部涉及的字面量**，确认磁盘上的真值，再改；改完再跑一次核对。
-
-   **写代码的纪律**（三条都由这条不变量推出）：
-   - 不要用 `edit` 的 old/new 匹配去改这些文件（渲染态与磁盘字节不一致，
-     匹配会全失败或改错位置），改用 python 按行号/按字节替换；
-   - 新增的特征串、正则若要包含会被转写的字面量，用**运行时拼接**
-     （如 `looseHdrKeyExpr()` 的单字母片段）而不是正则字面量；
-   - 测试用例的输入也用 `hex` / `[]byte{...}` 构造，别写字面量。
-18. **积分「可用/不可用」拆分统计**：`provider.ResourceItem.Usable` 标记条目是否属于本工具可消耗的额度池，`provider.Summarize()` 汇总小计。
-    - TraeWork 判据（2026-09-26 修订，R19 / issue #44）是 **`available_endpoint==1` 为不可用**
-      （pid==209 判据已于 09-26 撤回，见下）：
-      上游已不再下发 ep=1（专用池也标 0），ep 判据仅作历史兑底。**pid==209 判据已于 2026-09-26
-      撤回**（issue #44）：pid=209「200 档每日签到」升级为通用积分，实测扣费就发生在这个池上
-      （09-23 99 次对话期间 remain 恒 3086、「不可用」小计 -354），继续排除会让 pool 按虚低余额选号、
-      面板把真实可用积分误标「不可用」。**不得用 `group_type` 判定**——同名「每日签到」既有
-      通用份也有专用份。早期仅用 ep 判定的实测证据见 `internal/upstream/` §2.3。
-    - `UserResource` / `UserResourceDetail` 返回的 remain **只能是可消耗余额**，
-      否则 pool 会按虚高余额选号。含专用池的总量（`usage_summary.total_amount`）不能作路由依据。
-    - 不可消耗额度仅用于面板展示（`pool.Status.UnusableCredits`），不参与 `Pick()` 排序；
-      展示的唯一目的是让用户看到的总积分能和官网对上。
+17. **读取通道会失真，只有 go test 的 `% x` 打印可信** —— 改脱敏表前必读。
+   用 `sed`/grep/python `print`/`edit` 读含指纹字面量的源码时，输出会被静默截断
+   或转写，不同通道还互相矛盾（`reHdr` 丢失正则主体、`dshIdentity` 显示成 `"."`、
+   脱敏表 old/new 被渲染成同一串）。照着改会把有效改写删掉，甚至写出
+   `strings.ReplaceAll(text, "", X)` 这种往每个字节间隙插串的真实破坏（R82 踩了 6 次）。
+   **取证方式**：`go test` 里 `fmt.Printf("PROBE x = % x\n", []byte(x))`；
+   改两个 `sanitize.go` 前先跑 `zz_probe_test.go` 确认磁盘真值。
+   **三条纪律**：不用 `edit` 的 old/new 匹配改这些文件（渲染态≠磁盘字节），改用 python
+   按行号/字节替换；含转写字面量的正则用运行时拼接（如 `looseHdrKeyExpr()`）而非字面量；
+   测试输入用 `hex`/`[]byte{...}` 构造。
+18. **积分「可用/不可用」拆分统计**：`provider.ResourceItem.Usable` 标记条目是否属于可消耗额度池，
+    `provider.Summarize()` 汇总小计。
+    - TraeWork 判据（2026-09-26 修订，R19 / issue #44）= **`available_endpoint==1` 为不可用**，
+      仅作历史兑底（上游已不再下发 ep=1）。**pid==209 判据已撤回**：该池升级为通用积分，
+      实测扣费就发生在它上面（09-23 99 次对话 remain 恒 3086、「不可用」小计 -354），
+      继续排除会让 pool 按虚低余额选号、面板误标可用积分。**不得用 `group_type` 判定**——
+      同名「每日签到」既有通用份也有专用份。
+    - `UserResource`/`UserResourceDetail` 的 remain **只能是可消耗余额**，否则 pool 按虚高余额选号；
+      含专用池的总量（`usage_summary.total_amount`）不能作路由依据。
+    - 不可消耗额度只用于面板展示（`pool.Status.UnusableCredits`），不参与 `Pick()` 排序——
+      目的仅让用户看到的总积分和官网对得上。
 19. **到期时间字段因渠道而异，缺失则不显示**：WorkBuddy 系是 `CycleEndTime`（**上游从不下发 `PackageEndTime`**，旧判据恒 miss），
     TraeWork 是 `expire_time`（Unix 秒），Qoder 无此字段。均按 **UTC+8 墙钟**解析（`softRateResetLoc`），
     用 `time.Local` 会在非 UTC+8 机器上算错一天。上游未下发时 `ResourceItem.ExpireAt` 必须为空串，
@@ -506,6 +490,18 @@ lobsterai 就是这样漏的（两个 `completeXXXLogin` 都调了 reloadAccount
       `-run TestR94` 就这样骗过了自己，靠单独复跑才拆穿）。变异必须断言「它真的跑了」，
       或在脚本里先校验测试名存在于文件里。
 
+45. **渠道的「凭据形态」不是 Bearer 一种，接入前必须先读上游的签名方式。**
+   R108（CodeArts）的三条硬约束：
+   ① accessToken 承载**不是** Bearer：CodeArts 用华为云 STS 临时 AK/SK + DPoP 签名，
+      `AccessToken` 只是「账号唯一标识 + Parse 非空校验」的落点，真正的鉴权材料在
+      `Auth.Extra`（`access_key` / `secret_key` / `security_token` / `dpop_priv`）。
+      凡是「拿到 accessToken 就当 Bearer 发」的通用假设在这里直接 401；
+   ② `SetTransport` 必须**同时**替换 `HTTP` 与 `StreamHTTP` 两个 client——只换一个，
+      流式路径绕过代理/devdump 包壳，出问题时连日志都没有；
+   ③ 用户填的 `Label` 是账号身份：上游不给稳定 user_id 时，`填同一标识 = 同一账号
+      （覆盖），填不同标识 = 多账号（并存）`。不要自己拿临时 AK 当 UID，它会随每次
+      登录变化，等于每次登录都新建一个账号。
+
 ## 7. 平台能力差异表（internal/platform）
 
 | 能力 | Windows | macOS | Linux |
@@ -566,8 +562,8 @@ git tag vX.Y.Z && git push origin vX.Y.Z
 
 - [README.md](README.md) — 用户文档
 - [DEVELOPMENT.md](DEVELOPMENT.md) — 开发者文档（面向 AI Agent）
-- [AGENTS.md](AGENTS.md) — 本文件：决议项一句话判据（R1–R107）、架构选型、不变量
-- [docs/DECISIONS.md](docs/DECISIONS.md) — 决议全文（R1–R107）：每条决议的原始背景、踩坑记录与边界条件
+- [AGENTS.md](AGENTS.md) — 本文件：决议项一句话判据（R1–R108）、架构选型、不变量
+- [docs/DECISIONS.md](docs/DECISIONS.md) — 决议全文（R1–R108）：每条决议的原始背景、踩坑记录与边界条件
 - [docs/三接口兼容改造备忘.md](docs/三接口兼容改造备忘.md) — 三接口（Chat/Responses/Anthropic）兼容层架构决策、实施记录、验证清单、已知限制
 - [docs/用量积分流水记账备忘.md](docs/用量积分流水记账备忘.md) — 双流水统计（token/积分）架构、差分算法、实测验证、已知限制（R17）
 

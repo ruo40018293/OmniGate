@@ -43,6 +43,7 @@
      --ch-officeace 取 #0f766e（青），与既有 18 类颜色都不撞。 */
   --ch-gemini: #2563eb;
   --ch-officeace: #0f766e;
+     --ch-codearts: #c2410c;
 }
 
 * { box-sizing: border-box; margin: 0; padding: 0; }
@@ -611,6 +612,10 @@ code.about-repo:active { transform: translateY(1px); }
 .btn.primary.alt.officeace:hover { background: color-mix(in srgb, var(--ch-officeace), #000 12%); }
 .badge.officeace { background: var(--ch-officeace); }
 .fees .ch-header.officeace td { color: var(--ch-officeace); }
+.btn.primary.alt.codearts { background: var(--ch-codearts); border-color: var(--ch-codearts); }
+.btn.primary.alt.codearts:hover { background: color-mix(in srgb, var(--ch-codearts), #000 12%); }
+.badge.codearts { background: var(--ch-codearts); }
+.fees .ch-header.codearts td { color: var(--ch-codearts); }
 
 /* credit-na 积分「不适用」文案（匿名通道无积分） */
 .credit-na { color: var(--muted, #94a3b8); font-style: italic; }

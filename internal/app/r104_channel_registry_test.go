@@ -26,6 +26,7 @@ var r104Kinds = map[string]string{
 	"lobsterai": "LobsterAI",
 	"gemini":    "Gemini",
 	"officeace": "OfficeAce",
+	"codearts":  "CodeArts",
 }
 
 // r104NoManualCheckin 声明「本渠道没有可用的签到契约」的渠道集合。
@@ -41,6 +42,9 @@ var r104NoManualCheckin = map[string]bool{
 	// R107 的 officeace 刻意**不在**本表：它有真签到
 	// （POST {gateway}/v1/subscription/bonus/claim，V11 签名，body {}），
 	// 上游对已领过的号回同样列表（幂等），故手动按钮与定时任务都可用。
+	// R108 的 codearts 同样**不在**本表：它有真签到活动（fetchCampaigns →
+	// claim → confirm，只认 type == USER_LOGIN 的活动），并实现 CheckinGranter
+	// 把本次发放额交给调度器记账。
 }
 
 // r104Buttons 对应各渠道的添加按钮 id。每接入一个渠道就向
@@ -55,6 +59,9 @@ var r104Buttons = map[string]string{
 	// R107 officeace：凭据由 channel 自带 login.go 编排 / 手工导入 officeace-*.json，
 	// 本仓暂无面板登录入口，故按钮 id 留空（空串 = 断言「不要求存在按钮」）。
 	"officeace": "",
+	// R108 codearts：上游有独立 login_codearts 包（本机回调 + PKCE + DPoP），
+	// 本仓已接 loginFlows 三处 + completeCodeArtsLogin，故给按钮。
+	"codearts": "btnAddCodeArts",
 }
 
 // TestR104KindsAreDeclaredInProvider provider.Kind 常量必须存在且字面量正确——
