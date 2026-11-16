@@ -25,6 +25,7 @@ import (
 	"omnigate/internal/live"
 	"omnigate/internal/login"
 	logincline "omnigate/internal/login_cline"
+	logingemini "omnigate/internal/login_gemini"
 	"omnigate/internal/login_glm"
 	loginlobsterai "omnigate/internal/login_lobsterai"
 	loginminimax "omnigate/internal/login_minimax"
@@ -333,6 +334,7 @@ var channelOrder = map[provider.Kind]int{
 	// R104：新渠道逐个接入，每个均在本表占一位（未列入的按 100 排末尾）。
 	provider.ZCode:     11,
 	provider.LobsterAI: 12,
+	provider.Gemini:    13,
 }
 
 // feeChannelOrder 「模型列表和费率」面板的渠道分组顺序。
@@ -353,6 +355,8 @@ var feeChannelOrder = []provider.Kind{
 	// R104：同样必须登记，否则面板「模型列表和费率」里整组不出现（R65）。
 	provider.ZCode,
 	provider.LobsterAI,
+	// R106：同上，漏登记则面板「模型列表和费率」整组不出现。
+	provider.Gemini,
 }
 
 // channelRank 渠道排序键：未知渠道排最后。
@@ -382,8 +386,11 @@ func sortChannelsByOrder[T any](items []T, kindOf func(T) provider.Kind) {
 func noExplicitCheckin(k provider.Kind) bool {
 	// R104：ZCode 的 billing/claim 需 headful 浏览器 + 一次性验证码参数
 	// （DailyCheckin 恒返 ErrClaimUnsupported），故不给手动签到入口。
+	// R106：Gemini 也没有签到机制 —— 配额是「窗口剩余百分比」，上游无每日领取端点，
+	// DailyCheckin 返回明确的「本渠道没有签到机制」错误，给按钮只会点了必失败。
 	return k == provider.WorkBuddyAI || k == provider.QwenWork || k == provider.MonkeyCode ||
-		k == provider.Loomy || k == provider.Cline || k == provider.Kilo || k == provider.ZCode
+		k == provider.Loomy || k == provider.Cline || k == provider.Kilo || k == provider.ZCode ||
+		k == provider.Gemini
 }
 
 func (a *App) findRuntimeAuth(uid string) (*Runtime, *auth.Auth) {
@@ -551,7 +558,7 @@ func (a *App) StartLoginFor(kind string) (string, error) {
 	}
 	switch k {
 	case provider.WorkBuddy, provider.WorkBuddyAI, provider.TraeWork, provider.Qoder, provider.QoderCN, provider.QoderCOM, provider.QwenWork, provider.Minimax,
-		provider.ZCode, provider.LobsterAI:
+		provider.ZCode, provider.LobsterAI, provider.Gemini:
 		// 这些渠道已有登录编排
 	case provider.MonkeyCode:
 		// 导入型渠道：凭据来自本机已登录的官方客户端，上游没有可复现的 OAuth 流程。
@@ -609,6 +616,9 @@ func (a *App) StartLoginFor(kind string) (string, error) {
 	case provider.LobsterAI:
 		// LobsterAI 走本机回调端口（portal 只认 127.0.0.1/auth/callback）。
 		a.loginClient = loginlobsterai.NewClient()
+	case provider.Gemini:
+		// Gemini 走本机 loopback OAuth（installed-app 政策限 redirect host 为 localhost）。
+		a.loginClient = logingemini.NewClient()
 	default:
 		a.loginClient = login.NewClient()
 	}
@@ -648,6 +658,9 @@ func (a *App) StartLoginFor(kind string) (string, error) {
 	case provider.LobsterAI:
 		// LobsterAI：起本机回调口并立即返回 portal 登录 URL。
 		authURL, err = loginlobsterai.Start(a.loginClient, a.loginStateFP)
+	case provider.Gemini:
+		// Gemini：起本机 loopback 回调口（127.0.0.1:<随机端口>/oauth-callback）并返回 Google 授权 URL。
+		authURL, err = logingemini.Start(a.loginClient, a.loginStateFP)
 	default:
 		ep := login.EndpointsForRegion(a.cfg.Region)
 		authURL, err = login.Start(a.loginClient, a.loginStateFP, ep)
@@ -689,6 +702,10 @@ func (a *App) CancelLogin() error {
 	// LobsterAI 登录附带本机回调 server，取消时一并关闭（幂等）。
 	if kind == provider.LobsterAI {
 		loginlobsterai.Shutdown()
+	}
+	// Gemini 同样持有本机回调 server，取消时一并关闭（幂等）。
+	if kind == provider.Gemini {
+		logingemini.Shutdown()
 	}
 	log.Printf("登录已取消")
 	return nil
@@ -835,6 +852,17 @@ func (a *App) pollLogin(ctx context.Context) {
 			}
 			if !errors.Is(err, loginlobsterai.ErrPending) {
 				log.Printf("lobsterai login poll failed: %v", err)
+			}
+			continue
+		}
+		if a.loginKind == provider.Gemini {
+			r, err := logingemini.Poll(a.loginClient, a.loginStateFP)
+			if err == nil {
+				a.completeGeminiLogin(r)
+				return
+			}
+			if !errors.Is(err, logingemini.ErrPending) {
+				log.Printf("gemini login poll failed: %v", err)
 			}
 			continue
 		}
@@ -1373,6 +1401,35 @@ func (a *App) reloadAccounts() {
 			rt.Pool.SyncToDir(auths)
 		}
 	}
+	// R106：R104/R105 接渠道时漏了这三处，导致 completeXXXLogin 里的
+	// a.reloadAccounts() 对它们**完全没有任何作用** —— 新登录的账号只落盘、
+	// 不进内存池，面板要等进程重启才看得见（首次接入当天就撞上了这个症状）。
+	// 修在 reloadAccounts 这一个地方而不是各 completeXXXLogin 里各自补 SyncToDir：
+	// 后者是 R104/R105 的写法，每接一个渠道就要记得补一次，漏了同样静默失效。
+	if rt := a.runtime(provider.ZCode); rt != nil && rt.Pool != nil {
+		auths, err := auth.LoadZCodeDir(a.cfg.AuthDir)
+		if err != nil {
+			log.Printf("reload zcode accounts: %v", err)
+		} else {
+			rt.Pool.SyncToDir(auths)
+		}
+	}
+	if rt := a.runtime(provider.LobsterAI); rt != nil && rt.Pool != nil {
+		auths, err := auth.LoadLobsterAIDir(a.cfg.AuthDir)
+		if err != nil {
+			log.Printf("reload lobsterai accounts: %v", err)
+		} else {
+			rt.Pool.SyncToDir(auths)
+		}
+	}
+	if rt := a.runtime(provider.Gemini); rt != nil && rt.Pool != nil {
+		auths, err := auth.LoadGeminiDir(a.cfg.AuthDir)
+		if err != nil {
+			log.Printf("reload gemini accounts: %v", err)
+		} else {
+			rt.Pool.SyncToDir(auths)
+		}
+	}
 }
 
 // CheckinAccount 单个账号立即签到。
@@ -1428,6 +1485,22 @@ func (a *App) completeLobsterAILogin(r loginlobsterai.Result) {
 	}
 	a.reloadAccounts()
 	a.afterAccountAdded(provider.LobsterAI)
+}
+
+// completeGeminiLogin Gemini 登录成功：落 OAuth 凭据并重载账号池。
+//
+// 渠道专有字段（cloudaicompanionProject / paid_tier*）由 login_gemini 写进 auth.Extra；
+// Project 登录环节**不探测**（少发一次上游请求），首轮对话由渠道侧探测并回写（R104 不变量 41）。
+func (a *App) completeGeminiLogin(r logingemini.Result) {
+	log.Printf("gemini 登录成功 uid=%s nickname=%s expires_at=%d refresh_token=%t",
+		r.UID, r.Nickname, r.ExpiresAt, r.RefreshToken != "")
+	if _, err := logingemini.SaveAuth(a.cfg.AuthDir, r); err != nil {
+		log.Printf("gemini 登录保存凭证失败 uid=%s err=%v", r.UID, err)
+		a.setLoginError("保存凭证失败：" + err.Error())
+		return
+	}
+	a.reloadAccounts()
+	a.afterAccountAdded(provider.Gemini)
 }
 
 // SubmitClineKey 面板粘贴 Cline 官方 API Key 的入口。

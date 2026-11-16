@@ -667,6 +667,8 @@ var channelKind = map[string]bool{
 	// R104：新渠道逐个接入，接入一个补一个。
 	string(provider.ZCode): true,
 	string(provider.LobsterAI): true,
+	// R106：Gemini 同样必须登记，否则它的 token 从不进平台表（R103 的同类缺陷）。
+	string(provider.Gemini): true,
 }
 
 // traeKinds 为 Trae 系渠道集合（TraeWork + TraeCode 共用账号与积分池——上游只为

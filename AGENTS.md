@@ -142,6 +142,7 @@
 | R103 | 免密渠道三铁律：免费集合只认上游 `isFree` 布尔、能力位按实测来源（`top_provider` + `input_modalities`）、虚拟账号不得进任何「能弄没」的路径（含 Classify 绝不 ErrSessionDead） |
 | R104 | zcode 接入 + 共享基座：`auth.Extra` 条件写键、`provider.PublicModelID`、`upstream.NormalizeRoles`、四个 auth 加载器；已声明但未接入的 Kind 会被 `TestFeeChannelOrderCoversEveryKind` 挡住 |
 | R105 | lobsterai 接入；有真签到的渠道**必须不在** `noExplicitCheckin` / `NO_EXPLICIT_CHECKIN` 里（反向断言），且 `FollowGlobalCheckin` 白名单要同步；面板 JS 表必须断言**闭合**——R104 吃掉三张表的 `}` 让整个面板 SyntaxError 而全部测试是绿的 |
+| R106 | gemini 接入（Google Code Assist，loopback OAuth、可续期、**无签到**）；顺带修 R104/R105 遗留的真实缺陷——`reloadAccounts` 漏了 zcode/lobsterai 分支，新登录账号只落盘不进内存池（面板要重启才可见），加 `TestReloadAccountsCoversEveryChannel` 闸门锁住 |
 
 ## 2. 架构选型（依据）
 
@@ -475,6 +476,21 @@ POST /api/quit                     # 退出程序
     `noExplicitCheckin` / `NO_EXPLICIT_CHECKIN` 里（双向断言，误登记比漏登记更隐蔽——
     用户只会觉得「这个渠道怎么不能签到」）。
 
+### 43. `reloadAccounts` 必须覆盖每个「从目录重载」的渠道，且要有差集闸门
+
+新增渠道时，`completeXXXLogin` 里那句 `a.reloadAccounts()` 只在 `internal/app/app.go`
+的 `reloadAccounts` 函数体里**有该渠道分支**时才有作用；缺分支不会报错、不写日志，
+表现为「登录成功，但面板上看不到新账号，必须重启进程」——R104/R105 的 zcode /
+lobsterai 就是这样漏的（两个 `completeXXXLogin` 都调了 reloadAccounts，但函数体里没有它们）。
+
+硬约束三条：
+  ① 接渠道时把分支加在 `reloadAccounts` **一处**，不要在各 `completeXXXLogin` 里
+     各自补 `SyncToDir` —— 后者每接一个渠道都要记得补一次，漏了同样静默失效；
+  ② 确实不需要 reload 的渠道（Kilo 免密虚拟账号、TraeCode 是 TraeWork 的别名共池）
+     必须在 `TestReloadAccountsCoversEveryChannel` 的 `exempt` 表里写明理由；
+  ③ 该闸门对 `runtimes`（main.go）与 `reloadAccounts`（app.go）做**双向差集**：
+     漏登记 ⇒ 红；例外表里的渠道又出现在 reloadAccounts 里 ⇒ 也红（说明理由已过时）。
+
 ## 7. 平台能力差异表（internal/platform）
 
 | 能力 | Windows | macOS | Linux |
@@ -535,8 +551,8 @@ git tag vX.Y.Z && git push origin vX.Y.Z
 
 - [README.md](README.md) — 用户文档
 - [DEVELOPMENT.md](DEVELOPMENT.md) — 开发者文档（面向 AI Agent）
-- [AGENTS.md](AGENTS.md) — 本文件：决议项一句话判据（R1–R105）、架构选型、不变量
-- [docs/DECISIONS.md](docs/DECISIONS.md) — 决议全文（R1–R105）：每条决议的原始背景、踩坑记录与边界条件
+- [AGENTS.md](AGENTS.md) — 本文件：决议项一句话判据（R1–R106）、架构选型、不变量
+- [docs/DECISIONS.md](docs/DECISIONS.md) — 决议全文（R1–R106）：每条决议的原始背景、踩坑记录与边界条件
 - [docs/三接口兼容改造备忘.md](docs/三接口兼容改造备忘.md) — 三接口（Chat/Responses/Anthropic）兼容层架构决策、实施记录、验证清单、已知限制
 - [docs/用量积分流水记账备忘.md](docs/用量积分流水记账备忘.md) — 双流水统计（token/积分）架构、差分算法、实测验证、已知限制（R17）
 

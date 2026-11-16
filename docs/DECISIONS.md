@@ -1,4 +1,4 @@
-# 决议全文（R1–R105）
+# 决议全文（R1–R106）
 
 > 本文件是 `AGENTS.md` 第 1 节的**完整原文**——每条决议「为什么这么做 / 踩过什么坑 / 边界在哪」都在这里。
 > `AGENTS.md` 只保留每条的一句话判据，随每次会话自动加载，用来提醒「别推翻什么」；
@@ -1350,89 +1350,6 @@ return 0, nil, nil   // 结构未知：不报错、不留余额
 `go build ./...` / `go vet ./...` / `go test ./... -count=1` → **44 包全绿**。
 产物 `dist/omnigate.exe` 11756032 字节 sha256 `868e0d481fb45d4a61663c529e7e939e0af264269bcdac26ea0dcc9776c30289`，自检 `C:/Users/`=0 / `D:\Code`=0 / `huansheng`=0。
 
----
-## R105 — lobsterai 接入；面板前端表的断言必须按表切开并加闭合闸门
-
-### 触发
-
-用户「都搞吧，一项项来」——逐个接入五个候选渠道。本期第二个：lobsterai（有道龙虾）。
-
-### 接入内容
-
-- `internal/lobsterai/`（6 文件）+ `internal/login_lobsterai/`（5 文件）从上游移植，
-  `wild-work/internal/` → `omnigate/internal/` 批量改写 import。
-- 凭据：OAuth 三件套可续期；**keyfrom 四元组必须落 `auth.Extra`**
-  （`uuid` / `first_keyfrom` / `latest_keyfrom` / `user_id`）——续期请求体与模型列表
-  query 都要它们，少了账号直接不可用。`latest_keyfrom` **刻意不改成当前时刻**
-  （上游参考实现如此，且 `refresh` 绝不回写 keyfrom 四元组）。
-- 登录：本机回调口，`redirect_uri` 恒为 `http://127.0.0.1:<port>/auth/callback`
-  （portal 的 ElectronAuth 严格判定 hostname/protocol/pathname/port，不满足就改发
-  `lobsterai://auth/callback?code=…` deep-link）。`StartWithPort` 支持固定端口
-  （`config.login.lobsterai_callback_port`），`Poll` 超时 10 分钟，`Shutdown()` 幂等。
-- 有**真签到**（三步 `GET slot` → `GET context` → `POST actions/check_in`，
-  `idempotencyKey` 是 uuid4）；`ActivityPlatform` 固定 `win32`（伪装客户端形态，
-  与运行环境无关）。故 `FollowGlobalCheckin: true`（上游活动按自然日开放、无固定窗口），
-  且**不进** `noExplicitCheckin`。
-- 静态模型目录 19 条、`staticContextWindow = 131072`；`FetchModels` 失败回退静态表。
-
-### 上游测试的一处本仓适配
-
-`TestRefreshTokenBodyAndPersist` 原来 `json.Unmarshal(onDisk)` 后直接比明文
-`doc.Auth.AccessToken == "new-access"`，但本仓 `auth.SaveAtomic` 在 Windows 下用
-DPAPI 加密（盘上是 `dpapi:...`）⇒ 恒假。改成走 `auth.Parse(onDisk)` 往返
-（唯一读盘入口，自动解密），断言意图（refresh 轮换必须落盘 + `latest_keyfrom`
-不得被改成当前时刻）一字未丢。
-
-### 本期最贵的发现：R104 引入了面板 JS 语法错误
-
-`git log -- cmd/omnigate/web/app.js` 逐提交量花括号：
-
-| 提交 | 版本 | CH_LABEL 行尾 | 闭合 |
-|---|---|---|---|
-| d7c989a | R103 | `kilo: "Kilo" };` | ✅ |
-| a216a98 | R104 | `zcode: "ZCode";` | ❌ |
-
-R104 往 `CH_LABEL` / `CH_CLASS` / `PROXY_HINT` 追加条目时吃掉了结尾的 ` }`，
-三个表都成了 `const X = { ...;`。**整个 `app.js` 在解析阶段就 SyntaxError，
-面板所有按钮全部失效**（用户看到的是「面板能打开但点什么都没反应」，
-这种症状极难与「后端挂了」区分），而当时**全部测试都是绿的**：
-
-- 前端断言只有 `strings.Contains(js, lit+": "")` —— 三张表都有这个形态，
-  删掉任何一张的条目，另两张的条目会把断言喂饱（M4a 变异就这么存活的）；
-- 后端 Go 测试根本不碰 JS。
-
-### 三条改法
-
-1. **断言逐表切块**：新增 `jsTableBlock`（按花括号配对）与 `jsLiteralBlock`
-   （按 `()` / `[]` 配对）。初版写成 `strings.Index(js[start:], "};")`，
-   而本文件的表字面量以 `;` 结尾 ⇒ 那个 `};` 一路命中文档后面某个无关闭合，
-   把一大段（含其它表）都圈进来，「逐表断言」退化成「全文件断言」，变异照样存活。
-2. **闭合闸门**：`TestFrontendTablesAreClosed` 检查全文件 `{}` / `[]` 配平，
-   并逐个确认五张表能被切出来。它与任何渠道条目无关，能独立抓住整类「面板静默失效」。
-3. **「无手动签到」改成按渠道的双向断言**：`r104NoManualCheckin = map[string]bool{"zcode": true}`。
-   原来写成对所有 `r104Kinds` 的普适断言 —— 那是在「第一批只接 zcode（无签到）」
-   时偷懒成立的；lobsterai 有真签到，按普适断言会要求它**必须**进
-   `noExplicitCheckin`，即把正确实现判成失败。反向断言（误登记 ⇒ 红）比漏登记更重要：
-   误登记只会让用户觉得「这个渠道怎么不能签到」。
-4. **Kind 声明断言改成 token 匹配**：gofmt 会把 Kind 常量块的 `Kind =` 按最长标识符
-   对齐，每接一个名字更长的渠道，既有行的空格数都会变；精确字面量匹配必然因排版误报
-   （本轮加 `LobsterAI` 后 `ZCode` 那行变五空格，立刻撞上）。改用
-   `\b<Exported>\s+Kind\s*=\s*"<lit>"`。
-
-### 闸门与变异
-
-九个变异全部被杀：M1 `noExplicitCheckin` 误登记 lobsterai / M2 `feeChannelOrder` 漏登记 /
-M3 `stats.channelKind` 漏登记 / M4a `CH_LABEL` 漏条目 / M4b `NO_EXPLICIT_CHECKIN` 误含 /
-M4c `PROXY_CHANNELS` 漏条目 / M5 R94 白名单与装配不一致 / M6 `extraOf` 恒空 /
-M7 表吃掉闭合括号（R104 事故重演）。
-
-### 边界与已知未做
-
-- 五个渠道里 lobsterai 是第二个（zcode 已完成），余下 gemini / officeace / codearts。
-- `config.login.lobsterai_callback_port` 未在面板暴露配置项，只走配置文件。
-- 上游 `: KILO PROCESSING` 同类的保活注释帧不适用于 lobsterai（它没有排队语义）。
-- AGENTS.md 已压到注入预算内；§1 每行一句话，长文只在本文件。
-
 ## R104 — zcode 接入 + 可扩展凭证字段基座
 
 **触发**（用户原话）：「都搞吧，一项项来」——把上游尚未接入的五个渠道
@@ -1707,3 +1624,187 @@ pricing fetch failed platform=workbuddyai ...
   读 `big_model_credits`，313 行 + 353 行测试，成本远高于本轮两项，独立排期。
 - **未做** v2.11.7 的手机端布局修复、PR #219 的 `sanitize.toml` 配置化（R95 已判脱敏链收敛，与上游结论一致）、
   v2.11.5 的 oczen TLS 指纹（我们没有 oczen 渠道）。
+
+---
+
+## R105 — lobsterai 接入；面板前端表的断言必须按表切开并加闭合闸门
+
+### 触发
+
+用户「都搞吧，一项项来」——逐个接入五个候选渠道。本期第二个：lobsterai（有道龙虾）。
+
+### 接入内容
+
+- `internal/lobsterai/`（6 文件）+ `internal/login_lobsterai/`（5 文件）从上游移植，
+  `wild-work/internal/` → `omnigate/internal/` 批量改写 import。
+- 凭据：OAuth 三件套可续期；**keyfrom 四元组必须落 `auth.Extra`**
+  （`uuid` / `first_keyfrom` / `latest_keyfrom` / `user_id`）——续期请求体与模型列表
+  query 都要它们，少了账号直接不可用。`latest_keyfrom` **刻意不改成当前时刻**
+  （上游参考实现如此，且 `refresh` 绝不回写 keyfrom 四元组）。
+- 登录：本机回调口，`redirect_uri` 恒为 `http://127.0.0.1:<port>/auth/callback`
+  （portal 的 ElectronAuth 严格判定 hostname/protocol/pathname/port，不满足就改发
+  `lobsterai://auth/callback?code=…` deep-link）。`StartWithPort` 支持固定端口
+  （`config.login.lobsterai_callback_port`），`Poll` 超时 10 分钟，`Shutdown()` 幂等。
+- 有**真签到**（三步 `GET slot` → `GET context` → `POST actions/check_in`，
+  `idempotencyKey` 是 uuid4）；`ActivityPlatform` 固定 `win32`（伪装客户端形态，
+  与运行环境无关）。故 `FollowGlobalCheckin: true`（上游活动按自然日开放、无固定窗口），
+  且**不进** `noExplicitCheckin`。
+- 静态模型目录 19 条、`staticContextWindow = 131072`；`FetchModels` 失败回退静态表。
+
+### 上游测试的一处本仓适配
+
+`TestRefreshTokenBodyAndPersist` 原来 `json.Unmarshal(onDisk)` 后直接比明文
+`doc.Auth.AccessToken == "new-access"`，但本仓 `auth.SaveAtomic` 在 Windows 下用
+DPAPI 加密（盘上是 `dpapi:...`）⇒ 恒假。改成走 `auth.Parse(onDisk)` 往返
+（唯一读盘入口，自动解密），断言意图（refresh 轮换必须落盘 + `latest_keyfrom`
+不得被改成当前时刻）一字未丢。
+
+### 本期最贵的发现：R104 引入了面板 JS 语法错误
+
+`git log -- cmd/omnigate/web/app.js` 逐提交量花括号：
+
+| 提交 | 版本 | CH_LABEL 行尾 | 闭合 |
+|---|---|---|---|
+| d7c989a | R103 | `kilo: "Kilo" };` | ✅ |
+| a216a98 | R104 | `zcode: "ZCode";` | ❌ |
+
+R104 往 `CH_LABEL` / `CH_CLASS` / `PROXY_HINT` 追加条目时吃掉了结尾的 ` }`，
+三个表都成了 `const X = { ...;`。**整个 `app.js` 在解析阶段就 SyntaxError，
+面板所有按钮全部失效**（用户看到的是「面板能打开但点什么都没反应」，
+这种症状极难与「后端挂了」区分），而当时**全部测试都是绿的**：
+
+- 前端断言只有 `strings.Contains(js, lit+": "")` —— 三张表都有这个形态，
+  删掉任何一张的条目，另两张的条目会把断言喂饱（M4a 变异就这么存活的）；
+- 后端 Go 测试根本不碰 JS。
+
+### 三条改法
+
+1. **断言逐表切块**：新增 `jsTableBlock`（按花括号配对）与 `jsLiteralBlock`
+   （按 `()` / `[]` 配对）。初版写成 `strings.Index(js[start:], "};")`，
+   而本文件的表字面量以 `;` 结尾 ⇒ 那个 `};` 一路命中文档后面某个无关闭合，
+   把一大段（含其它表）都圈进来，「逐表断言」退化成「全文件断言」，变异照样存活。
+2. **闭合闸门**：`TestFrontendTablesAreClosed` 检查全文件 `{}` / `[]` 配平，
+   并逐个确认五张表能被切出来。它与任何渠道条目无关，能独立抓住整类「面板静默失效」。
+3. **「无手动签到」改成按渠道的双向断言**：`r104NoManualCheckin = map[string]bool{"zcode": true}`。
+   原来写成对所有 `r104Kinds` 的普适断言 —— 那是在「第一批只接 zcode（无签到）」
+   时偷懒成立的；lobsterai 有真签到，按普适断言会要求它**必须**进
+   `noExplicitCheckin`，即把正确实现判成失败。反向断言（误登记 ⇒ 红）比漏登记更重要：
+   误登记只会让用户觉得「这个渠道怎么不能签到」。
+4. **Kind 声明断言改成 token 匹配**：gofmt 会把 Kind 常量块的 `Kind =` 按最长标识符
+   对齐，每接一个名字更长的渠道，既有行的空格数都会变；精确字面量匹配必然因排版误报
+   （本轮加 `LobsterAI` 后 `ZCode` 那行变五空格，立刻撞上）。改用
+   `\b<Exported>\s+Kind\s*=\s*"<lit>"`。
+
+### 闸门与变异
+
+九个变异全部被杀：M1 `noExplicitCheckin` 误登记 lobsterai / M2 `feeChannelOrder` 漏登记 /
+M3 `stats.channelKind` 漏登记 / M4a `CH_LABEL` 漏条目 / M4b `NO_EXPLICIT_CHECKIN` 误含 /
+M4c `PROXY_CHANNELS` 漏条目 / M5 R94 白名单与装配不一致 / M6 `extraOf` 恒空 /
+M7 表吃掉闭合括号（R104 事故重演）。
+
+### 边界与已知未做
+
+- 五个渠道里 lobsterai 是第二个（zcode 已完成），余下 gemini / officeace / codearts。
+- `config.login.lobsterai_callback_port` 未在面板暴露配置项，只走配置文件。
+- 上游 `: KILO PROCESSING` 同类的保活注释帧不适用于 lobsterai（它没有排队语义）。
+- AGENTS.md 已压到注入预算内；§1 每行一句话，长文只在本文件。
+
+
+---
+
+## R106 — gemini 接入；`reloadAccounts` 必须覆盖每个从目录重载的渠道
+
+### 触发
+
+用户 m20045「都搞吧，一项项来」：把五个候选渠道逐个接入，每个独立一期。zcode（R104）、
+lobsterai（R105）已完成，本期接 Gemini（Google Code Assist）。
+
+### 接入内容
+
+源码移植自 `rockswang/wild-work`（MIT）的 `internal/{gemini,login_gemini}`，本仓适配后：
+
+| 项 | 事实 |
+|---|---|
+| 主机 | `DailyHost = https://daily-cloudcode-pa.googleapis.com`、`SandboxHost = https://daily-cloudcode-pa.sandbox.googleapis.com` |
+| 端点 | `EpStreamGenerate = /v1internal:streamGenerateContent`，query 逐字 `?alt=sse` |
+| 客户端 | `HTTP`（非流式，带总超时）/ `StreamHTTP`（SSE，**不设 Timeout**，R35）共用 Transport |
+| 凭据 | loopback OAuth：access token 是 opaque `ya29.…`（**不是 JWT**，故不调 `AdoptJWTExpiry`），refresh token 首次授权必下发 ⇒ 可续期 |
+| UID | 取 OIDC `sub`（稳定；邮箱可改，sub 不变） |
+| Extra 键 | `cloudaicompanionProject` / `paid_tier` / `paid_tier_name` / `paid_tier_label`（R104 不变量 41） |
+| Project | 登录环节**不探测**（少打一次上游），首轮对话由 `resolveProject`/`persistProject` 探测并回写 |
+| 签到 | **无**。`DailyCheckin` 返回明确的「本渠道没有签到机制（配额为窗口百分比，无每日领取）」 |
+| 积分 | `UserResource` 恒 0 —— 真实信息是「配额窗口剩余百分比」，按 InfoOnly 呈现在明细里 |
+| 回调 | `GET /oauth-callback?code=…&state=…`；`redirect_uri` host 必须是 localhost（installed-app 政策）；回调口存活 `FlowTTL` = 10 分钟（比通用 loginTimeout 5 分钟长） |
+
+接线点（五处 + 登记表）：
+1. `internal/provider/provider.go`：`Gemini Kind = "gemini"`
+2. `internal/{gemini,login_gemini}/`：协议封装 + 登录编排
+3. `cmd/omnigate/main.go`：`LoadGeminiDir` / `gemPool` / `gemUp` / 代理表两处（启动 + 热重载）/ `runtimes` / `appRuntimes` / `go gemSch.Run(sctx)`
+4. **调度器：只开保活，签到显式关**——`CheckinMinutes: []int{}`（R39：传 nil 会被补成默认 9:00/21:00，每天空跑两次必失败的签到并污染面板），`KeepaliveHours: cfg.Schedule.KeepaliveHours`
+5. **不进积分自动刷新列表**：`UserResource` 恒 0，纳入只会刷出一个无意义的 0
+6. 前端：`CH_LABEL` / `CH_CLASS` / `PROXY_HINT` / `PROXY_CHANNELS` / `NO_EXPLICIT_CHECKIN` + 按钮（grid-column:3;grid-row:4）+ `style.css` 的 `--ch-gemini`
+
+### 顺带修掉的真缺陷：`reloadAccounts` 漏了两个渠道
+
+**症状**：R104/R105 接入的 zcode / lobsterai，登录成功后**面板上看不到新账号**，
+必须重启进程才出现。不报错、不写日志、不失败——和「登录成功但什么都没发生」同形。
+
+**根因**：`completeZCodeLogin` / `completeLobsterAILogin` 都调了 `a.reloadAccounts()`，
+但 `internal/app/app.go` 的 `reloadAccounts` 函数体里**没有这两个渠道的分支** ——
+那句调用对它们完全是空操作。账号落盘了，内存池没同步。
+
+**为什么之前没被发现**：R104/R105 的验收都停在「`go test ./...` 全绿 + 五个登记点齐全」。
+`reloadAccounts` 不在任何登记表里，漏了不影响编译、不影响任何既有测试，
+只影响「登录之后面板有没有东西」——那是要真登录一次才看得见的。
+
+**修法**：分支加在 `reloadAccounts` **一处**，而不是在各 `completeXXXLogin` 里各自补
+`SyncToDir`。后者是 R104/R105 的写法，每接一个渠道都要记得补一次，漏了同样静默失效。
+
+顺带纠正 R104 留下的一处矛盾注释：`main.go` 的 `provider.ZCode` 旁写着「需要 Scheduler
+驱动 token 到期检查与账号池保活」，但实际装配里既没有 `zcdSch` 也没挂到 `appRuntimes`。
+而 `zcode.RefreshToken` 是**空实现**（JWT 无 exp、上游无 refresh 端点）——
+挂 Scheduler 只会每天空跑签到并记失败。注释与装配直接冲突，改为如实描述「刻意无 Scheduler」。
+
+### 闸门：`TestReloadAccountsCoversEveryChannel`
+
+`internal/app/r104_channel_registry_test.go` 里新增，做**双向差集**：
+
+- 取 `cmd/omnigate/main.go` 的 `runtimes` 表（所有装配了池的渠道）
+- 取 `internal/app/app.go` 的 `reloadAccounts` 函数体（真正会从磁盘同步的渠道）
+- 差集里除 `exempt` 白名单外一律报错；`exempt` 里每项**必须写理由**
+  - `Kilo`：免密免费池，没有凭据文件可扫描（池内是 `AnonymousAuth()` 虚拟账号）
+  - `TraeCode`：别名渠道，与 TraeWork 共用账号池，由 TraeWork 分支同步
+- 反向也断言：`exempt` 里列了却又出现在 `reloadAccounts` 里 ⇒ 报错（说明理由已过时）
+
+### 覆盖 `reloadAccounts` 时同时发现的两处闸门缺口
+
+1. **`TestMainFollowsGlobalCheckinWhitelist`（R94）没登记 gemini**
+   —— 渠道数 15 vs 白名单 14 直接红。gemini 无签到，进 `mustNotFollow`。
+2. **`noExplicitCheckin` / `NO_EXPLICIT_CHECKIN` 都要加 gemini**
+   —— 这是 R105 建立的双向断言：无签到的必须进（否则出现点了必失败的按钮），
+   有真签到的必须**不在**（否则隐藏了本该能用的按钮）。
+
+### 锁住方式（变异 10 处，全红）
+
+| # | 变异 | 转红的断言 |
+|---|---|---|
+| M1 | `reloadAccounts` 删掉 gemini 分支 | `TestReloadAccountsCoversEveryChannel` |
+| M2 | `noExplicitCheckin` 去掉 gemini | `TestR104KindsHaveNoManualCheckinButton` |
+| M3 | 前端 `NO_EXPLICIT_CHECKIN` 去掉 gemini | `TestR104KindsAreRegisteredInFrontend` |
+| M4 | `CH_LABEL` 去掉 gemini | 同上 |
+| M5 | `PROXY_CHANNELS` 去掉 gemini | 同上 |
+| M6 | `feeChannelOrder` 去掉 gemini | `TestR104KindsAreInFeeChannelOrder` |
+| M7 | `stats.channelKind` 去掉 gemini | `TestR104KindsAreRegisteredInStats` |
+| M8 | R94 白名单把 gemini 移出 `mustNotFollow` | `TestMainFollowsGlobalCheckinWhitelist` |
+| M9 | 前端表吃掉闭合 `}`（R104 事故重演） | `TestFrontendTablesAreClosed` |
+| M10 | `provider.Kind` 字面量写成 `gemni` | `TestR104KindsAreDeclaredInProvider` |
+
+### 边界
+
+- Gemini **不置** `SingleAccount`：真多账号渠道（每个 Google 账号一份 OAuth 凭据 + project），
+  账号级错误照常轮换。
+- `DailyCheckin` 返回「不支持」而不是伪造成功：调度器据此不落盘也不上报，
+  面板不会每天多一条失败记录（R94 不变量 31 第 ②条）。
+- 粘贴回调 URL 的手动兜底：`login_gemini.SubmitCallbackURL` 已实现，
+  但本仓目前**没有** `/api/login/callback` 端点（lobsterai 也没有）——
+  两个渠道都靠本机 loopback 自动回调，手动兜底通路留待需要时再接。

@@ -44,6 +44,13 @@ const (
 	// 免费范围只认上游 recommended-models 的 free[]，不做任何本地假设。
 	Cline Kind = "cline"
 
+	// Gemini Google Code Assist / Cloud Code（daily-cloudcode-pa.googleapis.com）：
+	// 正常多账号 OAuth 渠道（可 refresh）⇒ **不置** SingleAccount，账号级错误照常轮换。
+	// 鉴权是 Bearer + 逐字身份五头（不带 x-goog-api-key），信封逐层字母序序列化；
+	// quota / loadCodeAssist 固定走 sandbox 端点；配额是「窗口剩余百分比」，无签到。
+	// 凭据扩展字段（cloudaicompanionProject / paid_tier*）落 auth.Extra。
+	Gemini Kind = "gemini"
+
 	// ZCode 智谱 ZCode：Anthropic Messages 形态；请求体 `system` 必须内嵌官方
 	// 身份块（否则 405 / code 3012），身份头族缺 X-Device-Mid 直接 400 code 3001；
 	// 凭据不可续期（无 refresh 端点，ExpiresAt 写远期哨兵）。

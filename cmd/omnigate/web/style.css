@@ -39,6 +39,7 @@
   /* R104 新增五渠道：与既有 13 类颜色都不撞 */
   --ch-zcode: #7c3aed;
   --ch-lobsterai: #b91c1c;
+  --ch-gemini: #1a73e8;
   --ch-gemini: #2563eb;
 }
 
@@ -600,6 +601,10 @@ code.about-repo:active { transform: translateY(1px); }
 .btn.primary.alt.lobsterai:hover { background: color-mix(in srgb, var(--ch-lobsterai), #000 12%); }
 .badge.lobsterai { background: var(--ch-lobsterai); }
 .fees .ch-header.lobsterai td { color: var(--ch-lobsterai); }
+.btn.primary.alt.gemini { background: var(--ch-gemini); border-color: var(--ch-gemini); }
+.btn.primary.alt.gemini:hover { background: color-mix(in srgb, var(--ch-gemini), #000 12%); }
+.badge.gemini { background: var(--ch-gemini); }
+.fees .ch-header.gemini td { color: var(--ch-gemini); }
 
 /* credit-na 积分「不适用」文案（匿名通道无积分） */
 .credit-na { color: var(--muted, #94a3b8); font-style: italic; }

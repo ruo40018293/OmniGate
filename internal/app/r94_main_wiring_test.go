@@ -63,6 +63,9 @@ func TestMainFollowsGlobalCheckinWhitelist(t *testing.T) {
 	mustNotFollow := []string{
 		"qodercn", "qodercom", "minimax",
 		"qoder", "qwenwork", "monkeycode", "loomy", "cline",
+		// Gemini（R106）：没有签到机制（配额为窗口剩余百分比，DailyCheckin 返回明确的
+		// 「本渠道没有签到机制」错误），跟随面板时刻只会每天空跑两次并污染面板。
+		"gemini",
 	}
 	for _, name := range mustNotFollow {
 		v, ok := got[name]

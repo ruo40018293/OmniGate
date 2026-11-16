@@ -24,6 +24,7 @@ import (
 var r104Kinds = map[string]string{
 	"zcode":     "ZCode",
 	"lobsterai": "LobsterAI",
+	"gemini":    "Gemini",
 }
 
 // r104NoManualCheckin 声明「本渠道没有可用的签到契约」的渠道集合。
@@ -33,6 +34,9 @@ var r104Kinds = map[string]string{
 // 会要求它**必须**进 noExplicitCheckin —— 那是把正确实现判成失败。
 var r104NoManualCheckin = map[string]bool{
 	"zcode": true,
+	// Gemini 无签到机制：配额是「窗口剩余百分比」，上游没有每日领取端点，
+	// DailyCheckin 返回明确的「本渠道没有签到机制」错误（R106）。
+	"gemini": true,
 }
 
 // r104Buttons 对应各渠道的添加按钮 id。每接入一个渠道就向
@@ -43,6 +47,7 @@ var r104NoManualCheckin = map[string]bool{
 var r104Buttons = map[string]string{
 	"zcode":     "btnAddZCode",
 	"lobsterai": "btnAddLobsterAI",
+	"gemini":    "btnAddGemini",
 }
 
 // TestR104KindsAreDeclaredInProvider provider.Kind 常量必须存在且字面量正确——
@@ -286,6 +291,100 @@ func jsLiteralBlock(js, marker string) (string, bool) {
 			depth--
 			if depth == 0 {
 				return rest[:i+1], true
+			}
+		}
+	}
+	return "", false
+}
+
+// TestReloadAccountsCoversEveryChannel reloadAccounts 必须覆盖每个需要从目录重载的渠道。
+//
+// 为什么要有这条闸门（R106 实测缺陷）：R104/R105 接 zcode / lobsterai 时，
+// `completeZCodeLogin` / `completeLobsterAILogin` 都调了 `a.reloadAccounts()`，
+// 但 reloadAccounts 的函数体里**没有这两个渠道的分支** —— 那句调用对它们完全是空操作。
+// 后果：新登录的账号只落盘、不进内存池，面板上看不到，必须重启进程才出现。
+// 这不报错、不写日志，和「登录成功但什么都没发生」一模一样。
+//
+// 本测试对比三张表的差集，把「漏登记」变成编译后立刻可见的红：
+//   - runtimes（main.go）：所有装配了池的渠道；
+//   - reloadAccounts（app.go）：真正会从磁盘同步的渠道；
+//   - 白名单：确定「不需要 reload」的例外，每个例外都要写清理由。
+func TestReloadAccountsCoversEveryChannel(t *testing.T) {
+	mainSrc := readRepoFile(t, "cmd/omnigate/main.go")
+	appSrc := readRepoFile(t, "internal/app/app.go")
+
+	// ① runtimes 表里的所有渠道。
+	rtBlock, ok := braceBlock(mainSrc, "runtimes := map[provider.Kind]*server.Runtime{")
+	if !ok {
+		t.Fatal("找不到 runtimes 装配表")
+	}
+	rtRe := regexp.MustCompile(`provider\.(\w+):\s*\{`)
+	all := map[string]bool{}
+	for _, m := range rtRe.FindAllStringSubmatch(rtBlock, -1) {
+		all[m[1]] = true
+	}
+	if len(all) < 10 {
+		t.Fatalf("只解析到 %d 个渠道，runtimes 表结构可能已变（本测试分辨率失效）", len(all))
+	}
+
+	// ② reloadAccounts 函数体里实际处理的渠道。
+	idx := strings.Index(appSrc, "func (a *App) reloadAccounts() {")
+	if idx < 0 {
+		t.Fatal("找不到 reloadAccounts")
+	}
+	body, ok := braceBlock(appSrc[idx:], "func (a *App) reloadAccounts() {")
+	if !ok {
+		t.Fatal("reloadAccounts 函数体无法切出")
+	}
+	covered := map[string]bool{}
+	for _, m := range regexp.MustCompile(`a\.runtime\(provider\.(\w+)\)`).FindAllStringSubmatch(body, -1) {
+		covered[m[1]] = true
+	}
+
+	// ③ 刻意不 reload 的例外。每加一项都必须在这里写清理由 ——
+	// 空白名单会让本测试退化成「所有渠道都必须 reload」，而这两个确实不该有。
+	exempt := map[string]string{
+		// Kilo 是免密渠道：没有 auth 文件，池里只有一个 AnonymousAuth() 虚拟账号。
+		"Kilo": "免密免费池，没有凭据文件可扫描（池内是 AnonymousAuth 虚拟账号）",
+		// TraeCode 是别名渠道：与 TraeWork 共账号，池由 TraeWork 分支负责同步。
+		"TraeCode": "别名渠道，与 TraeWork 共用账号池，由 TraeWork 分支同步",
+	}
+
+	for name := range all {
+		if covered[name] {
+			continue
+		}
+		if reason, ok := exempt[name]; ok {
+			_ = reason
+			continue
+		}
+		t.Errorf("reloadAccounts 缺少 provider.%s 分支：该渠道登录后新账号不进内存池，"+
+			"面板要等进程重启才看得见（R106 实测缺陷）", name)
+	}
+	// 反向：例外表里的渠道不得同时出现在 reloadAccounts 里，否则例外理由已过时。
+	for name, reason := range exempt {
+		if covered[name] {
+			t.Errorf("provider.%s 已在 reloadAccounts 里处理，例外理由「%s」已过时，请从 exempt 删除", name, reason)
+		}
+	}
+}
+
+// braceBlock 从 marker 起按花括号配对切出完整块（含首尾）。
+func braceBlock(src, marker string) (string, bool) {
+	start := strings.Index(src, marker)
+	if start < 0 {
+		return "", false
+	}
+	open := start + strings.Index(src[start:], "{")
+	depth := 0
+	for i := open; i < len(src); i++ {
+		switch src[i] {
+		case '{':
+			depth++
+		case '}':
+			depth--
+			if depth == 0 {
+				return src[open : i+1], true
 			}
 		}
 	}

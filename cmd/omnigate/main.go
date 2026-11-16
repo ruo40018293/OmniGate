@@ -39,6 +39,7 @@ import (
 	"omnigate/internal/cline"
 	"omnigate/internal/config"
 	"omnigate/internal/gateway"
+	"omnigate/internal/gemini"
 	"omnigate/internal/glm"
 	"omnigate/internal/kilo"
 	"omnigate/internal/ledger"
@@ -272,8 +273,14 @@ func main() {
 	if err != nil {
 		fatal("读取 LobsterAI 账号目录失败：%v", err)
 	}
-	log.Printf("loaded accounts: workbuddy=%d %s, traework=%d, qoder=%d, qodercn=%d, qodercom=%d, workbuddyai=%d, qwenwork=%d, glm=%d, monkeycode=%d, raccoon=%d, loomy=%d, minimax=%d, cline=%d, lobsterai=%d, zcode=%d from %s",
-		len(wbAuths), cfg.Region, len(trAuths), len(qdAuths), len(qcnAuths), len(qcmAuths), len(wbaAuths), len(qwAuths), len(glmAuths), len(mcAuths), len(rcAuths), len(lmAuths), len(miAuths), len(clAuths), len(lobAuths), len(zcAuths), cfg.AuthDir)
+	// Gemini（Google Code Assist）：正常多账号渠道，凭据由本机 loopback OAuth 登录写入
+	// auths/gemini-*.json（cloudaicompanionProject / paid_tier* 在 Extra 里，首轮对话探测回写）。
+	gemAuths, err := auth.LoadGeminiDir(cfg.AuthDir)
+	if err != nil {
+		fatal("读取 Gemini 账号目录失败：%v", err)
+	}
+	log.Printf("loaded accounts: workbuddy=%d %s, traework=%d, qoder=%d, qodercn=%d, qodercom=%d, workbuddyai=%d, qwenwork=%d, glm=%d, monkeycode=%d, raccoon=%d, loomy=%d, minimax=%d, cline=%d, lobsterai=%d, zcode=%d, gemini=%d from %s",
+		len(wbAuths), cfg.Region, len(trAuths), len(qdAuths), len(qcnAuths), len(qcmAuths), len(wbaAuths), len(qwAuths), len(glmAuths), len(mcAuths), len(rcAuths), len(lmAuths), len(miAuths), len(clAuths), len(lobAuths), len(zcAuths), len(gemAuths), cfg.AuthDir)
 
 	wbPool := pool.New(filepath.Join(stateDir, "state-workbuddy.json"))
 	for _, a := range wbAuths {
@@ -341,6 +348,11 @@ func main() {
 	for _, a := range lobAuths {
 		lobPool.Add(a)
 	}
+	// Gemini：真多账号池（每个 Google 账号一份 OAuth 凭据 + project），不置 SingleAccount。
+	gemPool := pool.New(filepath.Join(stateDir, "state-gemini.json"))
+	for _, a := range gemAuths {
+		gemPool.Add(a)
+	}
 
 	// Kilo 免费池是**免密**渠道（R103）：没有登录、没有 API Key、没有可伪造凭据，
 	// 免费集合完全由上游清单的 isFree 决定。故不建 auth 加载器、不进 reloadAccounts，
@@ -353,7 +365,7 @@ func main() {
 	// normalize 已校验过合法性，这里 ParseStrategy 不会失败。
 	if st, ok := pool.ParseStrategy(cfg.Strategy); ok {
 		for _, p := range []*pool.Pool{wbPool, trPool, qdPool, wbaPool, qwPool, qcnPool,
-			qcmPool, glmPool, mcPool, rcPool, lmPool, klPool, zcPool, lobPool} {
+			qcmPool, glmPool, mcPool, rcPool, lmPool, klPool, zcPool, lobPool, gemPool} {
 			p.SetStrategy(st)
 		}
 		log.Printf("账号挑选策略：%s", st.Label())
@@ -394,6 +406,11 @@ func main() {
 	lobUp := lobsterai.New()
 	lobUp.HTTP.Timeout = time.Duration(cfg.Upstream.TimeoutSeconds) * time.Second
 	lobUp.StreamHTTP.Transport = lobUp.HTTP.Transport
+	// Gemini：自有 v1internal 信封、恒流式；非流式 client 留总超时兜底，
+	// StreamHTTP 不设 Timeout（R35），两者共用 Transport。
+	gemUp := gemini.New()
+	gemUp.HTTP.Timeout = time.Duration(cfg.Upstream.TimeoutSeconds) * time.Second
+	gemUp.StreamHTTP.Transport = gemUp.HTTP.Transport
 	clUp.HTTP.Timeout = time.Duration(cfg.Upstream.TimeoutSeconds) * time.Second
 	glmUp := glm.New()
 	// ⚠️ 只改 HTTP（非流式）的 Timeout。
@@ -424,6 +441,7 @@ func main() {
 		provider.Kilo.String():        {klUp.HTTP, klUp.StreamHTTP},
 		provider.ZCode.String():       {zcUp.HTTP, zcUp.StreamHTTP},
 		provider.LobsterAI.String():   {lobUp.HTTP, lobUp.StreamHTTP},
+		provider.Gemini.String():      {gemUp.HTTP, gemUp.StreamHTTP},
 		// glm 两个 client 都要传（SetTransportProxy 会**新建** Transport，
 		// 只套 HTTP 会让 StreamHTTP 仍走直连（代理对流式不生效）。
 		provider.GLM.String(): {glmUp.HTTP, glmUp.StreamHTTP},
@@ -532,6 +550,11 @@ func main() {
 	lobSch := scheduler.New(scheduler.Config{Pool: lobPool, Upstream: lobUp, Name: "lobsterai",
 		CheckinMinutes: checkinMinutes, KeepaliveHours: cfg.Schedule.KeepaliveHours,
 		ExpiringThreshold: expiringThreshold, Ledger: lg, FollowGlobalCheckin: true})
+	// Gemini：**无签到**（DailyCheckin 返回明确的「不支持」错误），但有 refresh_token 可续期
+	// ⇒ 只开保活；CheckinMinutes 用显式空切片关闭（R39：传 nil 会被补成默认 9:00/21:00，
+	// 每天空跑两次必然失败的签到并污染面板）。
+	gemSch := scheduler.New(scheduler.Config{Pool: gemPool, Upstream: gemUp, Name: "gemini",
+		CheckinMinutes: []int{}, KeepaliveHours: cfg.Schedule.KeepaliveHours, Ledger: lg})
 	glmSch := scheduler.New(scheduler.Config{Pool: glmPool, Upstream: glmUp, Name: "glm",
 		CheckinMinutes: checkinMinutes, KeepaliveHours: cfg.Schedule.KeepaliveHours,
 		ExpiringThreshold: expiringThreshold, Ledger: lg, FollowGlobalCheckin: true})
@@ -562,6 +585,9 @@ func main() {
 			StaticModels: zcode.StaticModels()},
 		provider.LobsterAI: {Kind: provider.LobsterAI, Pool: lobPool, Upstream: lobUp,
 			StaticModels: lobsterai.StaticModels()},
+		// Gemini：真多账号渠道 ⇒ 不置 SingleAccount（账号级错误照常轮换）。
+		provider.Gemini: {Kind: provider.Gemini, Pool: gemPool, Upstream: gemUp,
+			StaticModels: gemini.StaticModels()},
 		provider.GLM: {Kind: provider.GLM, Pool: glmPool, Upstream: glmUp, StaticModels: glm.StaticModels()},
 		// 注意：GLM **不**置 SingleAccount。
 		//
@@ -588,11 +614,15 @@ func main() {
 		provider.Cline:       {Kind: provider.Cline, Pool: clPool, Upstream: clUp, Scheduler: clSch},
 		// Kilo 无 Scheduler：免费池没有签到、没有保活、没有积分可刷（R103）。
 		provider.Kilo: {Kind: provider.Kilo, Pool: klPool, Upstream: klUp},
-		// ZCode 无可用签到（DailyCheckin 恒 ErrClaimUnsupported：上游要 headful 浏览器 +
-		// 一次性验证码参数），但**需要 Scheduler**：它是唯一驱动 token 到期检查与
-		// 账号池保活的组件，缺了它账号永不刷新（到期后只能手动重登）。
+		// ZCode **无 Scheduler**，且这是有意的：它的 DailyCheckin 恒 ErrClaimUnsupported
+		// （上游要 headful 浏览器 + 一次性验证码参数），而凭据**不可续期**
+		// （auth.RefreshToken 是空实现，JWT 无 exp）——定时任务在这里没有任何有意义的工作，
+		// 挂上去只会每天空跑签到并记失败。到期后必须重新登录（面板按钮）。
+		// 注：R104 的注释曾写「需要 Scheduler 驱动 token 到期检查」，与这里的装配矛盾，
+		// 且与 zcode.RefreshToken 的空实现直接冲突，R106 一并纠正。
 		provider.ZCode:     {Kind: provider.ZCode, Pool: zcPool, Upstream: zcUp},
 		provider.LobsterAI: {Kind: provider.LobsterAI, Pool: lobPool, Upstream: lobUp, Scheduler: lobSch},
+		provider.Gemini:    {Kind: provider.Gemini, Pool: gemPool, Upstream: gemUp, Scheduler: gemSch},
 		provider.GLM:       {Kind: provider.GLM, Pool: glmPool, Upstream: glmUp, Scheduler: glmSch},
 	}
 
@@ -692,6 +722,7 @@ func main() {
 			provider.Kilo.String():      {klUp.HTTP, klUp.StreamHTTP},
 			provider.ZCode.String():     {zcUp.HTTP, zcUp.StreamHTTP},
 			provider.LobsterAI.String(): {lobUp.HTTP, lobUp.StreamHTTP},
+			provider.Gemini.String():    {gemUp.HTTP, gemUp.StreamHTTP},
 		})
 	})
 	compat.SetAPIKeySource(inner.CurrentAPIKey) // 面板改 API-Key 后，兼容层立即跟随
@@ -754,6 +785,8 @@ func main() {
 	go miSch.Run(sctx)
 	go clSch.Run(sctx)
 	go lobSch.Run(sctx)
+	// Gemini 的 Run 不可漏（R34）：本渠道有 token 保活任务。
+	go gemSch.Run(sctx)
 	// ⚠️ 新增渠道时必须在这里补 Run()。
 	// 漏了**不会报错**——只表现为「该渠道的自动签到/保活从不运行」，
 	// 而手工触发（面板按钮 / RunCheckinNow）仍然可用，极难发现。
