@@ -669,6 +669,8 @@ var channelKind = map[string]bool{
 	string(provider.LobsterAI): true,
 	// R106：Gemini 同样必须登记，否则它的 token 从不进平台表（R103 的同类缺陷）。
 	string(provider.Gemini): true,
+	// R107：OfficeAce 同理（漏登记 ⇒ 它的 token 与积分永远不出现在平台表）。
+	string(provider.OfficeAce): true,
 }
 
 // traeKinds 为 Trae 系渠道集合（TraeWork + TraeCode 共用账号与积分池——上游只为

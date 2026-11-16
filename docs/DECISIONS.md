@@ -1,4 +1,4 @@
-# 决议全文（R1–R106）
+# 决议全文（R1–R107）
 
 > 本文件是 `AGENTS.md` 第 1 节的**完整原文**——每条决议「为什么这么做 / 踩过什么坑 / 边界在哪」都在这里。
 > `AGENTS.md` 只保留每条的一句话判据，随每次会话自动加载，用来提醒「别推翻什么」；
@@ -1808,3 +1808,139 @@ lobsterai（R105）已完成，本期接 Gemini（Google Code Assist）。
 - 粘贴回调 URL 的手动兜底：`login_gemini.SubmitCallbackURL` 已实现，
   但本仓目前**没有** `/api/login/callback` 端点（lobsterai 也没有）——
   两个渠道都靠本机 loopback 自动回调，手动兜底通路留待需要时再接。
+
+---
+
+## R107 — officeace 接入；源码级闸门的差集必须双向
+
+### 触发
+
+用户 m20045「都搞吧，一项项来」的第五个渠道（前四个：zcode R104 / lobsterai R105 /
+gemini R106）。来源是上级项目 `rockswang/wild-work` 的 `internal/officeace/`。
+
+### 接入内容
+
+**协议事实**（`internal/officeace/client.go`）：
+
+- 上游 OfficeAce（华为云果办，agentarts 网关）**本身是 OpenAI 兼容协议**，走
+  `{base}/chat/completions`；但有三处改写：①恒以 `stream:true` 打上游（非流式在本地聚合成
+  整包）；②按模型补足 `max_tokens` 推理预算（推理模型 max_tokens 太小 ⇒ 正文空）；③剥离
+  `glm-5.3` 系不认的 `thinking` 参数。
+- **限流 1 req/s**，超限回 `429 ModelArts.81101`，会被上层当成整号软冷却、把渠道内账号逐个
+  轮空后整渠道 503。故 `Client.ChatThrottleInterval` 默认 `1100ms`（取 1.1s 而非 1.0s：上游
+  按秒开桶，恰好 1.0s 时两次请求可能落同一秒，留 10% 余量）。负值关闭、零值用默认。
+- 凭据形态：`AccessToken` 存**网关 Basic 头值**，`Extra` 里放 STS 临时三件套
+  （`access_key` / `secret_key` / `security_token`）+ DPoP 私钥（`dpop_priv`）+ 账号身份
+  （`account_id` / `user_id`）。STS 会过期，由 `refresh.go` 的 `ensureCredential` 现场续、
+  续完写回同一文件（所以 `FilePath` 必须保留）。
+- **有真签到**：`POST {gateway}/v1/subscription/bonus/claim`（V11 签名，body 必须是 `{}` +
+  `Content-Type`，否则上游回 500 `OfficeAce.11020001`）。上游对已领过的号不报错、只回同样
+  列表 ⇒ 幂等，手动按钮与定时任务都可用。
+- 静态兜底模型表 27 条（上游 `/models` 无能力声明，故只透出 id，不编造
+  `SupportsTools`/`SupportsReasoning`，遵循 R49 哲学）。
+
+**移植方式**：从 `wild-work` 抓 35 个文件（19 个非测试 + 16 个测试），只移植
+`internal/officeace/*` 的 31 个（`internal/app/officeace_*_test.go` 四个不移植——本仓装配
+结构不同）。import 改写 `wild-work/internal/{auth,idle,provider,upstream}` →
+`omnigate/internal/...`，四个依赖本仓全有。`grep wild-work` 剩 3 处**全在注释里**（讲上游
+设计出处），保留正确。
+
+**五处接线**（R65 清单）：
+
+| 位置 | 内容 |
+|---|---|
+| `internal/provider/provider.go` | `OfficeAce Kind = "officeace"`（带 9 行语义注释） |
+| `internal/auth/auth.go` | `LoadOfficeAceDir` → `loadPrefixed(dir, "officeace")` |
+| `cmd/omnigate/main.go` | `oaAuths` / `oaPool` / `oaUp`（含节流说明）/ 两张代理表 / `oaSch` / `runtimes` / `appRuntimes` / `go oaSch.Run` |
+| `internal/app/app.go` | `channelOrder: 14` / `feeChannelOrder` / `reloadAccounts` 分支 |
+| 前端 | `CH_LABEL` / `CH_CLASS` / `PROXY_HINT` / `PROXY_CHANNELS`；`NO_EXPLICIT_CHECKIN` **不加**（有真签到）；CSS 变量与四条规则 |
+| `internal/stats/stats.go` | `channelKind` 登记（漏则 token 永不进平台表） |
+
+**面板不给添加按钮**：上游没有独立的 `login_officeace` 包（登录编排在
+`internal/officeace/login.go` 内），本仓未接该编排，凭据走 `officeace-*.json` 导入。
+`r104Buttons["officeace"] = ""`（空串 = 断言「不要求存在按钮」），断言侧跳过空 id 并把
+按钮计数阈值排除掉空项。
+
+### 顺带修的两处
+
+**① `--ch-gemini` 重复声明**：`cmd/omnigate/web/style.css` 里该变量在 R106 写了两行
+（`#1a73e8` 与 `#2563eb`，后者覆盖前者）。已合并为一行 `#2563eb`（实际生效值），并加
+`--ch-officeace: #0f766e`（青，与既有 18 类颜色都不撞）。
+
+**② `reloadAccounts` 差集闸门只做了单向**——这是本轮最有价值的发现。
+
+R106 加的 `TestReloadAccountsCoversEveryChannel` 遍历 `runtimes` 全集，逐个问
+「`reloadAccounts` 里有没有」，漏了 ⇒ 红。但**反方向这一半没人问**：从 `runtimes` 删掉一个
+渠道装配、却在 `reloadAccounts` 里留着分支时，遍历的是已经不含它的 `all`，那个循环根本走
+不到它 ⇒ **全套测试照样绿**。
+
+变异实测（M10：删掉 `runtimes` 里的 `provider.OfficeAce` 那两行）：
+
+```
+M10 main.go runtimes 漏 officeace         *** GREEN(SURVIVED!) ***
+```
+
+真实后果是 `a.runtime(provider.OfficeAce)` 返回 nil，那段 reloadAccounts 分支恒不执行：
+一段看起来在工作的死代码，且 `reloadAccounts` 的「覆盖度」在阅读代码时是满的。
+
+补的反向断言（`internal/app/r104_channel_registry_test.go`）：
+
+```go
+// 反向第二层：reloadAccounts 里出现的渠道必须在 runtimes 里有装配。
+for name := range covered {
+    if !all[name] {
+        t.Errorf("reloadAccounts 处理了 provider.%s，但 runtimes 表里没有它的装配："+
+            "a.runtime() 会返回 nil，该分支恒不执行（R107 变异实测）", name)
+    }
+}
+```
+
+补完后同一变异转红：
+
+```
+M10 main.go runtimes 漏 officeace         RED(ok)
+       --- FAIL: TestReloadAccountsCoversEveryChannel (0.01s)
+```
+
+### 变异验证（10/10 全 RED）
+
+| # | 变异 | 抓住它的测试 |
+|---|---|---|
+| M1 | `reloadAccounts` 删 officeace 分支 | `TestReloadAccountsCoversEveryChannel` |
+| M2 | `noExplicitCheckin` 误登记 officeace | `TestR104KindsAreRegisteredInBackend` |
+| M3 | `CH_LABEL` 漏 officeace | `TestR104KindsAreRegisteredInFrontend` |
+| M4 | `PROXY_CHANNELS` 漏 officeace | 同上 |
+| M5 | `feeChannelOrder` 漏 officeace | `TestFeeChannelOrderCoversEveryKind` |
+| M6 | `stats.channelKind` 漏 officeace | `TestStatsChannelKindCoversEveryRuntime` |
+| M7 | R94 白名单移出 officeace | `TestMainFollowsGlobalCheckinWhitelist` |
+| M8 | 面板表吃掉闭合 `}` | `TestFrontendTablesAreClosed`（`{ = 1017, } = 1016`） |
+| M9 | Kind 字面量写 `officeacce` | `TestR104KindsAreDeclaredInProvider` |
+| M10 | `runtimes` 漏 officeace | `TestReloadAccountsCoversEveryChannel`（**补反向断言后才红**） |
+
+### 一轮被自己骗过的变异
+
+第一轮跑变异时 M7 与 M10 都报 GREEN。实际原因不同：
+
+- **M7 是测试名写错**：我用 `-run TestR94`，而真实函数名是
+  `TestMainFollowsGlobalCheckinWhitelist`。Go 在正则匹配不到任何测试时**退出码是 0**，
+  脚本据此判定「没红 = 变异存活」。单独用正确名字复跑，它立刻报
+  `渠道数 16 与白名单总数 15 不符`。
+- **M10 是真漏洞**（见上）。
+
+教训写进不变量 44 第 ②条：变异脚本的 `-run` 名字必须逐字对得上，且要能区分
+「测试通过」与「没有测试被选中」。
+
+### 边界与已知未做
+
+- **面板没有 OfficeAce 的添加按钮**：登录编排（`internal/officeace/login.go` 的
+  `StartLogin`，本机回调 + 华为 STS）未接入 `internal/app` 的 `loginFlows`。要用面板一键
+  登录需要新增 `case provider.OfficeAce` 的 Start/Poll/Shutdown 三处，与 `completeOfficeAceLogin`。
+  当前靠手工放 `auths/officeace-*.json`。
+- **DPAPI 差异**：上游 `login_test.go` 的 `TestLoginPersistsRefreshToken` 直接
+  `json.Unmarshal` 读盘，但本仓 `auth.SaveAtomic` 在 Windows 用 DPAPI 加密（盘上是
+  `dpapi:...` 前缀）⇒ 该断言恒假。已改成走 `auth.Parse` 往返，断言意图（refresh_token /
+  DPoP 私钥 / 账号身份三个都要落盘）一分未丢。
+- **`ChatThrottleInterval` 未暴露成配置项**：保持默认 1.1s。上游限流是硬事实，放开只会
+  换来整渠道 503；真要调试可改代码传负值。
+- **依赖 `internal/idle`**：只有 `internal/officeace/client.go` 一个文件用到
+  （`NewIdleReader`），本仓该包已存在，无新增依赖。

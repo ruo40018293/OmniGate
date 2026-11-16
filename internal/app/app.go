@@ -335,6 +335,7 @@ var channelOrder = map[provider.Kind]int{
 	provider.ZCode:     11,
 	provider.LobsterAI: 12,
 	provider.Gemini:    13,
+	provider.OfficeAce: 14,
 }
 
 // feeChannelOrder 「模型列表和费率」面板的渠道分组顺序。
@@ -357,6 +358,8 @@ var feeChannelOrder = []provider.Kind{
 	provider.LobsterAI,
 	// R106：同上，漏登记则面板「模型列表和费率」整组不出现。
 	provider.Gemini,
+	// R107：OfficeAce 同样要登记（R65 教训）。
+	provider.OfficeAce,
 }
 
 // channelRank 渠道排序键：未知渠道排最后。
@@ -1418,6 +1421,14 @@ func (a *App) reloadAccounts() {
 		auths, err := auth.LoadLobsterAIDir(a.cfg.AuthDir)
 		if err != nil {
 			log.Printf("reload lobsterai accounts: %v", err)
+		} else {
+			rt.Pool.SyncToDir(auths)
+		}
+	}
+	if rt := a.runtime(provider.OfficeAce); rt != nil && rt.Pool != nil {
+		auths, err := auth.LoadOfficeAceDir(a.cfg.AuthDir)
+		if err != nil {
+			log.Printf("reload officeace accounts: %v", err)
 		} else {
 			rt.Pool.SyncToDir(auths)
 		}

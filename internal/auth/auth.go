@@ -552,6 +552,14 @@ func LoadLobsterAIDir(dir string) ([]*Auth, error) { return loadPrefixed(dir, "l
 // 凭证为 Google OAuth：accessToken + refreshToken + expiresAt + FilePath（刷新后要写回）。
 func LoadGeminiDir(dir string) ([]*Auth, error) { return loadPrefixed(dir, "gemini") }
 
+// LoadOfficeAceDir 扫描华为云果办（OfficeAce）凭证（officeace-*.json）。
+//
+// 凭据形态：AccessToken 存**网关 Basic 头值**，Extra 里是 STS 临时三件套
+// （access_key / secret_key / security_token）+ DPoP 私钥（dpop_priv）+ 账号身份
+// （account_id / user_id）。STS 会过期，由 officeace.ensureCredential 现场续，
+// 续完写回同一文件（故必须保留 FilePath）。
+func LoadOfficeAceDir(dir string) ([]*Auth, error) { return loadPrefixed(dir, "officeace") }
+
 // LoadCodeArtsDir 扫描华为云 CodeArts 凭证（codearts-*.json）。
 //
 // 凭证为 STS 临时 AK/SK 三件套（全部在 Extra）：

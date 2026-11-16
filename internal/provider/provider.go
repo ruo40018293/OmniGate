@@ -63,6 +63,15 @@ const (
 	// 没有登录/API Key/可伪造凭据，免费集合只认上游清单的 isFree 布尔；
 	// 无签到、无积分、无解析端点 ⇒ 虚拟账号（R22）+ SingleAccount（R23）。
 	Kilo Kind = "kilo"
+
+	// OfficeAce 华为云果办模型网关（agentarts）：OpenAI 兼容协议，但有三处改写——
+	// 恒以 stream:true 打上游（非流式本地聚合）、按模型补足 max_tokens 推理预算、
+	// 剥离 glm-5.3 系不认的 thinking 参数。上游限 1 req/s（429 ModelArts.81101），
+	// Client.ChatThrottleInterval 默认 1.1s 节流。
+	// 凭据：网关 Basic（存 AccessToken）+ STS 临时 AK/SK/SecurityToken + DPoP 私钥，
+	// 后三者全在 Extra；STS 过期靠 refresh.go 的 ensureCredential 续。
+	// **有真签到**：POST {gateway}/v1/subscription/bonus/claim（V11 签名，body {}）。
+	OfficeAce Kind = "officeace"
 )
 
 func (k Kind) String() string { return string(k) }

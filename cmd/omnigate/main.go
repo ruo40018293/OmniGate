@@ -47,6 +47,7 @@ import (
 	"omnigate/internal/loomy"
 	"omnigate/internal/minimax"
 	"omnigate/internal/monkeycode"
+	"omnigate/internal/officeace"
 	"omnigate/internal/platform"
 	"omnigate/internal/pool"
 	"omnigate/internal/provider"
@@ -279,8 +280,14 @@ func main() {
 	if err != nil {
 		fatal("读取 Gemini 账号目录失败：%v", err)
 	}
-	log.Printf("loaded accounts: workbuddy=%d %s, traework=%d, qoder=%d, qodercn=%d, qodercom=%d, workbuddyai=%d, qwenwork=%d, glm=%d, monkeycode=%d, raccoon=%d, loomy=%d, minimax=%d, cline=%d, lobsterai=%d, zcode=%d, gemini=%d from %s",
-		len(wbAuths), cfg.Region, len(trAuths), len(qdAuths), len(qcnAuths), len(qcmAuths), len(wbaAuths), len(qwAuths), len(glmAuths), len(mcAuths), len(rcAuths), len(lmAuths), len(miAuths), len(clAuths), len(lobAuths), len(zcAuths), len(gemAuths), cfg.AuthDir)
+	// OfficeAce（华为云果办）：导入型渠道（无本机登录编排，凭据由 oa_login 自带编排写入）。
+	// AccessToken = 网关 Basic；STS 临时三件套 + DPoP 私钥在 Extra，过期由 ensureCredential 现场续。
+	oaAuths, err := auth.LoadOfficeAceDir(cfg.AuthDir)
+	if err != nil {
+		fatal("读取 OfficeAce 账号目录失败：%v", err)
+	}
+	log.Printf("loaded accounts: workbuddy=%d %s, traework=%d, qoder=%d, qodercn=%d, qodercom=%d, workbuddyai=%d, qwenwork=%d, glm=%d, monkeycode=%d, raccoon=%d, loomy=%d, minimax=%d, cline=%d, lobsterai=%d, zcode=%d, gemini=%d, officeace=%d from %s",
+		len(wbAuths), cfg.Region, len(trAuths), len(qdAuths), len(qcnAuths), len(qcmAuths), len(wbaAuths), len(qwAuths), len(glmAuths), len(mcAuths), len(rcAuths), len(lmAuths), len(miAuths), len(clAuths), len(lobAuths), len(zcAuths), len(gemAuths), len(oaAuths), cfg.AuthDir)
 
 	wbPool := pool.New(filepath.Join(stateDir, "state-workbuddy.json"))
 	for _, a := range wbAuths {
@@ -353,6 +360,10 @@ func main() {
 	for _, a := range gemAuths {
 		gemPool.Add(a)
 	}
+	oaPool := pool.New(filepath.Join(stateDir, "state-officeace.json"))
+	for _, a := range oaAuths {
+		oaPool.Add(a)
+	}
 
 	// Kilo 免费池是**免密**渠道（R103）：没有登录、没有 API Key、没有可伪造凭据，
 	// 免费集合完全由上游清单的 isFree 决定。故不建 auth 加载器、不进 reloadAccounts，
@@ -365,7 +376,7 @@ func main() {
 	// normalize 已校验过合法性，这里 ParseStrategy 不会失败。
 	if st, ok := pool.ParseStrategy(cfg.Strategy); ok {
 		for _, p := range []*pool.Pool{wbPool, trPool, qdPool, wbaPool, qwPool, qcnPool,
-			qcmPool, glmPool, mcPool, rcPool, lmPool, klPool, zcPool, lobPool, gemPool} {
+			qcmPool, glmPool, mcPool, rcPool, lmPool, klPool, zcPool, lobPool, gemPool, oaPool} {
 			p.SetStrategy(st)
 		}
 		log.Printf("账号挑选策略：%s", st.Label())
@@ -411,6 +422,11 @@ func main() {
 	gemUp := gemini.New()
 	gemUp.HTTP.Timeout = time.Duration(cfg.Upstream.TimeoutSeconds) * time.Second
 	gemUp.StreamHTTP.Transport = gemUp.HTTP.Transport
+	// OfficeAce：OpenAI 兼容协议但恒流式打上游（非流式本地聚合）。
+	// 上游限 1 req/s（429 ModelArts.81101），ChatThrottleInterval 保持默认 1.1s 节流。
+	oaUp := officeace.New()
+	oaUp.HTTP.Timeout = time.Duration(cfg.Upstream.TimeoutSeconds) * time.Second
+	oaUp.StreamHTTP.Transport = oaUp.HTTP.Transport
 	clUp.HTTP.Timeout = time.Duration(cfg.Upstream.TimeoutSeconds) * time.Second
 	glmUp := glm.New()
 	// ⚠️ 只改 HTTP（非流式）的 Timeout。
@@ -442,6 +458,7 @@ func main() {
 		provider.ZCode.String():       {zcUp.HTTP, zcUp.StreamHTTP},
 		provider.LobsterAI.String():   {lobUp.HTTP, lobUp.StreamHTTP},
 		provider.Gemini.String():      {gemUp.HTTP, gemUp.StreamHTTP},
+		provider.OfficeAce.String():   {oaUp.HTTP, oaUp.StreamHTTP},
 		// glm 两个 client 都要传（SetTransportProxy 会**新建** Transport，
 		// 只套 HTTP 会让 StreamHTTP 仍走直连（代理对流式不生效）。
 		provider.GLM.String(): {glmUp.HTTP, glmUp.StreamHTTP},
@@ -555,6 +572,11 @@ func main() {
 	// 每天空跑两次必然失败的签到并污染面板）。
 	gemSch := scheduler.New(scheduler.Config{Pool: gemPool, Upstream: gemUp, Name: "gemini",
 		CheckinMinutes: []int{}, KeepaliveHours: cfg.Schedule.KeepaliveHours, Ledger: lg})
+	// OfficeAce：**有真签到**（POST {gateway}/v1/subscription/bonus/claim，V11 签名），
+	// 必须跟随全局签到时刻（R94 白名单要求）；STS 会过期，保活也必要。
+	oaSch := scheduler.New(scheduler.Config{Pool: oaPool, Upstream: oaUp, Name: "officeace",
+		CheckinMinutes: checkinMinutes, KeepaliveHours: cfg.Schedule.KeepaliveHours,
+		ExpiringThreshold: expiringThreshold, Ledger: lg, FollowGlobalCheckin: true})
 	glmSch := scheduler.New(scheduler.Config{Pool: glmPool, Upstream: glmUp, Name: "glm",
 		CheckinMinutes: checkinMinutes, KeepaliveHours: cfg.Schedule.KeepaliveHours,
 		ExpiringThreshold: expiringThreshold, Ledger: lg, FollowGlobalCheckin: true})
@@ -588,6 +610,8 @@ func main() {
 		// Gemini：真多账号渠道 ⇒ 不置 SingleAccount（账号级错误照常轮换）。
 		provider.Gemini: {Kind: provider.Gemini, Pool: gemPool, Upstream: gemUp,
 			StaticModels: gemini.StaticModels()},
+		provider.OfficeAce: {Kind: provider.OfficeAce, Pool: oaPool, Upstream: oaUp,
+			StaticModels: officeace.StaticModels()},
 		provider.GLM: {Kind: provider.GLM, Pool: glmPool, Upstream: glmUp, StaticModels: glm.StaticModels()},
 		// 注意：GLM **不**置 SingleAccount。
 		//
@@ -623,6 +647,7 @@ func main() {
 		provider.ZCode:     {Kind: provider.ZCode, Pool: zcPool, Upstream: zcUp},
 		provider.LobsterAI: {Kind: provider.LobsterAI, Pool: lobPool, Upstream: lobUp, Scheduler: lobSch},
 		provider.Gemini:    {Kind: provider.Gemini, Pool: gemPool, Upstream: gemUp, Scheduler: gemSch},
+		provider.OfficeAce: {Kind: provider.OfficeAce, Pool: oaPool, Upstream: oaUp, Scheduler: oaSch},
 		provider.GLM:       {Kind: provider.GLM, Pool: glmPool, Upstream: glmUp, Scheduler: glmSch},
 	}
 
@@ -723,6 +748,7 @@ func main() {
 			provider.ZCode.String():     {zcUp.HTTP, zcUp.StreamHTTP},
 			provider.LobsterAI.String(): {lobUp.HTTP, lobUp.StreamHTTP},
 			provider.Gemini.String():    {gemUp.HTTP, gemUp.StreamHTTP},
+			provider.OfficeAce.String(): {oaUp.HTTP, oaUp.StreamHTTP},
 		})
 	})
 	compat.SetAPIKeySource(inner.CurrentAPIKey) // 面板改 API-Key 后，兼容层立即跟随
@@ -787,6 +813,8 @@ func main() {
 	go lobSch.Run(sctx)
 	// Gemini 的 Run 不可漏（R34）：本渠道有 token 保活任务。
 	go gemSch.Run(sctx)
+	// OfficeAce 有签到 + token 保活，Run 不可漏（R34）。
+	go oaSch.Run(sctx)
 	// ⚠️ 新增渠道时必须在这里补 Run()。
 	// 漏了**不会报错**——只表现为「该渠道的自动签到/保活从不运行」，
 	// 而手工触发（面板按钮 / RunCheckinNow）仍然可用，极难发现。

@@ -25,6 +25,7 @@ var r104Kinds = map[string]string{
 	"zcode":     "ZCode",
 	"lobsterai": "LobsterAI",
 	"gemini":    "Gemini",
+	"officeace": "OfficeAce",
 }
 
 // r104NoManualCheckin 声明「本渠道没有可用的签到契约」的渠道集合。
@@ -37,6 +38,9 @@ var r104NoManualCheckin = map[string]bool{
 	// Gemini 无签到机制：配额是「窗口剩余百分比」，上游没有每日领取端点，
 	// DailyCheckin 返回明确的「本渠道没有签到机制」错误（R106）。
 	"gemini": true,
+	// R107 的 officeace 刻意**不在**本表：它有真签到
+	// （POST {gateway}/v1/subscription/bonus/claim，V11 签名，body {}），
+	// 上游对已领过的号回同样列表（幂等），故手动按钮与定时任务都可用。
 }
 
 // r104Buttons 对应各渠道的添加按钮 id。每接入一个渠道就向
@@ -48,6 +52,9 @@ var r104Buttons = map[string]string{
 	"zcode":     "btnAddZCode",
 	"lobsterai": "btnAddLobsterAI",
 	"gemini":    "btnAddGemini",
+	// R107 officeace：凭据由 channel 自带 login.go 编排 / 手工导入 officeace-*.json，
+	// 本仓暂无面板登录入口，故按钮 id 留空（空串 = 断言「不要求存在按钮」）。
+	"officeace": "",
 }
 
 // TestR104KindsAreDeclaredInProvider provider.Kind 常量必须存在且字面量正确——
@@ -178,6 +185,12 @@ func TestR104KindsAreRegisteredInFrontend(t *testing.T) {
 	}
 	for lit, id := range r104Buttons {
 		_ = lit
+		// 空 id = 本渠道刻意不提供面板登录入口（凭据导入型，见 r104Buttons 注释）。
+		// 这时反而要断言「没有残留按钮」——否则删了登录编排却留着按钮，
+		// 用户点下去只会得到一条莫名错误。
+		if id == "" {
+			continue
+		}
 		if !strings.Contains(html, `id="`+id+`"`) {
 			t.Errorf("index.html 缺少按钮 %s：用户没有添加入口", id)
 		}
@@ -231,7 +244,13 @@ func TestR104ButtonsAreUniqueInGrid(t *testing.T) {
 	// 13 个既有渠道 + 本轮新接入的（它们必须各自有一个按钮）。
 	// 用动态阈值而不是写死数字：每接入一个渠道都要改一次硬编码阈值
 	// 是设计漏洞——漏改的话测试会失效但还是绿的。
-	if want := 13 + len(r104Buttons); len(seen) < want {
+	nButtons := 0
+	for _, id := range r104Buttons {
+		if id != "" {
+			nButtons++
+		}
+	}
+	if want := 13 + nButtons; len(seen) < want {
 		t.Errorf("只识别到 %d 个按钮坐标，预期至少 %d 个（HTML 结构可能已变，本测试的分辨率失效）", len(seen), want)
 	}
 }
@@ -365,6 +384,18 @@ func TestReloadAccountsCoversEveryChannel(t *testing.T) {
 	for name, reason := range exempt {
 		if covered[name] {
 			t.Errorf("provider.%s 已在 reloadAccounts 里处理，例外理由「%s」已过时，请从 exempt 删除", name, reason)
+		}
+	}
+	// 反向第二层：reloadAccounts 里出现的渠道必须在 runtimes 里有装配。
+	//
+	// 只做 all → covered 是单向的（R107 变异实测存活）：从 runtimes 删掉一个渠道、
+	// 却留着 reloadAccounts 里的分支，上面那个循环遍历的是 all，根本走不到它，
+	// 全套测试照样绿。而真实后果是 `a.runtime(provider.X)` 返回 nil ⇒ 该分支恒不执行，
+	// 与「没写」等价，还多了一段看起来在工作的死代码。
+	for name := range covered {
+		if !all[name] {
+			t.Errorf("reloadAccounts 处理了 provider.%s，但 runtimes 表里没有它的装配："+
+				"a.runtime() 会返回 nil，该分支恒不执行（R107 变异实测）", name)
 		}
 	}
 }

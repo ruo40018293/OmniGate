@@ -143,6 +143,7 @@
 | R104 | zcode 接入 + 共享基座：`auth.Extra` 条件写键、`provider.PublicModelID`、`upstream.NormalizeRoles`、四个 auth 加载器；已声明但未接入的 Kind 会被 `TestFeeChannelOrderCoversEveryKind` 挡住 |
 | R105 | lobsterai 接入；有真签到的渠道**必须不在** `noExplicitCheckin` / `NO_EXPLICIT_CHECKIN` 里（反向断言），且 `FollowGlobalCheckin` 白名单要同步；面板 JS 表必须断言**闭合**——R104 吃掉三张表的 `}` 让整个面板 SyntaxError 而全部测试是绿的 |
 | R106 | gemini 接入（Google Code Assist，loopback OAuth、可续期、**无签到**）；顺带修 R104/R105 遗留的真实缺陷——`reloadAccounts` 漏了 zcode/lobsterai 分支，新登录账号只落盘不进内存池（面板要重启才可见），加 `TestReloadAccountsCoversEveryChannel` 闸门锁住 |
+| R107 | officeace 接入（华为云果办网关，OpenAI 兼容但恒流式打上游 + 1.1s 节流 + **有真签到** `bonus/claim`）；顺带把 R106 的差集闸门补成**双向**——原来从 `runtimes` 删掉渠道却留着 reloadAccounts 分支时全绿（变异实测存活），现在红 |
 
 ## 2. 架构选型（依据）
 
@@ -491,6 +492,20 @@ lobsterai 就是这样漏的（两个 `completeXXXLogin` 都调了 reloadAccount
   ③ 该闸门对 `runtimes`（main.go）与 `reloadAccounts`（app.go）做**双向差集**：
      漏登记 ⇒ 红；例外表里的渠道又出现在 reloadAccounts 里 ⇒ 也红（说明理由已过时）。
 
+44. **源码级闸门的差集必须双向，单向差集是幻觉。**
+   R107 变异实测：从 `runtimes` 删掉 `provider.OfficeAce` 装配、却在 `reloadAccounts`
+   里留着分支时，`TestReloadAccountsCoversEveryChannel` **全绿通过**——因为它遍历的是
+   `runtimes` 的全集去问「reloadAccounts 有没有」，反向这一半没人问。真实后果是
+   `a.runtime(provider.X)` 返回 nil，那段分支恒不执行：一段看起来在工作的死代码。
+
+   硬约束两条：
+   ① 任何「A 必须覆盖 B」的源码闸门，都要同时断言「B 里出现的必须是 A 的子集」——
+      两个方向各自对应一类真实缺陷，不能靠一处断言兼任；
+   ② 变异脚本里 `go test -run` 的测试名必须**逐字对得上**：写错成不存在的名字时
+      Go 会「没有测试被选中」并退出 0，看起来像 GREEN，实际什么都没跑（R107 一次
+      `-run TestR94` 就这样骗过了自己，靠单独复跑才拆穿）。变异必须断言「它真的跑了」，
+      或在脚本里先校验测试名存在于文件里。
+
 ## 7. 平台能力差异表（internal/platform）
 
 | 能力 | Windows | macOS | Linux |
@@ -551,8 +566,8 @@ git tag vX.Y.Z && git push origin vX.Y.Z
 
 - [README.md](README.md) — 用户文档
 - [DEVELOPMENT.md](DEVELOPMENT.md) — 开发者文档（面向 AI Agent）
-- [AGENTS.md](AGENTS.md) — 本文件：决议项一句话判据（R1–R106）、架构选型、不变量
-- [docs/DECISIONS.md](docs/DECISIONS.md) — 决议全文（R1–R106）：每条决议的原始背景、踩坑记录与边界条件
+- [AGENTS.md](AGENTS.md) — 本文件：决议项一句话判据（R1–R107）、架构选型、不变量
+- [docs/DECISIONS.md](docs/DECISIONS.md) — 决议全文（R1–R107）：每条决议的原始背景、踩坑记录与边界条件
 - [docs/三接口兼容改造备忘.md](docs/三接口兼容改造备忘.md) — 三接口（Chat/Responses/Anthropic）兼容层架构决策、实施记录、验证清单、已知限制
 - [docs/用量积分流水记账备忘.md](docs/用量积分流水记账备忘.md) — 双流水统计（token/积分）架构、差分算法、实测验证、已知限制（R17）
 
