@@ -673,6 +673,8 @@ var channelKind = map[string]bool{
 	string(provider.OfficeAce): true,
 	// R108：CodeArts 同理（漏登记 ⇒ 它的 token 与积分永远不出现在平台表）。
 	string(provider.CodeArts): true,
+	// R109：WPS 灵犀同理（漏登记 ⇒ 它的 token 与积分永远不出现在平台表）。
+	string(provider.Lingxi): true,
 }
 
 // traeKinds 为 Trae 系渠道集合（TraeWork + TraeCode 共用账号与积分池——上游只为

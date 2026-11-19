@@ -22,12 +22,14 @@ import (
 	"omnigate/internal/auth"
 	"omnigate/internal/config"
 	"omnigate/internal/ledger"
+	"omnigate/internal/lingxi"
 	"omnigate/internal/live"
 	"omnigate/internal/login"
 	logincline "omnigate/internal/login_cline"
 	login_codearts "omnigate/internal/login_codearts"
 	logingemini "omnigate/internal/login_gemini"
 	"omnigate/internal/login_glm"
+	loginlingxi "omnigate/internal/login_lingxi"
 	loginlobsterai "omnigate/internal/login_lobsterai"
 	loginminimax "omnigate/internal/login_minimax"
 	loginqoder "omnigate/internal/login_qoder"
@@ -338,6 +340,7 @@ var channelOrder = map[provider.Kind]int{
 	provider.Gemini:    13,
 	provider.OfficeAce: 14,
 	provider.CodeArts:  15,
+	provider.Lingxi:    16,
 }
 
 // feeChannelOrder 「模型列表和费率」面板的渠道分组顺序。
@@ -364,6 +367,8 @@ var feeChannelOrder = []provider.Kind{
 	provider.OfficeAce,
 	// R108：CodeArts 同样要登记（R65 教训）。
 	provider.CodeArts,
+	// R109：WPS 灵犀同样要登记（R65 教训）。
+	provider.Lingxi,
 }
 
 // channelRank 渠道排序键：未知渠道排最后。
@@ -565,7 +570,7 @@ func (a *App) StartLoginFor(kind string) (string, error) {
 	}
 	switch k {
 	case provider.WorkBuddy, provider.WorkBuddyAI, provider.TraeWork, provider.Qoder, provider.QoderCN, provider.QoderCOM, provider.QwenWork, provider.Minimax,
-		provider.ZCode, provider.LobsterAI, provider.Gemini:
+		provider.ZCode, provider.LobsterAI, provider.Gemini, provider.Lingxi:
 		// 这些渠道已有登录编排
 	case provider.MonkeyCode:
 		// 导入型渠道：凭据来自本机已登录的官方客户端，上游没有可复现的 OAuth 流程。
@@ -629,6 +634,10 @@ func (a *App) StartLoginFor(kind string) (string, error) {
 	case provider.CodeArts:
 		// CodeArts 走本机 http 回调 + PKCE + DPoP（华为云 STS 换取临时 AK/SK）。
 		a.loginClient = login_codearts.NewClient()
+	case provider.Lingxi:
+		// WPS 灵犀走独立 profile 的 CDP 浏览器捕获 wps_sid：CDP 自管浏览器，
+		// 上游 login_lingxi 无 NewClient，不经过 loginClient。
+		a.loginClient = nil
 	default:
 		a.loginClient = login.NewClient()
 	}
@@ -674,6 +683,10 @@ func (a *App) StartLoginFor(kind string) (string, error) {
 	case provider.CodeArts:
 		// CodeArts：起本机回调口并返回华为云 portal 授权 URL。
 		authURL, err = login_codearts.Start(a.loginClient, a.loginStateFP)
+	case provider.Lingxi:
+		// WPS 灵犀：拉起 CDP 浏览器打开 WPS 官网，用户网页登录后捕获 wps_sid。
+		// 返回的 authURL 同时供面板展示（浏览器已由本函数拉起）。
+		authURL, err = loginlingxi.Start(a.loginClient, a.loginStateFP)
 	default:
 		ep := login.EndpointsForRegion(a.cfg.Region)
 		authURL, err = login.Start(a.loginClient, a.loginStateFP, ep)
@@ -724,6 +737,10 @@ func (a *App) CancelLogin() error {
 	if kind == provider.CodeArts {
 		login_codearts.Shutdown()
 	}
+	// WPS 灵犀 CDP 浏览器：取消时一并关闭（幂等）。
+	if kind == provider.Lingxi {
+		loginlingxi.Shutdown()
+	}
 	log.Printf("登录已取消")
 	return nil
 }
@@ -739,9 +756,18 @@ func (a *App) pollLogin(ctx context.Context) {
 		if a.loginKind == provider.Raccoon {
 			loginraccoon.Shutdown(a.loginStateFP, a.stateDir())
 		}
+		if a.loginKind == provider.Lingxi {
+			loginlingxi.Shutdown()
+		}
 		a.finishLogin()
 	}()
-	deadline := time.Now().Add(loginTimeout)
+	// R109：WPS 灵犀的 CDP 登录上限是 10 分钟，通用 5 分钟会先把还在等用户登录的
+	// 浏览器连同流程一起关掉（R97 同款教训）。用包内 PollTimeout 留 30s 余量。
+	pollWindow := loginTimeout
+	if a.loginKind == provider.Lingxi {
+		pollWindow = loginlingxi.PollTimeout()
+	}
+	deadline := time.Now().Add(pollWindow)
 	log.Printf("登录流程已发起，等待浏览器完成…")
 	t := time.NewTicker(loginPollEvery)
 	defer t.Stop()
@@ -891,6 +917,19 @@ func (a *App) pollLogin(ctx context.Context) {
 			}
 			if !errors.Is(err, login_codearts.ErrPending) {
 				log.Printf("codearts login poll failed: %v", err)
+			}
+			continue
+		}
+		if a.loginKind == provider.Lingxi {
+			r, err := loginlingxi.Poll(a.loginClient, a.loginStateFP)
+			if err == nil {
+				a.completeLingxiLogin(r)
+				return
+			}
+			if !errors.Is(err, loginlingxi.ErrPending) {
+				log.Printf("lingxi login poll failed: %v", err)
+				a.setLoginError("登录失败：" + err.Error())
+				return
 			}
 			continue
 		}
@@ -1474,6 +1513,15 @@ func (a *App) reloadAccounts() {
 			rt.Pool.SyncToDir(auths)
 		}
 	}
+	// R109：WPS 灵犀同样要在 reloadAccounts 覆盖（R106 漏登记静默失效的教训）。
+	if rt := a.runtime(provider.Lingxi); rt != nil && rt.Pool != nil {
+		auths, err := auth.LoadLingxiDir(a.cfg.AuthDir)
+		if err != nil {
+			log.Printf("reload lingxi accounts: %v", err)
+		} else {
+			rt.Pool.SyncToDir(auths)
+		}
+	}
 }
 
 // CheckinAccount 单个账号立即签到。
@@ -1563,6 +1611,70 @@ func (a *App) completeCodeArtsLogin(r login_codearts.Result) {
 	}
 	a.reloadAccounts()
 	a.afterAccountAdded(provider.CodeArts)
+}
+
+// completeLingxiLogin CDP 自动登录成功后的收尾：与粘贴路径共用 persistLingxiAccount。
+func (a *App) completeLingxiLogin(r loginlingxi.Result) {
+	warn, err := a.persistLingxiAccount(r.SID, r.UID)
+	if err != nil {
+		a.setLoginError("保存凭证失败：" + err.Error())
+		return
+	}
+	// 日志零 token（不变量 2）：只打 uid，绝不打完整 sid
+	log.Printf("lingxi 账号已添加（自动登录）uid=%s 同账号告警=%v", r.UID, warn != "")
+}
+
+// SubmitLingxiSID 面板粘贴 wps_sid Cookie 的入口：灵犀门禁校验 → 落盘 → 重载账号池。
+// 验证走 GET plans（零智点消耗），提前发现「灵犀侧未开通」，避免入库必然空目录的账号。
+func (a *App) SubmitLingxiSID(sid string) (string, string, error) {
+	s := strings.TrimSpace(sid)
+	if s == "" {
+		return "", "", errors.New("wps_sid 不能为空")
+	}
+	uid, err := lingxi.ValidateSID(s)
+	if err != nil {
+		return "", "", err
+	}
+	warn, err := a.persistLingxiAccount(s, uid)
+	if err != nil {
+		return "", "", err
+	}
+	log.Printf("lingxi 账号已添加（粘贴 wps_sid）uid=%s 同账号告警=%v", uid, warn != "")
+	return uid, warn, nil
+}
+
+// persistLingxiAccount 灵犀账号入库的唯一路径：同账号检测 → 落盘 → 重载账号池。
+// 返回同账号告警文案（空串=无告警）。wps_sid 是 Cookie：AccessToken 承载它，
+// ExpiresAt 必须远期（0 会让 NeedsRefresh 恒真，不变量 21 同款陷阱）。
+func (a *App) persistLingxiAccount(sid string, uid string) (string, error) {
+	warn := ""
+	if existing, lerr := auth.LoadLingxiDir(a.cfg.AuthDir); lerr == nil {
+		for _, e := range existing {
+			if e.AccessTokenValue() == sid {
+				warn = fmt.Sprintf("这个 wps_sid 与已添加的账号 %s 相同（智点按 WPS 账号计），重复添加不会增加可用智点。请换一个 WPS 账号的 wps_sid。", e.UID)
+				break
+			}
+		}
+	}
+	nick := "WPS 账号"
+	if len(uid) > 6 {
+		nick += " " + uid[len(uid)-6:]
+	}
+	_ = os.MkdirAll(a.cfg.AuthDir, 0o755)
+	la := &auth.Auth{
+		Kind:        "lingxi",
+		UID:         uid,
+		Nickname:    nick,
+		AccessToken: sid,
+		ExpiresAt:   lingxi.FarFutureExpiry(),
+		FilePath:    filepath.Join(a.cfg.AuthDir, "lingxi-"+uid+".json"),
+	}
+	if err := la.SaveAtomic(); err != nil {
+		return "", fmt.Errorf("保存 Lingxi 凭据失败：%w", err)
+	}
+	a.reloadAccounts()
+	a.afterAccountAdded(provider.Lingxi)
+	return warn, nil
 }
 
 // SubmitClineKey 面板粘贴 Cline 官方 API Key 的入口。
@@ -2701,6 +2813,21 @@ func (a *App) HandleAPI(mux *http.ServeMux) {
 			return
 		}
 		uid, warn, err := a.SubmitClineKey(req.Key)
+		if err != nil {
+			apiError(w, http.StatusBadRequest, err.Error())
+			return
+		}
+		writeJSON(w, http.StatusOK, map[string]any{"ok": true, "uid": uid, "warn": warn})
+	})
+	mux.HandleFunc("POST /api/login/lingxi_sid", func(w http.ResponseWriter, r *http.Request) {
+		var req struct {
+			SID string `json:"sid"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			apiError(w, http.StatusBadRequest, "请求体解析失败")
+			return
+		}
+		uid, warn, err := a.SubmitLingxiSID(req.SID)
 		if err != nil {
 			apiError(w, http.StatusBadRequest, err.Error())
 			return

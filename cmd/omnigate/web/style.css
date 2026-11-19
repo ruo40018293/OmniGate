@@ -44,6 +44,7 @@
   --ch-gemini: #2563eb;
   --ch-officeace: #0f766e;
      --ch-codearts: #c2410c;
+  --ch-lingxi: #7c3aed;
 }
 
 * { box-sizing: border-box; margin: 0; padding: 0; }
@@ -616,6 +617,10 @@ code.about-repo:active { transform: translateY(1px); }
 .btn.primary.alt.codearts:hover { background: color-mix(in srgb, var(--ch-codearts), #000 12%); }
 .badge.codearts { background: var(--ch-codearts); }
 .fees .ch-header.codearts td { color: var(--ch-codearts); }
+.btn.primary.alt.lingxi { background: var(--ch-lingxi); border-color: var(--ch-lingxi); }
+.btn.primary.alt.lingxi:hover { background: color-mix(in srgb, var(--ch-lingxi), #000 12%); }
+.badge.lingxi { background: var(--ch-lingxi); }
+.fees .ch-header.lingxi td { color: var(--ch-lingxi); }
 
 /* credit-na 积分「不适用」文案（匿名通道无积分） */
 .credit-na { color: var(--muted, #94a3b8); font-style: italic; }

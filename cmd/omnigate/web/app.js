@@ -397,8 +397,8 @@ function renderTopbar() {
 }
 
 // 渠道显示名与 CSS 短类名（后端 group / 费率 channel 均为 provider.Kind）。
-const CH_LABEL = { workbuddy: "WorkBuddyCN", workbuddyai: "WorkBuddyAI", traework: "TraeWork", traecode: "TraeCode", qoder: "Qoder", qodercn: "QoderCN", qodercom: "QoderCOM", qwenwork: "千问办公", glm: "智谱清言", monkeycode: "MonkeyCode", raccoon: "小浣熊", loomy: "Loomy", minimax: "MiniMax", cline: "Cline", kilo: "Kilo", zcode: "ZCode", lobsterai: "LobsterAI", gemini: "Gemini", officeace: "OfficeAce", codearts: "CodeArts" };
-const CH_CLASS = { workbuddy: "wb", workbuddyai: "wbai", traework: "trae", traecode: "traecode", qoder: "qoder", qodercn: "qodercn", qodercom: "qodercom", qwenwork: "qwenwork", glm: "glm", monkeycode: "monkeycode", raccoon: "raccoon", loomy: "loomy", minimax: "minimax", cline: "cline", kilo: "kilo", zcode: "zcode", lobsterai: "lobsterai", gemini: "gemini", officeace: "officeace", codearts: "codearts" };
+const CH_LABEL = { workbuddy: "WorkBuddyCN", workbuddyai: "WorkBuddyAI", traework: "TraeWork", traecode: "TraeCode", qoder: "Qoder", qodercn: "QoderCN", qodercom: "QoderCOM", qwenwork: "千问办公", glm: "智谱清言", monkeycode: "MonkeyCode", raccoon: "小浣熊", loomy: "Loomy", minimax: "MiniMax", cline: "Cline", kilo: "Kilo", zcode: "ZCode", lobsterai: "LobsterAI", gemini: "Gemini", officeace: "OfficeAce", codearts: "CodeArts", lingxi: "WPS灵犀" };
+const CH_CLASS = { workbuddy: "wb", workbuddyai: "wbai", traework: "trae", traecode: "traecode", qoder: "qoder", qodercn: "qodercn", qodercom: "qodercom", qwenwork: "qwenwork", glm: "glm", monkeycode: "monkeycode", raccoon: "raccoon", loomy: "loomy", minimax: "minimax", cline: "cline", kilo: "kilo", zcode: "zcode", lobsterai: "lobsterai", gemini: "gemini", officeace: "officeace", codearts: "codearts", lingxi: "lingxi" };
 const chLabel = (k) => CH_LABEL[k] || "WorkBuddy";
 const chClass = (k) => CH_CLASS[k] || "wb";
 // 不支持显式签到（手动按钮）的渠道：
@@ -1486,7 +1486,8 @@ async function startLogin(channel) {
       : "请在浏览器新窗口中完成登录…";
     $("loginOverlay").classList.remove("hidden");
     $("btnCopyUrl").dataset.url = url;
-    window.open(url, "_blank", "noopener,noreferrer");
+    // WPS 灵犀走 CDP：浏览器已由后端 login_lingxi 拉起，不能再 window.open 开第二个窗口。
+    if (channel !== "lingxi") window.open(url, "_blank", "noopener,noreferrer");
     startLoginPoll();
   } catch (e) {
     toast(e.message);
@@ -1640,6 +1641,48 @@ async function submitClineKey() {
   }
 }
 
+// ---------- WPS 灵犀添加账号（CDP 自动登录 + 粘贴 wps_sid 两条路） ----------
+function openLingxiAdd() {
+  $("lingxiErr").textContent = "";
+  $("lingxiSidInput").value = "";
+  $("lingxiOverlay").classList.remove("hidden");
+  $("lingxiSidInput").focus();
+}
+
+async function startLingxiAuto() {
+  $("lingxiErr").textContent = "正在启动浏览器…";
+  try {
+    await api("/api/login/start", { channel: "lingxi" });
+    $("lingxiOverlay").classList.add("hidden");
+    pendingChannel = "lingxi";
+    $("loginTitle").textContent = "添加 WPS 灵犀 账号";
+    $("loginMsg").textContent = "已在独立浏览器窗口打开 WPS 登录页；请在浏览器中完成登录，工具会自动捕获 wps_sid 并保存账号。";
+    $("loginOverlay").classList.remove("hidden");
+    startLoginPoll();
+  } catch (e) {
+    $("lingxiErr").textContent = e.message || "启动失败";
+  }
+}
+
+async function submitLingxiSID() {
+  const sid = ($("lingxiSidInput").value || "").trim();
+  if (!sid) { $("lingxiErr").textContent = "请粘贴 wps_sid Cookie 值"; return; }
+  const btn = $("btnLingxiSubmit");
+  btn.disabled = true;
+  $("lingxiErr").textContent = "校验中…";
+  try {
+    const res = await api("/api/login/lingxi_sid", { sid });
+    $("lingxiOverlay").classList.add("hidden");
+    toast(res && res.warn ? `WPS 灵犀账号已添加；${res.warn}` : `WPS 灵犀账号已添加 ${res.uid || ""}`);
+    await loadState();
+    refreshFees();
+  } catch (e) {
+    $("lingxiErr").textContent = e.message || "验证失败";
+  } finally {
+    btn.disabled = false;
+  }
+}
+
 // ---------- 签到时间（设置弹层内编辑；单次变更立即保存） ----------
 function delTime(t) {
   const times = (state.checkin_times || []).filter((x) => x !== t);
@@ -1673,8 +1716,8 @@ async function toggleAutostart() {
 // ---------- 设置弹层（统一配置：监听/API-Key/签到/自启/模型路由/渠道代理） ----------
 // PROXY_CHANNELS 渠道上游代理列表（顺序与面板渠道序一致；旧 qoder 已下线不提供代理配置）。
 const PROXY_CHANNELS = ["workbuddy", "workbuddyai", "qodercn", "qodercom", "traework", "qwenwork", "glm", "monkeycode", "raccoon", "loomy", "minimax", "cline", "kilo",
-  "zcode", "lobsterai", "gemini", "officeace", "codearts"];
-const PROXY_HINT = { workbuddy: "WorkBuddyCN", workbuddyai: "WorkBuddyAI", traework: "TraeWork", qodercn: "QoderCN", qodercom: "QoderCOM", qwenwork: "千问办公", glm: "智谱清言", kilo: "Kilo", zcode: "ZCode", lobsterai: "LobsterAI", gemini: "Gemini", officeace: "OfficeAce", codearts: "CodeArts" };
+  "zcode", "lobsterai", "gemini", "officeace", "codearts", "lingxi"];
+const PROXY_HINT = { workbuddy: "WorkBuddyCN", workbuddyai: "WorkBuddyAI", traework: "TraeWork", qodercn: "QoderCN", qodercom: "QoderCOM", qwenwork: "千问办公", glm: "智谱清言", kilo: "Kilo", zcode: "ZCode", lobsterai: "LobsterAI", gemini: "Gemini", officeace: "OfficeAce", codearts: "CodeArts", lingxi: "WPS灵犀" };
 
 // renderProxyList 按当前 state.proxies 渲染每渠道一个输入行。
 function renderProxyList() {
@@ -2054,6 +2097,10 @@ function bind() {
 $("btnAddLobsterAI").onclick = () => promptLogin("lobsterai");
 $("btnAddGemini").onclick = () => promptLogin("gemini");
 $("btnAddCodeArts").onclick = () => promptLogin("codearts");
+$("btnAddLingxi").onclick = openLingxiAdd;
+$("btnLingxiAuto").onclick = startLingxiAuto;
+$("btnLingxiSubmit").onclick = submitLingxiSID;
+$("btnLingxiCancel").onclick = () => $("lingxiOverlay").classList.add("hidden");
 // R107：OfficeAce 的登录由渠道自身的 login.go 编排（本仓暂无面板入口），
 // 凭据靠 officeace-*.json 导入，故这里不给按钮。
   // R103 Kilo 免费池是免密渠道：没有登录、没有可粘贴的凭据、没有可导入的本机客户端，

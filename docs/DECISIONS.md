@@ -1,4 +1,4 @@
-# 决议全文（R1–R108）
+# 决议全文（R1–R109）
 
 > 本文件是 `AGENTS.md` 第 1 节的**完整原文**——每条决议「为什么这么做 / 踩过什么坑 / 边界在哪」都在这里。
 > `AGENTS.md` 只保留每条的一句话判据，随每次会话自动加载，用来提醒「别推翻什么」；
@@ -2058,3 +2058,72 @@ M10 main.go runtimes 漏 officeace         RED(ok)
    `Label` 给两个账号，会静默丢掉前一个——面板的登录提示里已写明「填同一标识 = 同一账号」。
 4. **签到的 `amount` 依赖上游回填**：`DailyCheckinGrant` 拿不到 amount 时按 0 处理，
    调度器会降级回「前后余额差分」的口径。两种口径的数值不完全可比，面板上以流水为准。
+
+---
+
+## R109 — WPS 灵犀（lingxi）接入：`wps_sid` Cookie + CDP 自拉浏览器，真签到走 daily_check_in claim
+
+### 触发
+
+用户 m21929「WPS的搞下呗，好像可以每日签到吧」+ m21999「可以参考上游 https://github.com/rockswang/wild-work 的项目搞」。
+此前本仓**误判过 WPS**：旧会话里留下一句「无每日赠送、无余额端点」，据此否掉过 WPS 生态。
+本轮的做法是先拉上游源码**逐字验证**，不猜不写码：结论是**那句旧判据指向的是 WPS Comate 渠道，不是 WPS 灵犀（lingxi）**——
+灵犀 `internal/lingxi/checkin.go` 明明白白有真签到、有余额端点；comate 才是 `DailyCheckin` 直接返回「无签到活动」。
+用户说的「每日签到」正是灵犀。 SenseNova（商汤官方）同轮被用户否掉（m21922「那就不搞了」）。
+
+### 接入内容
+
+| 面 | 内容 |
+|---|---|
+| 源码移植 | `internal/lingxi/`（checkin/client/constants/errors/lingxi_test/models/sse.go 七文件）+ `internal/login_lingxi/`（login/login_test/web.go 三文件），共 10 文件，移植自 wild-work（MIT）。comate 五文件 SKIP（本轮不碰）。`grep wild-work` 零残留 |
+| 渠道注册 | `provider.Lingxi Kind = "lingxi"`（CodeArts 之后，注释写明 Cookie 鉴权 / 防串号前缀 / 三专用头 / 真签到）；`auth.LoadLingxiDir` = `loadPrefixed(dir,"lingxi")` |
+| main.go 装配 | 14 处（63773→65319B）：`lxAuths`/`lxPool`(state-lingxi.json)/`lxUp`/两张代理表/`lxSch`(FollowGlobalCheckin:true)/`runtimes`/`appRuntimes`/`go lxSch.Run`/积分自动刷新列表纳入 `provider.Lingxi`（有余额端点，不纳入则面板永远显示 0） |
+| app.go 接线 | 13 处（131493→138270B）：`channelOrder:16`/`feeChannelOrder`/`StartLoginFor` 准入/`loginClient`（**上游无 NewClient，CDP 自管浏览器 ⇒ `a.loginClient=nil`**）/`Start`/`CancelLogin`/`pollLogin` 的 `pollWindow=loginlingxi.PollTimeout()`（10min+30s，其余仍 5min）/Lingxi 轮询分支/`defer` 兜底/`reloadAccounts` 分支 |
+| 登录三函数 | `completeLingxiLogin`(r)、`SubmitLingxiSID`(sid)、`persistLingxiAccount`(sid,uid)：UID=`lxsid-<sha256前16>`（区别于 comate 的 `sid-<hash>`，防双渠道串号）；落盘 `AccessToken:sid`、`ExpiresAt=lingxi.FarFutureExpiry()`(+80年)、`FilePath="lingxi-"+uid+".json"`；同账号检测用 `e.AccessTokenValue()==sid` |
+| 粘贴端点 | `POST /api/login/lingxi_sid`（json sid → SubmitLingxiSID → `{ok,uid,warn}`）；CDP 自动登录走 `/api/login/start` + `loginlingxi.Poll` |
+| 前端 | `app.js` 四表按行号改（L400 CH_LABEL 加 `lingxi:"WPS灵犀"`、L401 CH_CLASS、L1676 PROXY_CHANNELS 尾、L1677 PROXY_HINT）；`startLogin` 特判 `if (channel!=="lingxi") window.open(...)`（CDP 已自拉浏览器，不开第二窗）；新增 `openLingxiAdd`/`startLingxiAuto`/`submitLingxiSID`；`index.html` 加 btnAddLingxi（第4行第5格）+ lingxiOverlay；`style.css --ch-lingxi:#7c3aed`；stats `channelKind` 加 `string(provider.Lingxi)` |
+| 闸门登记 | `r104Kinds`+`r104Buttons` 加 lingxi；`r104NoManualCheckin` **不加**并写注释（有真签到 daily_check_in）；`r94` 的 `mustFollow` 加 lingxi（跟随全局签到时刻） |
+
+### 关键协议（逐字来自上游源码，勿再猜）
+
+- 凭据是 **wps_sid Cookie**，Bearer 无效；三专用头 `X-Cc-Version:1` / `X-Client-Type:lingxi-web` / `X-Cc-Entrance:default`；每请求新建 session。
+- 主机 `APIBase=https://lingxi.kdocs.cn`；SSE 是 `event:`+`data:` 双行分帧，`type==reasoning/text/end/error`；`mapEffort` low→"0" / high→"1" / max→"2"。
+- **真签到**（`checkin.go`）：`fetchDailyTask` `GET /api/public/v1/tasks` 找 `task_key=="daily_check_in"`、`status=="claimed"` 即已签；领取 `POST /api/public/v1/tasks/daily_check_in/claim?date=YYYY-MM-DD`（**query 传日期、无 body**）；`result=="ok"` 成功、`data.extra.today_reward` 智点数。
+- 余额 `GET /api/public/v1/credits/balance` → `data.total_balance` + `bonus_credits[].expire_time`；失效判定 `result=="UserUnauthorized"` 或 401。
+- `login_lingxi.Start` **自拉 CDP 浏览器并返回 WebLoginURL**，注释明确「面板无需再 window.open」⇒ 前端必须特判不重复开窗。`PollTimeout()` = `LoginTimeout`(10min)+30s。
+
+### 变异验证：14/14 全 RED
+
+脚本 `.tmp_mutate_lingxi.py`，GO=`D:\Code\.gotool\go\bin\go.exe`，前置校验「测试名真实存在于某 `_test.go`」+「锚点 count==1」（R108 踩过测试名写错 exit=0 假绿的坑，本轮一步没踩）。
+
+| # | 变异 | 对应测试 |
+|---|---|---|
+| M1 | `reloadAccounts` 删 lingxi 分支 | `TestReloadAccountsCoversEveryChannel` |
+| M2 | `noExplicitCheckin` 误登记 lingxi | `TestR104KindsHaveNoManualCheckinButton` |
+| M3 | CH_LABEL 漏 lingxi | `TestR104KindsAreRegisteredInFrontend` |
+| M4 | PROXY_CHANNELS 漏 lingxi | `TestR104KindsAreRegisteredInFrontend` |
+| M5 | `feeChannelOrder` 漏 lingxi | `TestFeeChannelOrderCoversEveryKind` |
+| M6 | stats `channelKind` 漏 lingxi | `TestR104KindsAreRegisteredInStats` |
+| M7 | R94 白名单移出 lingxi | `TestMainFollowsGlobalCheckinWhitelist` |
+| M8 | 前端表吃掉闭合 `}` | `TestFrontendTablesAreClosed` |
+| M9 | Kind 字面量写 `lingxii` | `TestR104KindsAreDeclaredInProvider` |
+| M10 | `runtimes` 漏 lingxi | `TestReloadAccountsCoversEveryChannel` |
+| M11 | index.html 漏 btnAddLingxi | `TestR104KindsAreRegisteredInFrontend` |
+| M12 | `channelOrder` 漏 lingxi | `TestR104KindsAreInChannelOrder` |
+| M13 | PROXY_HINT 漏 lingxi | `TestR104KindsAreRegisteredInFrontend` |
+| M14 | `FollowGlobalCheckin` 移除 | `TestMainFollowsGlobalCheckinWhitelist` |
+
+**锚点踩坑复用**：M3 须带 `\nconst CH_CLASS`（CH_LABEL 后紧跟 CH_CLASS）；M13 须带 `\n\n// renderProxyList`（PROXY_HINT 独有下文）；M8 placeholder 必须换成真实锚点 `, lingxi: "lingxi" };\nconst chLabel` 再去 `}`。
+
+### 新增不变量 46
+
+见 AGENTS.md §6 第 46 条：**自拉浏览器的登录渠道要有三处特判，且余额端点必须进刷新列表**——
+① 前端 `startLogin` 不重复开窗（两窗口竞争同一 state）；② 轮询超时按渠道能力区分（CDP 10min+30s vs 通用 5min）；③ 有余额端点必进积分刷新列表，否则面板永远 0。
+
+### 边界与已知未做
+
+1. **WPS Comate 本轮不碰**：它的 `DailyCheckin` 直接返「comate 无签到活动」（`client.go:400`），与灵犀是两条独立渠道；旧会话那句「无每日赠送/无余额端点」只适用于 comate，不适用于灵犀。
+2. **真实对话未验证**：接入是照上游协议逐字移植 + 单测/变异锁住，**没有**用真实 `wps_sid` 打过上游；需用户提供 Cookie 后再验证签到领取与余额显示。
+3. **粘贴 SID 的 CDP 兜底**：`SubmitLingxiSID` 用 `lingxi.ValidateSID` 校验（invalid 直接报错），不落地未验证的 sid；CDP 登录失败时面板保留粘贴入口。
+4. **AGENTS.md 预算**：注入预算实际 65243B（非文件预算 65536B），本轮压缩不变量 #42（1250→889B）+#40（2079→1083B）腾空间后落 R109 行 + 不变量 46，最终 65044B 未截断。
+

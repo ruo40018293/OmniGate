@@ -145,6 +145,7 @@
 | R106 | gemini 接入（Google Code Assist，loopback OAuth、可续期、**无签到**）；顺带修 R104/R105 遗留的真实缺陷——`reloadAccounts` 漏了 zcode/lobsterai 分支，新登录账号只落盘不进内存池（面板要重启才可见），加 `TestReloadAccountsCoversEveryChannel` 闸门锁住 |
 | R107 | officeace 接入（华为云果办网关，OpenAI 兼容但恒流式打上游 + 1.1s 节流 + **有真签到** `bonus/claim`）；顺带把 R106 的差集闸门补成**双向**——原来从 `runtimes` 删掉渠道却留着 reloadAccounts 分支时全绿（变异实测存活），现在红 |
 | R108 | codearts 接入（华为云 CodeArts Agent：Anthropic Messages 转 DSML、STS 临时 AK/SK + DPoP 签名、**有真签到** campaign claim/confirm）；`reloadAccounts` 闸门当场抓到漏分支——它存在的意义就是让这类漏项在提交前变红 |
+| R109 | WPS 灵犀 lingxi 接入（wps_sid Cookie + CDP 自拉浏览器 / 粘贴 SID 双通道、UID=`lxsid-<sha256前16>` 防串号、**有真签到** daily_check_in claim）；startLogin 给 CDP 渠道特判不开第二窗、轮询超时放宽到 10min+30s、余额端点纳入积分刷新 |
 
 ## 2. 架构选型（依据）
 
@@ -430,11 +431,11 @@ POST /api/quit                     # 退出程序
 38. **同一账号的 token 刷新必须单飞，且刷新后必须立刻落盘**：R101 的硬约束。①凡「refresh_token 会被上游轮换」的渠道（单会话 refresh），同一账号同一时刻只许放**一次**真实刷新出去——`auth.Auth` 的 mu 只防字段并发读写，串行执行照样各打一次上游、第二个用已作废的旧值，必然一成功一失败并把账号推进冷却；统一走 `provider.RefreshOnce/RefreshIfNeeded/RefreshForce`，键用 auth 文件路径（跨渠道天然隔离，同 UID 在两目录是两次独立会话）；②`RefreshIfNeeded` 必须有**内层重检**（等待者醒来发现 token 已是新的就返回），`RefreshForce` 只给「本地认为有效、上游回 401」的自愈用；③刷新成功必须 `SaveAtomic` 落盘——不写回则下次启动用已被轮换的旧 refresh_token，而本地 expiresAt 显示有效 ⇒ 卡死 401；落盘失败只记日志不返错；④新增渠道时先确认自己的 refresh 是否轮换式，是则**不得**在包内自建刷新循环绕过这一层。
 39. **上游目录端点下线必须按状态码语义切源：只有「端点不存在」才可回退，其余一律原样上抛**：R102 的硬约束。①目录/费率拉取遇到 `404`（端点被上游下线）时可切备用端点，但**必须记住下线状态**（`v2Down` + 30 分钟重探窗口），否则每轮刷新都先打一次注定失败的 404；②`401`/`403`/网络错误/`5xx` **不得**切源——换端点救不了凭据过期与网络故障，悄悄换源只会把「账号过期」伪装成「目录为空」，用户看到模型消失却查不到原因；③切源成功时把响应回灌进备用端点缓存，避免同一端点在一个刷新周期内被请求两次；④备用端点恢复后必须能自动切回（清标记），备用端点通常是降级形态（字段更少、模型集合更窄）；⑤新增「按账号下发的目录字段」解析时必须先实测确认备用端点是否也带该字段，不得照抄上游 commit 的结论——R102 实测推翻了上游「v3 丢能力」的说法。
 
-40. **免密渠道（虚拟账号）的四条硬约束**：R103（Kilo 免费池）确立，后续任何「无需凭据」的渠道照此办理。
-	① **免费/可用集合只认上游声明的布尔字段**，不许从模型名、价格或任何间接特征推断——Kilo 的 `isFree`（驼峰）是唯一判据，`name` 带 `free` 而 `isFree:false` 的模型是付费的。同理，`ContextFromAPI` 这类「数据是否来自上游」的标志也必须由真实字段来源决定，本地默认值不许标记成官方值。
-	② **能力位必须逐渠道实测来源**，不能照抄上一个渠道的假设：Kilo 的视觉能力只在 `architecture.input_modalities`（`supported_parameters` 里一个 vision 字段都没有），输出上限只在 `top_provider.max_completion_tokens`（顶层 `max_output` 对 14 个免费模型全是 null）。R102 的教训同型——上游 commit 说的「备用端点丢能力」在本仓实测不成立。实测脚本要留成回归用例（`TestParseRealListingShape` 用上游真实 JSON 片段），否则下一次上游改字段名又会静默退化。
-	③ **虚拟账号不得进入任何「能把它弄没」的路径**：`RemoveAccount`/`DisableAccount` 硬拒、`reloadAccounts`（`SyncToDir`）不纳入、`StartLoginFor` 明确告知「无需登录」而不是落到 `unknown login provider`。虚拟账号没有凭据文件、没有重登入口，一次误删或一次 `ErrSessionDead` 就是永久失去渠道——所以 `Classify` **绝不**返回 `ErrSessionDead`，单点故障只能表现为「这次请求失败」。装配上必须 `SingleAccount: true`（handler 在进 `Classify` 分支前就原文透传、不罚号）。
-	④ **无签到/无积分/无保活的渠道不要给它 Scheduler**，同时在面板显式表达「不适用」：`noExplicitCheckin` 列入、前端 `NO_EXPLICIT_CHECKIN` 与 `NO_CREDITS` 同列、`AccountView.CreditsNA = true`（显示 0 会被读成额度耗尽，R71）。上游若发保活注释帧（Kilo 的 `: KILO PROCESSING`），**不得**当作 idle 超时证据。
+40. **免密渠道（虚拟账号）的四条硬约束**：R103（Kilo）确立。
+    ① 免费/可用集合**只认上游布尔字段**（Kilo `isFree` 驼峰），不从模型名/价格推断；`ContextFromAPI` 类标志由真实来源决定。
+    ② 能力位**逐渠道实测**：Kilo 视觉在 `architecture.input_modalities`、上限在 `top_provider.max_completion_tokens`；实测脚本留回归用例（`TestParseRealListingShape` 用真实 JSON），防上游改字段名静默退化。
+    ③ 虚拟账号**不进任何「能弄没它」的路径**：`RemoveAccount`/`DisableAccount` 硬拒、`reloadAccounts` 不纳入、`StartLoginFor` 告知「无需登录」；`Classify` **绝不**返 `ErrSessionDead`，单点故障只表现为「这次失败」；装配 `SingleAccount:true`。
+    ④ 无签到/无积分/无保活**不给 Scheduler**，面板显式「不适用」：`noExplicitCheckin` + 前端 `NO_EXPLICIT_CHECKIN`/`NO_CREDITS` + `AccountView.CreditsNA=true`（R71）；上游保活注释帧（Kilo `: KILO PROCESSING`）**不得**当 idle 超时证据。
 
 41. **凭证的渠道扩展字段走 `Auth.Extra`，且落盘必须是「条件写键」。**
     `Auth` 的一等字段只放跨渠道同语义的东西（accessToken / refreshToken / expiresAt / uid）；
@@ -448,18 +449,14 @@ POST /api/quit                     # 退出程序
     ③ 空 Extra 不得在盘上留痕（否则看不出哪个账号真的带扩展凭证）。
 
 42. **面板前端表的断言必须按表切开，并且要有一条闭合闸门。**
-    R104 往 `CH_LABEL` / `CH_CLASS` / `PROXY_HINT` 追加条目时吃掉了结尾的 ` }`，
-    三个表都变成 `const X = { ...;` —— `app.js` 在解析阶段直接 SyntaxError，
-    **整个面板所有按钮失效**；而当时全部测试都是绿的（前端断言只查「文件里有没有
-    `lit: "`」，后端测试根本不碰 JS）。用户看到的是「面板能打开但点什么都没反应」，
-    这种症状极难与「后端挂了」区分。三条硬约束：
-    ① 断言必须**逐表切块**再查（`jsTableBlock` / `jsLiteralBlock` 按括号配对），
-    不能只查「全文件包含 `lit: "`」——三张表都有这个形态，漏一张不会红；
-    ② 必须有纯文本的**花括号/方括号配平闸门**（`TestFrontendTablesAreClosed`），
-    它与任何渠道条目无关，能独立抓住整类「面板静默失效」；
-    ③ 「不支持手动签到」不是普适属性：**有真签到的渠道必须断言它不在**
-    `noExplicitCheckin` / `NO_EXPLICIT_CHECKIN` 里（双向断言，误登记比漏登记更隐蔽——
-    用户只会觉得「这个渠道怎么不能签到」）。
+    R104 往 `CH_LABEL`/`CH_CLASS`/`PROXY_HINT` 追加条目时吃掉结尾的 ` }`，三表变
+    `const X = { ...;` ⇒ `app.js` 解析期 SyntaxError、**整个面板所有按钮失效**，而当时测试全绿
+    （断言只查「全文件有没有 `lit: "`」，后端不碰 JS）。三条硬约束：
+    ① 断言**逐表切块**再查（`jsTableBlock`/`jsLiteralBlock` 按括号配对），不能只查全文件包含；
+    ② 必须有纯文本**花括号/方括号配平闸门**（`TestFrontendTablesAreClosed`），与渠道无关，
+       独立抓住整类「面板静默失效」；
+    ③ 「不支持手动签到」非普适：**有真签到的渠道必须断言它不在** `noExplicitCheckin`/
+       `NO_EXPLICIT_CHECKIN`（双向断言，误登记比漏登记更隐蔽）。
 
 ### 43. `reloadAccounts` 必须覆盖每个「从目录重载」的渠道，且要有差集闸门
 
@@ -501,6 +498,14 @@ lobsterai 就是这样漏的（两个 `completeXXXLogin` 都调了 reloadAccount
    ③ 用户填的 `Label` 是账号身份：上游不给稳定 user_id 时，`填同一标识 = 同一账号
       （覆盖），填不同标识 = 多账号（并存）`。不要自己拿临时 AK 当 UID，它会随每次
       登录变化，等于每次登录都新建一个账号。
+
+46. **自拉浏览器的登录渠道要有三处特判，且余额端点必须进刷新列表。**
+    R109（WPS 灵犀）的三条硬约束：
+    ① `Start` 自拉 CDP 浏览器的渠道，前端 `startLogin` 必须特判**不重复** `window.open`
+       （否则两窗口竞争同一 state）；粘贴型 SID 走 `/api/login/<ch>_sid` 端点而非回调；
+    ② 登录轮询超时按渠道能力区分（CDP 类 `PollTimeout()` 10min+30s vs 通用 5min），
+       不能用固定 deadline 一刀切；
+    ③ 有余额端点的渠道必须纳入积分自动刷新列表，否则面板余额永远显示 0。
 
 ## 7. 平台能力差异表（internal/platform）
 
@@ -562,8 +567,8 @@ git tag vX.Y.Z && git push origin vX.Y.Z
 
 - [README.md](README.md) — 用户文档
 - [DEVELOPMENT.md](DEVELOPMENT.md) — 开发者文档（面向 AI Agent）
-- [AGENTS.md](AGENTS.md) — 本文件：决议项一句话判据（R1–R108）、架构选型、不变量
-- [docs/DECISIONS.md](docs/DECISIONS.md) — 决议全文（R1–R108）：每条决议的原始背景、踩坑记录与边界条件
+- [AGENTS.md](AGENTS.md) — 本文件：决议项一句话判据（R1–R109）、架构选型、不变量
+- [docs/DECISIONS.md](docs/DECISIONS.md) — 决议全文（R1–R109）：每条决议的原始背景、踩坑记录与边界条件
 - [docs/三接口兼容改造备忘.md](docs/三接口兼容改造备忘.md) — 三接口（Chat/Responses/Anthropic）兼容层架构决策、实施记录、验证清单、已知限制
 - [docs/用量积分流水记账备忘.md](docs/用量积分流水记账备忘.md) — 双流水统计（token/积分）架构、差分算法、实测验证、已知限制（R17）
 

@@ -27,6 +27,7 @@ var r104Kinds = map[string]string{
 	"gemini":    "Gemini",
 	"officeace": "OfficeAce",
 	"codearts":  "CodeArts",
+	"lingxi":    "Lingxi",
 }
 
 // r104NoManualCheckin 声明「本渠道没有可用的签到契约」的渠道集合。
@@ -45,6 +46,9 @@ var r104NoManualCheckin = map[string]bool{
 	// R108 的 codearts 同样**不在**本表：它有真签到活动（fetchCampaigns →
 	// claim → confirm，只认 type == USER_LOGIN 的活动），并实现 CheckinGranter
 	// 把本次发放额交给调度器记账。
+	// R109 的 lingxi 同样**不在**本表：它有真签到
+	// （POST /api/public/v1/tasks/daily_check_in/claim?date=YYYY-MM-DD，
+	//  fetchDailyTask 见 status==claimed 即已领，结果幂等）。
 }
 
 // r104Buttons 对应各渠道的添加按钮 id。每接入一个渠道就向
@@ -62,6 +66,9 @@ var r104Buttons = map[string]string{
 	// R108 codearts：上游有独立 login_codearts 包（本机回调 + PKCE + DPoP），
 	// 本仓已接 loginFlows 三处 + completeCodeArtsLogin，故给按钮。
 	"codearts": "btnAddCodeArts",
+	// R109 lingxi：上游有 login_lingxi 包（CDP 自动登录）+ 面板粘贴 wps_sid 端点，
+	// 本仓已接三处 + completeLingxiLogin/SubmitLingxiSID，故给按钮。
+	"lingxi": "btnAddLingxi",
 }
 
 // TestR104KindsAreDeclaredInProvider provider.Kind 常量必须存在且字面量正确——

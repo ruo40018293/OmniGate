@@ -44,6 +44,7 @@ import (
 	"omnigate/internal/glm"
 	"omnigate/internal/kilo"
 	"omnigate/internal/ledger"
+	"omnigate/internal/lingxi"
 	"omnigate/internal/lobsterai"
 	"omnigate/internal/loomy"
 	"omnigate/internal/minimax"
@@ -293,8 +294,13 @@ func main() {
 	if err != nil {
 		fatal("读取 CodeArts 账号目录失败：%v", err)
 	}
-	log.Printf("loaded accounts: workbuddy=%d %s, traework=%d, qoder=%d, qodercn=%d, qodercom=%d, workbuddyai=%d, qwenwork=%d, glm=%d, monkeycode=%d, raccoon=%d, loomy=%d, minimax=%d, cline=%d, lobsterai=%d, zcode=%d, gemini=%d, officeace=%d, codearts=%d from %s",
-		len(wbAuths), cfg.Region, len(trAuths), len(qdAuths), len(qcnAuths), len(qcmAuths), len(wbaAuths), len(qwAuths), len(glmAuths), len(mcAuths), len(rcAuths), len(lmAuths), len(miAuths), len(clAuths), len(lobAuths), len(zcAuths), len(gemAuths), len(oaAuths), len(caAuths), cfg.AuthDir)
+	// WPS 灵犀（lingxi）：粘贴 wps_sid Cookie 或 CDP 自动登录，凭据落 auths/lingxi-*.json。
+	lxAuths, err := auth.LoadLingxiDir(cfg.AuthDir)
+	if err != nil {
+		fatal("读取 WPS 灵犀账号目录失败：%v", err)
+	}
+	log.Printf("loaded accounts: workbuddy=%d %s, traework=%d, qoder=%d, qodercn=%d, qodercom=%d, workbuddyai=%d, qwenwork=%d, glm=%d, monkeycode=%d, raccoon=%d, loomy=%d, minimax=%d, cline=%d, lobsterai=%d, zcode=%d, gemini=%d, officeace=%d, codearts=%d lingxi=%d from %s",
+		len(wbAuths), cfg.Region, len(trAuths), len(qdAuths), len(qcnAuths), len(qcmAuths), len(wbaAuths), len(qwAuths), len(glmAuths), len(mcAuths), len(rcAuths), len(lmAuths), len(miAuths), len(clAuths), len(lobAuths), len(zcAuths), len(gemAuths), len(oaAuths), len(caAuths), len(lxAuths), cfg.AuthDir)
 
 	wbPool := pool.New(filepath.Join(stateDir, "state-workbuddy.json"))
 	for _, a := range wbAuths {
@@ -375,6 +381,10 @@ func main() {
 	for _, a := range caAuths {
 		caPool.Add(a)
 	}
+	lxPool := pool.New(filepath.Join(stateDir, "state-lingxi.json"))
+	for _, a := range lxAuths {
+		lxPool.Add(a)
+	}
 
 	// Kilo 免费池是**免密**渠道（R103）：没有登录、没有 API Key、没有可伪造凭据，
 	// 免费集合完全由上游清单的 isFree 决定。故不建 auth 加载器、不进 reloadAccounts，
@@ -387,7 +397,7 @@ func main() {
 	// normalize 已校验过合法性，这里 ParseStrategy 不会失败。
 	if st, ok := pool.ParseStrategy(cfg.Strategy); ok {
 		for _, p := range []*pool.Pool{wbPool, trPool, qdPool, wbaPool, qwPool, qcnPool,
-			qcmPool, glmPool, mcPool, rcPool, lmPool, klPool, zcPool, lobPool, gemPool, oaPool, caPool} {
+			qcmPool, glmPool, mcPool, rcPool, lmPool, klPool, zcPool, lobPool, gemPool, oaPool, caPool, lxPool} {
 			p.SetStrategy(st)
 		}
 		log.Printf("账号挑选策略：%s", st.Label())
@@ -443,6 +453,10 @@ func main() {
 	caUp := codearts.New()
 	caUp.HTTP.Timeout = time.Duration(cfg.Upstream.TimeoutSeconds) * time.Second
 	caUp.StreamHTTP.Transport = caUp.HTTP.Transport
+	// WPS 灵犀：wps_sid Cookie；SSE 流式走 StreamHTTP（R35），两者共用 Transport。
+	lxUp := lingxi.New()
+	lxUp.HTTP.Timeout = time.Duration(cfg.Upstream.TimeoutSeconds) * time.Second
+	lxUp.StreamHTTP.Transport = lxUp.HTTP.Transport
 	clUp.HTTP.Timeout = time.Duration(cfg.Upstream.TimeoutSeconds) * time.Second
 	glmUp := glm.New()
 	// ⚠️ 只改 HTTP（非流式）的 Timeout。
@@ -476,6 +490,7 @@ func main() {
 		provider.Gemini.String():      {gemUp.HTTP, gemUp.StreamHTTP},
 		provider.OfficeAce.String():   {oaUp.HTTP, oaUp.StreamHTTP},
 		provider.CodeArts.String():    {caUp.HTTP, caUp.StreamHTTP},
+		provider.Lingxi.String():      {lxUp.HTTP, lxUp.StreamHTTP},
 		// glm 两个 client 都要传（SetTransportProxy 会**新建** Transport，
 		// 只套 HTTP 会让 StreamHTTP 仍走直连（代理对流式不生效）。
 		provider.GLM.String(): {glmUp.HTTP, glmUp.StreamHTTP},
@@ -600,6 +615,10 @@ func main() {
 	caSch := scheduler.New(scheduler.Config{Pool: caPool, Upstream: caUp, Name: "codearts",
 		CheckinMinutes: checkinMinutes, KeepaliveHours: cfg.Schedule.KeepaliveHours,
 		ExpiringThreshold: expiringThreshold, Ledger: lg, FollowGlobalCheckin: true})
+	// WPS 灵犀：**有真签到**（daily_check_in）+ Cookie 无过期但保活可刷余额 ⇒ 跟随全局签到时刻（R94）。
+	lxSch := scheduler.New(scheduler.Config{Pool: lxPool, Upstream: lxUp, Name: "lingxi",
+		CheckinMinutes: checkinMinutes, KeepaliveHours: cfg.Schedule.KeepaliveHours,
+		ExpiringThreshold: expiringThreshold, Ledger: lg, FollowGlobalCheckin: true})
 	glmSch := scheduler.New(scheduler.Config{Pool: glmPool, Upstream: glmUp, Name: "glm",
 		CheckinMinutes: checkinMinutes, KeepaliveHours: cfg.Schedule.KeepaliveHours,
 		ExpiringThreshold: expiringThreshold, Ledger: lg, FollowGlobalCheckin: true})
@@ -637,6 +656,8 @@ func main() {
 			StaticModels: officeace.StaticModels()},
 		provider.CodeArts: {Kind: provider.CodeArts, Pool: caPool, Upstream: caUp,
 			StaticModels: codearts.StaticModels()},
+		provider.Lingxi: {Kind: provider.Lingxi, Pool: lxPool, Upstream: lxUp,
+			StaticModels: lingxi.StaticModels()},
 		provider.GLM: {Kind: provider.GLM, Pool: glmPool, Upstream: glmUp, StaticModels: glm.StaticModels()},
 		// 注意：GLM **不**置 SingleAccount。
 		//
@@ -674,6 +695,7 @@ func main() {
 		provider.Gemini:    {Kind: provider.Gemini, Pool: gemPool, Upstream: gemUp, Scheduler: gemSch},
 		provider.OfficeAce: {Kind: provider.OfficeAce, Pool: oaPool, Upstream: oaUp, Scheduler: oaSch},
 		provider.CodeArts:  {Kind: provider.CodeArts, Pool: caPool, Upstream: caUp, Scheduler: caSch},
+		provider.Lingxi:    {Kind: provider.Lingxi, Pool: lxPool, Upstream: lxUp, Scheduler: lxSch},
 		provider.GLM:       {Kind: provider.GLM, Pool: glmPool, Upstream: glmUp, Scheduler: glmSch},
 	}
 
@@ -776,6 +798,7 @@ func main() {
 			provider.Gemini.String():    {gemUp.HTTP, gemUp.StreamHTTP},
 			provider.OfficeAce.String(): {oaUp.HTTP, oaUp.StreamHTTP},
 			provider.CodeArts.String():  {caUp.HTTP, caUp.StreamHTTP},
+			provider.Lingxi.String():    {lxUp.HTTP, lxUp.StreamHTTP},
 		})
 	})
 	compat.SetAPIKeySource(inner.CurrentAPIKey) // 面板改 API-Key 后，兼容层立即跟随
@@ -844,6 +867,8 @@ func main() {
 	go oaSch.Run(sctx)
 	// CodeArts 有签到 + token 保活，Run 不可漏（R34）。
 	go caSch.Run(sctx)
+	// WPS 灵犀有签到 + 保活，Run 不可漏（R34）。
+	go lxSch.Run(sctx)
 	// ⚠️ 新增渠道时必须在这里补 Run()。
 	// 漏了**不会报错**——只表现为「该渠道的自动签到/保活从不运行」，
 	// 而手工触发（面板按钮 / RunCheckinNow）仍然可用，极难发现。
@@ -866,6 +891,8 @@ func main() {
 		provider.Cline,
 		// LobsterAI 有 profile-summary 额度端点，不纳入就永远显示 0。
 		provider.LobsterAI,
+		// WPS 灵犀有 credits/balance 余额端点，不纳入就永远显示 0。
+		provider.Lingxi,
 	}, app.CreditRefreshInterval)
 
 	// 启动即刷新「模型列表 + 费率」，之后每 30 分钟。

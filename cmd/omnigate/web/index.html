@@ -79,6 +79,7 @@
           <button class="btn primary alt lobsterai" id="btnAddLobsterAI" style="grid-column:2;grid-row:4" title="有道龙虾网页登录：起本机回调口（portal 只认 127.0.0.1/auth/callback）">＋ LobsterAI</button>
           <button class="btn primary alt gemini" id="btnAddGemini" style="grid-column:3;grid-row:4" title="Google Code Assist（Gemini）：本机 loopback OAuth 登录，凭据可自动续期">＋ Gemini</button>
           <button class="btn primary alt codearts" id="btnAddCodeArts" style="grid-column:4;grid-row:4" title="华为云 CodeArts Agent：本机回调 + PKCE + DPoP 换取临时 AK/SK；凭据可静默续期，每日有签到活动">＋ CodeArts</button>
+          <button class="btn primary alt lingxi" id="btnAddLingxi" style="grid-column:5;grid-row:4" title="WPS 灵犀：CDP 自动登录或粘贴 wps_sid Cookie；每日可在任务中心签到领取智点数">＋ WPS灵犀</button>
         </div>
       </div>
     </div>
@@ -308,6 +309,34 @@
     </div>
     <div class="modal-actions">
       <button class="btn small" id="btnClineCancel">关闭</button>
+    </div>
+  </div>
+</div>
+
+<!-- WPS 灵犀添加账号弹层（CDP 自动登录 + 粘贴 wps_sid Cookie 两条路） -->
+<div class="overlay hidden" id="lingxiOverlay">
+  <div class="modal">
+    <div class="modal-title">添加 WPS 灵犀账号</div>
+    <div class="modal-body settings-body">
+      <div class="hint">WPS 灵犀（lingxi.kdocs.cn）提供两条添加路径：</div>
+      <ol class="glm-steps">
+        <li><b>自动登录（推荐）</b>：点击后在独立浏览器窗口打开 WPS 登录页，登录后工具自动捕获 <code>wps_sid</code>。</li>
+        <li><b>手动粘贴</b>：从已登录的 WPS 灵犀网页 Cookie 中复制 <code>wps_sid</code> 值粘贴到下方。</li>
+      </ol>
+      <div class="hint" style="margin-top:6px">
+        <button class="btn small primary" id="btnLingxiAuto">打开浏览器自动登录</button>
+      </div>
+      <div class="hint" style="margin-top:10px">或粘贴 Cookie：</div>
+      <input id="lingxiSidInput" class="input grow" spellcheck="false"
+             placeholder="粘贴 wps_sid Cookie 值" autocomplete="off">
+      <div class="hint" style="margin-top:6px">
+        <button class="btn small primary" id="btnLingxiSubmit">验证并添加</button>
+      </div>
+      <div class="hint">灵犀签到在任务中心 <code>daily_check_in</code>，本工具每日自动领取；凭据不轮换，无需保活刷新。</div>
+      <div class="hint" id="lingxiErr" style="color:var(--danger)"></div>
+    </div>
+    <div class="modal-actions">
+      <button class="btn small" id="btnLingxiCancel">关闭</button>
     </div>
   </div>
 </div>

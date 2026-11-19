@@ -560,6 +560,9 @@ func LoadGeminiDir(dir string) ([]*Auth, error) { return loadPrefixed(dir, "gemi
 // 续完写回同一文件（故必须保留 FilePath）。
 func LoadOfficeAceDir(dir string) ([]*Auth, error) { return loadPrefixed(dir, "officeace") }
 
+// LoadLingxiDir 加载 WPS 灵犀账号（wps_sid Cookie，凭据文件前缀 lingxi-）。
+func LoadLingxiDir(dir string) ([]*Auth, error) { return loadPrefixed(dir, "lingxi") }
+
 // LoadCodeArtsDir 扫描华为云 CodeArts 凭证（codearts-*.json）。
 //
 // 凭证为 STS 临时 AK/SK 三件套（全部在 Extra）：

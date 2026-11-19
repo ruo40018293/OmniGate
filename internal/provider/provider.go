@@ -80,6 +80,12 @@ const (
 	// domain_id / user_id / project_id / region 全在 Extra。签名用 AK/SK + DPoP。
 	// **有签到**：benefit（免费额度）模型目录 + 每日额度领取，见 credits.go。
 	CodeArts Kind = "codearts"
+
+	// Lingxi WPS 灵犀网页版（lingxi.kdocs.cn）：凭据是 www.wps.cn 下的 wps_sid
+	// Cookie（Bearer 无效），由 CDP 自动登录或面板粘贴写入。UID 用 lxsid-<sha256 前16位>，
+	// 区别于 comate 的 sid-<hash> 防串号。三专用头 X-Cc-Version/Client-Type/Entrance。
+	// **有真签到**：POST /api/public/v1/tasks/daily_check_in/claim?date=YYYY-MM-DD。
+	Lingxi Kind = "lingxi"
 )
 
 func (k Kind) String() string { return string(k) }
